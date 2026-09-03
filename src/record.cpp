@@ -382,11 +382,26 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   QObject::connect(&indicator, &RecordIndicator::pauseRequested, &session,
                    [&](bool paused) { session.setPaused(paused); });
   const auto requestStop = [&] {
-    if (session.state() != RecordSession::State::Recording &&
-        session.state() != RecordSession::State::Paused)
+    switch (session.state()) {
+    case RecordSession::State::Recording:
+    case RecordSession::State::Paused:
+      indicator.setPhase(RecordIndicator::Phase::Stopping);
+      session.stop();
       return;
-    indicator.setPhase(RecordIndicator::Phase::Stopping);
-    session.stop();
+    case RecordSession::State::Idle:
+    case RecordSession::State::Starting:
+      // Nothing has been recorded yet, so there is nothing to save. Leave
+      // rather than sit on "Starting…": the encoder's parent-death signal
+      // takes the child with us.
+      finish(1);
+      return;
+    case RecordSession::State::Stopping:
+    case RecordSession::State::Done:
+    case RecordSession::State::Failed:
+      // Already finishing. A second signal quits regardless, so a stop that
+      // hangs still cannot trap the process.
+      return;
+    }
   };
   QObject::connect(&indicator, &RecordIndicator::stopRequested, &session,
                    requestStop);

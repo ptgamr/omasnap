@@ -15,6 +15,25 @@ From `CMakeLists.txt`, this is the entire list:
 | **wayland-client** (pkg-config) | Raw protocol client code (`ext-image-copy-capture`, `zwlr_virtual_pointer_v1`) that LayerShellQt/QtWayland don't expose |
 | **wayland-scanner** + protocol XML | Generates the C bindings for the above at build time; not a runtime dependency |
 
+`omasnap-studio` adds **Qt6 Multimedia** and **Qt6 MultimediaWidgets**, and
+nothing else does. That separation is the whole reason the Studio is its own
+executable: video review needs a media stack, and the screenshot binary must
+not load one. It is also why the Studio does not link `omasnap-core` — that
+library carries capture, the editor, Wayland protocols and the process-wide
+layer-shell setting, none of which belong in a video window. Check both link
+maps before adding a library:
+
+```bash
+ldd build/omasnap        | grep -i multimedia   # must be empty
+ldd build/omasnap-studio | grep -i layershell   # must be empty
+```
+
+The recorder deliberately does **not** use QLocalSocket for
+gpu-screen-recorder's control socket, which would make Qt Network a shared
+library `omasnap` loads at startup for a channel only the recorder ever
+opens. It speaks raw AF_UNIX through `QSocketNotifier` instead
+(`src/record-session.cpp`).
+
 That's it. No JSON library (Qt's `QJsonDocument` handles `hyprctl -j`
 output), no image codec beyond what Qt's own PNG support provides, no HTTP,
 no logging framework, no CLI-parsing library beyond `QCommandLineParser`,
@@ -36,7 +55,9 @@ no user-visible benefit.
 | `hyprctl` | Monitor/window discovery (`-j` JSON), natural-scroll policy query | Yes — see [platform-scope.md](platform-scope.md) |
 | `wl-copy` / `wl-paste` | Writing PNG/text to the Wayland clipboard, and verifying the write | Yes |
 | `tesseract` | OCR text recognition | Only if OCR is used; missing tesseract fails just that action |
-| `omarchy-notification-send` | Capture-finished notifications | No — falls back silently if absent (checked with `command -v` semantics via failed `QProcess::startDetached`) |
+| `omarchy-notification-send` | Capture- and recording-finished notifications | No — falls back silently if absent (checked with `command -v` semantics via failed `QProcess::startDetached`) |
+| `gpu-screen-recorder` | The encoder behind `--record`, owned as one exact child with a private control socket | Only for recording; absent gives one actionable message and no recording |
+| `ffmpeg` | Remuxing the Matroska master to MP4 after a recording, and the Studio's trim export | No for recording (the `.mkv` is kept as-is); yes for a Studio export |
 
 Each of these is invoked through the same small `runProcess`/
 `QProcess::startDetached` helpers in `src/capture.cpp`, from a background
