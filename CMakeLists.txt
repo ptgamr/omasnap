@@ -6,6 +6,9 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(PkgConfig REQUIRED)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Concurrent Core Gui Test Widgets)
+# Studio only. Kept out of omasnap-core on purpose: the screenshot binary
+# must not gain a media stack, and omasnap-studio must not gain layer-shell.
+find_package(Qt6 6.8 REQUIRED COMPONENTS Multimedia MultimediaWidgets)
 find_package(LayerShellQt REQUIRED)
 pkg_check_modules(WaylandClient REQUIRED IMPORTED_TARGET wayland-client)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
@@ -194,7 +197,53 @@ target_link_libraries(omasnap-smoke PRIVATE omasnap-core Qt6::Test)
 target_precompile_headers(omasnap-smoke REUSE_FROM omasnap-core)
 add_test(NAME omasnap-smoke COMMAND omasnap-smoke "${CMAKE_CURRENT_BINARY_DIR}/omasnap-smoke-output")
 set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Its own binary for the same reason the Studio is its own binary: the
+# screenshot smoke suite must not link a media stack to test a video window.
+qt_add_executable(omasnap-studio-smoke
+  tests/studio-smoke.cpp
+  src/studio.cpp
+  src/studio.hpp
+  src/overlay-chrome.cpp
+  src/overlay-chrome.hpp
+)
+target_include_directories(omasnap-studio-smoke PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_features(omasnap-studio-smoke PRIVATE cxx_std_23)
+target_compile_options(omasnap-studio-smoke PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(omasnap-studio-smoke PRIVATE
+  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test
+  Qt6::Multimedia Qt6::MultimediaWidgets
+)
+add_test(NAME omasnap-studio-smoke COMMAND omasnap-studio-smoke)
+set_tests_properties(omasnap-studio-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
+
+# A normal xdg_toplevel application, built from its own small set of sources
+# rather than linking omasnap-core: that library carries capture, the editor,
+# Wayland protocols, and the process-wide layer-shell assumption, none of
+# which belong in a video window.
+qt_add_executable(omasnap-studio
+  src/studio-main.cpp
+  src/studio.cpp
+  src/studio.hpp
+  src/overlay-chrome.cpp
+  src/overlay-chrome.hpp
+)
+target_include_directories(omasnap-studio PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_features(omasnap-studio PRIVATE cxx_std_23)
+target_compile_options(omasnap-studio PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(omasnap-studio PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
+target_link_libraries(omasnap-studio PRIVATE
+  Qt6::Core
+  Qt6::Gui
+  Qt6::Widgets
+  Qt6::Multimedia
+  Qt6::MultimediaWidgets
+)
 
 qt_add_executable(stitch-replay
   src/stitch-replay.cpp
@@ -208,7 +257,7 @@ target_compile_features(stitch-replay PRIVATE cxx_std_23)
 target_compile_options(stitch-replay PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(stitch-replay PRIVATE Qt6::Core Qt6::Gui)
 
-install(TARGETS omasnap
+install(TARGETS omasnap omasnap-studio
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 install(FILES assets/OFL.txt
@@ -218,6 +267,6 @@ install(FILES assets/OFL.txt
 install(FILES assets/JetBrainsMono-OFL.txt assets/Inter-OFL.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omasnap"
 )
-install(FILES omasnap.desktop
+install(FILES omasnap.desktop omasnap-studio.desktop
   DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
 )

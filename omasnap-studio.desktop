@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Omasnap Studio
+Comment=Review and trim a screen recording
+Exec=omasnap-studio %f
+Icon=camera-video
+Terminal=false
+NoDisplay=true
+MimeType=video/x-matroska;video/mp4;
+Categories=AudioVideo;Video;
+StartupNotify=false
