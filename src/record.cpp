@@ -527,12 +527,10 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                               QStringLiteral("+faststart"), mp4});
       });
 
-  if (showIndicator(indicator, target.output) == nullptr) {
-    qCritical() << "Could not create the recording indicator layer";
-    return 1;
-  }
   // start() reports a synchronous failure through `error`; letting it also
-  // emit failed would notify twice about the same thing.
+  // emit failed would notify twice about the same thing. It also blocks
+  // briefly waiting for the child to start, which is why it runs before the
+  // indicator exists rather than freezing it.
   bool started = false;
   {
     const QSignalBlocker quiet(&session);
@@ -541,6 +539,10 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   if (!started) {
     qCritical().noquote() << error;
     notifyRecording(QStringLiteral("Recording failed: %1").arg(error), {});
+    return 1;
+  }
+  if (showIndicator(indicator, target.output) == nullptr) {
+    qCritical() << "Could not create the recording indicator layer";
     return 1;
   }
 

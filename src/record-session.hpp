@@ -89,10 +89,15 @@ signals:
 
 private:
   void pollForReadiness();
+  void probeReadiness();
   void sendCommand(const QString &name, const QJsonValue &data,
                    std::function<void(bool ok, const QString &payload)> reply);
+  /// Ends the encoder if it is still running `milliseconds` from now and the
+  /// session is still stopping. Never blocks the GUI thread waiting for it.
+  void armExitWatchdog(int milliseconds);
+  void endChildProcess();
   void fail(const QString &message);
-  void handleProcessFinished(int exitCode);
+  void handleProcessFinished(int exitCode, int exitStatus);
 
   RecordConfig config_;
   QProcess *process_ = nullptr;
@@ -102,6 +107,7 @@ private:
   qint64 pauseStartedMs_ = 0;
   int nextRequestId_ = 1;
   int readyAttempts_ = 0;
+  bool probeInFlight_ = false;
   State state_ = State::Idle;
   QString savedPath_;
   QString stderrTail_;

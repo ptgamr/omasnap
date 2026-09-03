@@ -34,15 +34,21 @@ PosixSignalNotifier::PosixSignalNotifier(QObject *parent) : QObject(parent) {
 
   notifier_ = new QSocketNotifier(fds_[1], QSocketNotifier::Read, this);
   connect(notifier_, &QSocketNotifier::activated, this, [this] {
+    // Count them: two signals can queue before the GUI thread gets here, and
+    // draining both while acting on one would swallow the second-signal
+    // forced quit.
     char bytes[32];
-    while (::read(fds_[1], bytes, sizeof(bytes)) > 0) {
-    }
+    int pending = 0;
+    for (ssize_t got = ::read(fds_[1], bytes, sizeof(bytes)); got > 0;
+         got = ::read(fds_[1], bytes, sizeof(bytes)))
+      pending += static_cast<int>(got);
     if (!signalled_ && firstSignalHandler_) {
       // Stays armed: a second signal still quits, so a handler that hangs
       // cannot make the process unkillable by anything short of SIGKILL.
       signalled_ = true;
       firstSignalHandler_();
-      return;
+      if (pending < 2)
+        return;
     }
     notifier_->setEnabled(false);
     QCoreApplication::quit();

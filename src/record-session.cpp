@@ -32,6 +32,8 @@ constexpr int kCommandTimeoutMs = 5000;
 /// Long enough not to race a slow unmount, short enough that the indicator
 /// does not sit on "Saving…" forever.
 constexpr int kExitWatchdogMs = 10000;
+/// Between asking the encoder to terminate and killing it outright.
+constexpr int kTerminateGraceMs = 2000;
 /// Enough context to name a failure; not a log of the whole session.
 constexpr qsizetype kDiagnosticTailBytes = 2048;
 
@@ -96,22 +98,40 @@ private:
   void send() {
     if (answered_)
       return;
-    writeNotifier_->setEnabled(false);
-    int socketError = 0;
-    socklen_t length = sizeof(socketError);
-    if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &socketError, &length) != 0 ||
-        socketError != 0) {
-      answer(false, QString::fromLocal8Bit(std::strerror(
-                        socketError != 0 ? socketError : errno)));
-      return;
+    if (!connected_) {
+      int socketError = 0;
+      socklen_t length = sizeof(socketError);
+      if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &socketError, &length) != 0 ||
+          socketError != 0) {
+        writeNotifier_->setEnabled(false);
+        answer(false, QString::fromLocal8Bit(std::strerror(
+                          socketError != 0 ? socketError : errno)));
+        return;
+      }
+      connected_ = true;
     }
-    // Requests are one short line; a partial write would mean the encoder is
-    // not reading at all, which the timeout already covers.
-    if (::send(fd_, request_.constData(), static_cast<size_t>(request_.size()),
-               MSG_NOSIGNAL) != request_.size()) {
+    // Short writes are legal on a nonblocking stream socket, so keep an
+    // offset and come back when it is writable again rather than calling a
+    // partly sent request a failure.
+    while (sent_ < request_.size()) {
+      const ssize_t wrote =
+          ::send(fd_, request_.constData() + sent_,
+                 static_cast<size_t>(request_.size() - sent_), MSG_NOSIGNAL);
+      if (wrote > 0) {
+        sent_ += wrote;
+        continue;
+      }
+      if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        return; // Still armed; the notifier calls back.
+      if (wrote < 0 && errno == EINTR)
+        continue;
+      writeNotifier_->setEnabled(false);
       answer(false, QStringLiteral("could not send the request"));
       return;
     }
+    writeNotifier_->setEnabled(false);
+    if (readNotifier_)
+      return;
     readNotifier_ = new QSocketNotifier(fd_, QSocketNotifier::Read, this);
     connect(readNotifier_, &QSocketNotifier::activated, this,
             &GsrRequest::receive);
@@ -177,8 +197,10 @@ private:
   Reply reply_;
   QSocketNotifier *writeNotifier_ = nullptr;
   QSocketNotifier *readNotifier_ = nullptr;
+  qsizetype sent_ = 0;
   int id_ = 0;
   int fd_ = -1;
+  bool connected_ = false;
   bool answered_ = false;
 };
 
@@ -265,11 +287,24 @@ bool RecordSession::start(QString &error) {
   process_->setProgram(executable);
   process_->setArguments(arguments);
   process_->setProcessChannelMode(QProcess::MergedChannels);
-  process_->setChildProcessModifier([] {
+  // Evaluated here, in the parent, so the child can tell whether it was
+  // reparented before it got as far as asking for a death signal.
+  const pid_t parentPid = ::getpid();
+  process_->setChildProcessModifier([parentPid] {
+    // Until exec() the child still carries this process's SIGINT/SIGTERM
+    // handlers, and those write to a socket instead of terminating -- they
+    // would swallow the parent-death signal below.
+    ::signal(SIGINT, SIG_DFL);
+    ::signal(SIGTERM, SIG_DFL);
     // If this process dies, the encoder is asked to stop rather than
     // carrying on invisibly with nothing showing that the screen is being
     // recorded.
     ::prctl(PR_SET_PDEATHSIG, SIGINT);
+    // The parent can have died between fork() and that line, in which case
+    // no death signal will ever be generated: this child is already an
+    // orphan and must not go on to exec an encoder nobody owns.
+    if (::getppid() != parentPid)
+      ::_exit(1);
   });
   connect(process_, &QProcess::readyReadStandardOutput, this, [this] {
     stderrTail_.append(QString::fromUtf8(process_->readAllStandardOutput()));
@@ -282,7 +317,9 @@ bool RecordSession::start(QString &error) {
               fail(QStringLiteral("Could not start gpu-screen-recorder"));
           });
   connect(process_, &QProcess::finished, this,
-          [this](int exitCode) { handleProcessFinished(exitCode); });
+          [this](int exitCode, QProcess::ExitStatus status) {
+            handleProcessFinished(exitCode, static_cast<int>(status));
+          });
 
   state_ = State::Starting;
   process_->start();
@@ -305,19 +342,33 @@ void RecordSession::pollForReadiness() {
     readyTimer_->stop();
     return;
   }
-  // GSR creates its IPC socket as it starts up, so the socket appearing is
-  // both "the encoder is alive" and "there is a channel to stop it with".
-  if (QFile::exists(config_.ipcSocketPath)) {
-    readyTimer_->stop();
-    state_ = State::Recording;
-    clock_.start();
-    emit recording();
+  // The socket appearing only means a file exists. Ready means the encoder
+  // answers on it, so the socket is a cue to ask rather than the answer.
+  if (!probeInFlight_ && QFile::exists(config_.ipcSocketPath))
+    probeReadiness();
+  if (++readyAttempts_ < kReadyAttempts)
     return;
-  }
-  if (++readyAttempts_ >= kReadyAttempts) {
-    readyTimer_->stop();
-    fail(QStringLiteral("gpu-screen-recorder did not start recording"));
-  }
+  readyTimer_->stop();
+  // Do not leave a child recording behind a session that has given up on it.
+  endChildProcess();
+  fail(QStringLiteral("gpu-screen-recorder did not start recording"));
+}
+
+void RecordSession::probeReadiness() {
+  probeInFlight_ = true;
+  // set-paused false is the one request that is both harmless and
+  // idempotent: it asks the encoder to be exactly what it already is, and
+  // an `ok` proves it is listening rather than merely having made a file.
+  sendCommand(QStringLiteral("set-paused"), QJsonValue(false),
+              [this](bool ok, const QString &) {
+                probeInFlight_ = false;
+                if (!ok || state_ != State::Starting)
+                  return; // Keep polling; the readiness budget still applies.
+                readyTimer_->stop();
+                state_ = State::Recording;
+                clock_.start();
+                emit recording();
+              });
 }
 
 void RecordSession::sendCommand(
@@ -362,23 +413,45 @@ void RecordSession::setPaused(bool paused) {
               });
 }
 
+void RecordSession::armExitWatchdog(int milliseconds) {
+  QTimer::singleShot(milliseconds, this, [this] {
+    if (state_ != State::Stopping || !process_ ||
+        process_->state() == QProcess::NotRunning)
+      return;
+    process_->terminate();
+    // A timer rather than waitForFinished(): the indicator is on screen and
+    // has to keep painting while this happens.
+    QTimer::singleShot(kTerminateGraceMs, this, [this] {
+      if (process_ && process_->state() != QProcess::NotRunning)
+        process_->kill();
+    });
+  });
+}
+
+void RecordSession::endChildProcess() {
+  if (!process_ || process_->state() == QProcess::NotRunning)
+    return;
+  ::kill(static_cast<pid_t>(process_->processId()), SIGINT);
+  QTimer::singleShot(kTerminateGraceMs, this, [this] {
+    if (process_ && process_->state() != QProcess::NotRunning)
+      process_->kill();
+  });
+}
+
 void RecordSession::stop() {
   if (state_ != State::Recording && state_ != State::Paused)
     return;
   state_ = State::Stopping;
+  // Armed now, not on the reply: a stop request that times out, is refused,
+  // or loses its socket has to end somewhere too, or the indicator sits on
+  // "Saving…" for good.
+  armExitWatchdog(kStopTimeoutMs + kExitWatchdogMs);
   sendCommand(QStringLiteral("stop"), {}, [this](bool ok, const QString &path) {
     if (ok && !path.isEmpty()) {
       savedPath_ = path;
-      // The encoder exits next and handleProcessFinished reports. If it does
-      // not, end it rather than leaving the indicator saving forever.
-      QTimer::singleShot(kExitWatchdogMs, this, [this] {
-        if (state_ != State::Stopping || !process_ ||
-            process_->state() == QProcess::NotRunning)
-          return;
-        process_->terminate();
-        if (!process_->waitForFinished(2000))
-          process_->kill();
-      });
+      // The encoder exits next and handleProcessFinished reports. If it says
+      // it saved and then does not leave, stop waiting for it.
+      armExitWatchdog(kExitWatchdogMs);
       return;
     }
     // The socket went away or refused. The child is still ours by pid, and
@@ -386,24 +459,31 @@ void RecordSession::stop() {
     if (process_ && process_->state() != QProcess::NotRunning)
       ::kill(static_cast<pid_t>(process_->processId()), SIGINT);
     else
-      handleProcessFinished(0);
+      handleProcessFinished(0, static_cast<int>(QProcess::NormalExit));
   });
 }
 
-void RecordSession::handleProcessFinished(int exitCode) {
+void RecordSession::handleProcessFinished(int exitCode, int exitStatus) {
   if (state_ == State::Done || state_ == State::Failed)
     return;
+  const bool clean =
+      exitStatus == static_cast<int>(QProcess::NormalExit) && exitCode == 0;
   if (state_ != State::Stopping) {
-    fail(exitCode == 0
-             ? QStringLiteral("gpu-screen-recorder stopped unexpectedly")
-             : QStringLiteral("gpu-screen-recorder exited with code %1")
-                   .arg(exitCode));
+    fail(clean ? QStringLiteral("gpu-screen-recorder stopped unexpectedly")
+               : QStringLiteral("gpu-screen-recorder exited with code %1")
+                     .arg(exitCode));
+    return;
+  }
+  if (!clean) {
+    // Crashing during the stop is still a crash. Calling it Done would send
+    // a partly written file down the path that presents it as saved.
+    fail(QStringLiteral("gpu-screen-recorder did not finish saving (exit "
+                        "code %1)")
+             .arg(exitCode));
     return;
   }
   state_ = State::Done;
-  // GSR reports the path it wrote; fall back to the one we asked for, which
-  // is the same file whenever it stopped on a signal instead of a reply.
-  emit finished(savedPath_.isEmpty() ? config_.outputPath : savedPath_);
+  emit finished(config_.outputPath);
 }
 
 void RecordSession::fail(const QString &message) {
