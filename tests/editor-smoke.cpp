@@ -7479,6 +7479,9 @@ int main(int argc, char **argv) {
       qEnvironmentVariable(kInstanceLockHolderVariable);
   if (!heldLockPath.isEmpty())
     return runInstanceLockHolder(heldLockPath);
+  // Re-executed by the recorder checks as the encoder the session owns.
+  if (qEnvironmentVariableIsSet(kFakeRecorderVariable))
+    return runFakeRecorder(argc, argv);
 
   QApplication application(argc, argv);
   QApplication::setFont(chromeDefaultFont()); // as main() does
@@ -9010,6 +9013,13 @@ int main(int argc, char **argv) {
   if (!runRecordIndicatorSmoke(recordIndicatorError)) {
     qWarning().noquote() << "record indicator smoke failed:"
                          << recordIndicatorError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordLifecycleError;
+  if (!runRecordSessionLifecycleSmoke(recordLifecycleError)) {
+    qWarning().noquote() << "record session lifecycle smoke failed:"
+                         << recordLifecycleError;
     return EXIT_FAILURE;
   }
 
