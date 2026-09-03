@@ -13,7 +13,8 @@ fi
 omarchy-pkg-add \
   base-devel cmake ninja pkgconf qt6-base layer-shell-qt \
   wayland wayland-protocols wl-clipboard \
-  tesseract tesseract-data-eng
+  tesseract tesseract-data-eng \
+  qt6-multimedia gpu-screen-recorder ffmpeg
 
 cmake -S "$repo_dir" -B "$build_dir" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -22,3 +23,18 @@ cmake --build "$build_dir" --parallel
 cmake --install "$build_dir"
 
 "$prefix/bin/omasnap" --version
+"$prefix/bin/omasnap-studio" --version
+
+cat <<'NOTE'
+
+To keep the recording indicator out of your recordings, add this layer rule to
+your own Hyprland Lua config (this installer does not edit it for you):
+
+  hl.layer_rule({
+    match = { namespace = "^omasnap-record$" },
+    no_anim = true,
+    animation = "none",
+    no_screen_share = true,
+  })
+
+NOTE

@@ -69,6 +69,8 @@ Runtime commands used by the application:
 - `tesseract`
 - `omarchy-notification-send` when available; saved captures include a thumbnail and
   reopen in Omasnap when clicked. Notification failure does not invalidate output.
+- `gpu-screen-recorder` and `ffmpeg`, for `--record` only. Neither is needed to take a
+  screenshot, and neither is linked into the `omasnap` binary.
 
 ## Install on Omarchy
 
@@ -103,9 +105,25 @@ hl.layer_rule({
   animation = "none",
   no_screen_share = true,
 })
+
+-- The recording indicator is a separate namespace, so that a screen
+-- recording does not film its own stop button.
+hl.layer_rule({
+  match = { namespace = "^omasnap-record$" },
+  no_anim = true,
+  animation = "none",
+  no_screen_share = true,
+})
 ```
 
 Each of these keys toggles: the first press opens the overlay, the next press dismisses it.
+
+Bind recording the same way if you want it on a key:
+
+```lua
+o.bind("SUPER + SHIFT + R", "Record region", "omasnap region --record")
+o.bind("SUPER + SHIFT + S", "Stop recording", "omasnap --record --stop")
+```
 
 Apply and verify:
 
@@ -130,8 +148,13 @@ Install the complete build/runtime dependency set:
 sudo pacman -S --needed \
   base-devel cmake ninja pkgconf qt6-base layer-shell-qt \
   wayland wayland-protocols hyprland wl-clipboard \
-  tesseract tesseract-data-eng
+  tesseract tesseract-data-eng \
+  qt6-multimedia gpu-screen-recorder ffmpeg
 ```
+
+The last line is the recording half: `qt6-multimedia` builds `omasnap-studio`, and
+`gpu-screen-recorder` and `ffmpeg` are run as subprocesses when you record. Leave it
+out and screenshots build and work exactly as before.
 
 Build and install:
 
@@ -146,7 +169,9 @@ cmake --install build
 The install step places:
 
 - `~/.local/bin/omasnap`
+- `~/.local/bin/omasnap-studio`
 - `~/.local/share/applications/omasnap.desktop`
+- `~/.local/share/applications/omasnap-studio.desktop`
 - `~/.local/share/licenses/omasnap/Neucha-OFL.txt`
 - `~/.local/share/licenses/omasnap/JetBrainsMono-OFL.txt`
 - `~/.local/share/licenses/omasnap/Inter-OFL.txt`
@@ -202,6 +227,49 @@ Quick output skips the annotation editor. Add `--copy` to copy only, `--save` to
 only, or both flags to copy and save. Region and window captures output after selection;
 fullscreen captures output immediately. Quick output cannot be combined with `--file`,
 `--clipboard`, or `--pin`.
+
+## Recording
+
+Add `--record` to any capture mode to record that target as video instead of
+screenshotting it:
+
+```bash
+omasnap region --record       # drag the area to record
+omasnap windows --record      # pick a window; records the screen rectangle it occupies
+omasnap fullscreen --record   # the focused display, no selector at all
+```
+
+Sound is off unless you ask for it. `--audio` adds desktop sound, `--mic` adds the
+microphone, and `--fps` sets the frame rate (default 60):
+
+```bash
+omasnap region --record --audio --mic --fps 30
+```
+
+While recording, a small pill sits under the top bar on the recorded display showing
+the elapsed time, with pause and stop buttons. That indicator is the point: nothing
+records without something on screen saying so. Stop it from the pill, or from a key:
+
+```bash
+omasnap --record --stop
+```
+
+Logging out finishes the recording rather than abandoning it, and a recording
+interrupted harder than that is promoted to a playable file the next time you record.
+
+Recordings land in `~/Videos/Recordings` as
+`recording-<date>_<time>-<what>.mp4`, owner-readable only. The notification that
+follows opens the recording in **OmaSnap Studio**, where `Space` plays,
+`I` and `O` set the in and out points at the playhead, `R` clears the trim, and
+`Ctrl`+`E` exports the kept range beside the original.
+
+Recording and screenshots are independent: they use separate locks, so taking a
+screenshot during a recording does not stop it, and starting a recording while an
+annotation overlay is open reports that it is busy (exit 3) rather than throwing that
+overlay away.
+
+Requires `gpu-screen-recorder`. `ffmpeg` is optional: with it, the Matroska master is
+remuxed to MP4 by stream copy; without it, the `.mkv` is kept as-is.
 
 ### One instance, toggled by the same hotkey
 
@@ -443,7 +511,9 @@ replay, vector movement and scaling, text editing, OCR, native-DPI output,
 endpoint-only line selection, annotation-driven canvas growth and clipping policies,
 external crop handles,
 and the native-pixel
-measurement readout on a scaled monitor.
+measurement readout on a scaled monitor. A second offscreen binary,
+`omasnap-studio-smoke`, covers the Studio's export command and trim timeline without
+linking a media stack into the screenshot suite.
 
 For live launch profiling, the binary has an opt-in millisecond trace from `main()`
 through the first completed overlay paint:

@@ -56,8 +56,13 @@ change that touches the principle, not just this summary.
   instead of linking their equivalents in-process. Know this list before
   proposing an addition to it. See [docs/dependencies.md](docs/dependencies.md).
 - **Single small binary.** Everything (capture, editor, pin mode, scroll
-  capture) runs from the one `omasnap` executable. Every new dependency or
-  vendored asset is weight every install carries.
+  capture, and the recorder that owns a `gpu-screen-recorder` child) runs
+  from the one `omasnap` executable. Every new dependency or vendored asset
+  is weight every install carries. `omasnap-studio` is the one exception,
+  and it exists precisely to keep that rule: video review needs Qt
+  Multimedia, and the screenshot binary must not link it. Check the link
+  maps before adding a library — `omasnap` carries no multimedia and no Qt
+  Network; `omasnap-studio` carries no layer-shell.
 - **No backwards compatibility.** Break keybindings, CLI flags, file
   formats, or internals whenever it keeps the code simpler or the tool
   faster. Do not add compatibility shims, deprecation aliases, or migration
@@ -78,6 +83,7 @@ change that touches the principle, not just this summary.
 | Path | Purpose |
 |---|---|
 | `src/main.cpp` | CLI parsing, single-instance lock, mode dispatch |
+| `src/quit-signals.cpp/.hpp` | SIGINT/SIGTERM bridged onto the GUI thread; the first signal is overridable so the recorder can finish its file |
 | `src/instance-lock.cpp/.hpp` | Single-instance handover: cancel a running overlay, or stop it and take over for `--file` |
 | `src/capture.cpp/.hpp` | Capture, render pipeline, output (clipboard/save/notify), source+JSON operation-log persistence, config loading glue |
 | `src/editor.cpp/.hpp` | Annotation editor: tools, vector layers, operation-log undo/redo, the select↔edit phase machine, export |
@@ -91,11 +97,16 @@ change that touches the principle, not just this summary.
 | `src/recent-snaps.cpp/.hpp` | The recents shelf: shelving/reopening working documents |
 | `src/output-config.cpp/.hpp`, `src/palette-config.cpp/.hpp` | The optional `omasnap.conf` INI: output destination/filename, color presets |
 | `src/pin.cpp/.hpp`, `src/pin-file.cpp/.hpp`, `src/pin-layout.cpp/.hpp` | Pinned-capture layer-shell surfaces (bottom-right, all workspaces) |
+| `src/record-target.cpp/.hpp` | The versioned rectangle the selector hands the recorder, and the GSR source argument it becomes |
+| `src/record-session.cpp/.hpp` | One owned `gpu-screen-recorder` child and its private control socket |
+| `src/record-indicator.cpp/.hpp` | The pill under the top bar: elapsed time, pause, stop |
+| `src/record.cpp/.hpp` | The recorder process: lock, encoder, indicator, promotion, notification |
+| `src/studio.cpp/.hpp`, `src/studio-main.cpp` | `omasnap-studio`: playback, trim timeline, ffmpeg export. Built without `omasnap-core` on purpose |
 | `src/icons.cpp/.hpp` | Vector icon renderer for toolbar and pin controls |
 | `src/cli-path.cpp/.hpp` | Command-line image target resolution |
 | `src/eyedropper.cpp/.hpp` | Display-to-source color sampling |
 | `tests/*-smoke.cpp/.hpp` | Headless Qt Test coverage: offscreen region clicks, async capture, single-instance handover, stitching fixtures |
-| `docs/` | Longer writeups of the principles above — read before changing behavior they cover |
+| `docs/` | Longer writeups of the principles above — read before changing behavior they cover. `recording-studio-plan.md` is the video design; `recording-targets.md` is the measured GSR coordinate contract |
 | `install-omarchy` | Omarchy installer (deps via `omarchy-pkg-add`, installs to `~/.local`) |
 | `CMakeLists.txt` | Build definition; **the version lives here** (`project(omasnap VERSION ...)`) |
 
