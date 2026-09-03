@@ -19,6 +19,7 @@
 #include <QGuiApplication>
 #include <QLockFile>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QScreen>
 #include <QSignalBlocker>
 #include <QStandardPaths>
@@ -110,16 +111,43 @@ QString promoteMatroska(const QDir &directory, const QString &stem,
 }
 
 /**
+ * Whether `path` is a handoff this process wrote: a regular file directly
+ * inside the private handoff directory, named the way handOffToRecorder()
+ * names them. --record-run is hidden, not private -- it can be typed -- and
+ * the recorder removes what it reads.
+ */
+bool isHandoffFile(const QString &path) {
+  const QString directory = runtimeRecordDirectory();
+  if (directory.isEmpty())
+    return false;
+  const QFileInfo file(path);
+  if (!file.isFile() || file.isSymLink())
+    return false;
+  static const QRegularExpression name(
+      QStringLiteral("\\Atarget-[0-9a-f]{32}\\.json\\z"));
+  if (!name.match(file.fileName()).hasMatch())
+    return false;
+  const QString parent = QFileInfo(directory).canonicalFilePath();
+  return !parent.isEmpty() && file.canonicalPath() == parent;
+}
+
+/**
  * Whether `pid` is an omasnap right now. Read from /proc immediately before
  * signalling, because a lock file only records what the pid was when it was
  * written and the kernel reuses pids.
  */
-bool processIsOmasnap(qint64 pid) {
+bool processIsRecorder(qint64 pid) {
   QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
-  if (!comm.open(QIODevice::ReadOnly))
+  if (!comm.open(QIODevice::ReadOnly) ||
+      QString::fromLatin1(comm.readLine()).trimmed() !=
+          QCoreApplication::applicationName())
     return false;
-  return QString::fromLatin1(comm.readLine()).trimmed() ==
-         QCoreApplication::applicationName();
+  // An omasnap that is not a recorder is a screenshot overlay, and stopping
+  // a recording must never close one of those.
+  QFile cmdline(QStringLiteral("/proc/%1/cmdline").arg(pid));
+  if (!cmdline.open(QIODevice::ReadOnly))
+    return false;
+  return cmdline.read(4096).split('\0').contains("--record-run");
 }
 
 /** The Studio next to this executable, then one on PATH, else nothing. */
@@ -274,7 +302,7 @@ bool stopActiveRecording(QString &error) {
   // Pids are reused. Signalling one read out of a file, on the strength of
   // the file alone, is how a recorder's stop key ends up killing a stranger's
   // process; check what the pid actually is, immediately before signalling.
-  if (!processIsOmasnap(pid)) {
+  if (!processIsRecorder(pid)) {
     error = QStringLiteral("No recording is running");
     return false;
   }
@@ -292,6 +320,11 @@ bool stopActiveRecording(QString &error) {
 
 int runRecorder(const QString &targetPath, const RecordOptions &options,
                 PosixSignalNotifier *quitSignals) {
+  if (!isHandoffFile(targetPath)) {
+    qCritical() << "--record-run takes a recording handoff written by "
+                   "omasnap, not an arbitrary path";
+    return 2;
+  }
   QFile targetFile(targetPath);
   QByteArray payload;
   if (targetFile.open(QIODevice::ReadOnly))
@@ -425,8 +458,14 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   QObject::connect(
       &session, &RecordSession::finished, &indicator,
       [&](const QString &savedPath) {
-        const QString master = QFileInfo::exists(savedPath) ? savedPath
-                                                            : config.outputPath;
+        // The encoder reports the path it wrote. Only our own output is
+        // acted on, because the remux deletes what it reads: a protocol
+        // change or a bad reply must not point that at another file.
+        if (!savedPath.isEmpty() && savedPath != config.outputPath)
+          qWarning().noquote()
+              << QStringLiteral("The encoder reported saving a different "
+                                "file; using the requested one");
+        const QString master = config.outputPath;
         if (!QFileInfo::exists(master)) {
           notifyRecording(QStringLiteral("Recording produced no file"), {});
           finish(1);

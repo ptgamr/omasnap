@@ -201,6 +201,13 @@ int main(int argc, char **argv) {
   else if (parser.isSet(scrollOption))
     captureMode = CaptureEditor::CaptureMode::Scroll;
 
+  const bool recording = parser.isSet(recordOption);
+  if (!recording && (parser.isSet(audioOption) || parser.isSet(micOption) ||
+                     parser.isSet(stopOption) || parser.isSet(fpsOption))) {
+    qCritical() << "--audio, --mic, --fps and --stop only apply to --record";
+    return 2;
+  }
+
   const QStringList positional = parser.positionalArguments();
   if (parser.isSet(pinOption)) {
     if (!filePath.isEmpty() || clipboardInput || requestedModes > 0 ||
@@ -262,15 +269,15 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  const bool recording = parser.isSet(recordOption);
-  if (!recording && (parser.isSet(audioOption) || parser.isSet(micOption) ||
-                     parser.isSet(stopOption) || parser.isSet(fpsOption))) {
-    qCritical() << "--audio, --mic, --fps and --stop only apply to --record";
-    return 2;
-  }
   if (recording && parser.isSet(stopOption)) {
-    if (requestedModes > 0 || editingImage) {
+    if (requestedModes > 0 || editingImage ||
+        quickOutputMode != QuickOutputMode::None) {
       qCritical() << "--record --stop takes no capture target";
+      return 2;
+    }
+    if (parser.isSet(audioOption) || parser.isSet(micOption) ||
+        parser.isSet(fpsOption)) {
+      qCritical() << "--record --stop takes no recording options";
       return 2;
     }
     QString stopError;
