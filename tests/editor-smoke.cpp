@@ -12,6 +12,7 @@
 #include "instance-lock-smoke.hpp"
 #include "palette-config-smoke.hpp"
 #include "pin-layout-smoke.hpp"
+#include "record-indicator-smoke.hpp"
 #include "record-session-smoke.hpp"
 #include "record-target-smoke.hpp"
 #include "stitch-smoke.hpp"
@@ -9002,6 +9003,13 @@ int main(int argc, char **argv) {
   QString recordSessionError;
   if (!runRecordSessionSmoke(recordSessionError)) {
     qWarning().noquote() << "record session smoke failed:" << recordSessionError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordIndicatorError;
+  if (!runRecordIndicatorSmoke(recordIndicatorError)) {
+    qWarning().noquote() << "record indicator smoke failed:"
+                         << recordIndicatorError;
     return EXIT_FAILURE;
   }
 

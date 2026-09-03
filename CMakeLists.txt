@@ -76,6 +76,8 @@ add_library(omasnap-core STATIC
   src/record-target.hpp
   src/record-session.cpp
   src/record-session.hpp
+  src/record-indicator.cpp
+  src/record-indicator.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
   src/editor.hpp
@@ -157,6 +159,8 @@ qt_add_executable(omasnap-smoke
   tests/record-target-smoke.hpp
   tests/record-session-smoke.cpp
   tests/record-session-smoke.hpp
+  tests/record-indicator-smoke.cpp
+  tests/record-indicator-smoke.hpp
   src/record-target.cpp
   src/record-target.hpp
   src/cli-path.cpp
