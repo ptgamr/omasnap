@@ -72,6 +72,8 @@ add_library(omasnap-core STATIC
   src/scroll-inject.hpp
   src/startup-timing.cpp
   src/startup-timing.hpp
+  src/record-target.cpp
+  src/record-target.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
   src/editor.hpp
@@ -149,6 +151,10 @@ qt_add_executable(omasnap-smoke
   tests/cut-mapping-smoke.hpp
   tests/palette-config-smoke.cpp
   tests/palette-config-smoke.hpp
+  tests/record-target-smoke.cpp
+  tests/record-target-smoke.hpp
+  src/record-target.cpp
+  src/record-target.hpp
   src/cli-path.cpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
