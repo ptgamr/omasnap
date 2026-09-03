@@ -2958,7 +2958,28 @@ void CaptureEditor::enterEdit(QString status) {
     scheduleSnapshot();
 }
 
+void CaptureEditor::setRecordTargetMode(bool enabled) {
+  recordTargetMode_ = enabled;
+  if (!enabled)
+    return;
+  setSuppressSnapshots(true);
+  setStatus(captureMode_ == CaptureMode::Window
+                ? QStringLiteral("Window mode · click or Super+Arrows then "
+                                 "Enter to record it")
+                : QStringLiteral("Drag the area to record · Enter starts "
+                                 "recording · Esc cancels"));
+}
+
 void CaptureEditor::enterSelectedCapture(QString editStatus) {
+  if (recordTargetMode_) {
+    // Recording never enters the annotation editor: there is no image to
+    // annotate yet, and no PNG, recents entry, or operation log is written.
+    if (!selection_.isEmpty()) {
+      emit recordTargetSelected(selection_, editedKind_);
+      close();
+    }
+    return;
+  }
   if (quickOutputMode_ != QuickOutputMode::None) {
     if (configuredCustomDefaultPending_) {
       pendingSelectedCapture_ = std::move(editStatus);
@@ -5471,6 +5492,10 @@ int CaptureEditor::selectTabAt(const QPointF &position) const {
 }
 
 void CaptureEditor::activateSelectTab(SelectTab tab) {
+  // Stitching a scrolling page is a screenshot idea; there is nothing for a
+  // recorder to do with it, so the tab is inert while picking a target.
+  if (recordTargetMode_ && tab == SelectTab::Scroll)
+    return;
   // A frame drawn for a scrolling capture is the same rectangle a region
   // capture wants, so it comes along to Region rather than being drawn a
   // second time. Window and Fullscreen pick an area of their own, so there it

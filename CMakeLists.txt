@@ -78,6 +78,8 @@ add_library(omasnap-core STATIC
   src/record-session.hpp
   src/record-indicator.cpp
   src/record-indicator.hpp
+  src/quit-signals.cpp
+  src/quit-signals.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
   src/editor.hpp
@@ -134,7 +136,7 @@ target_link_libraries(omasnap-core PUBLIC
   PkgConfig::WaylandClient
 )
 
-qt_add_executable(omasnap src/main.cpp src/pin.cpp src/pin.hpp)
+qt_add_executable(omasnap src/main.cpp src/pin.cpp src/pin.hpp src/record.cpp src/record.hpp)
 target_compile_options(omasnap PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(omasnap PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
 target_link_libraries(omasnap PRIVATE omasnap-core)

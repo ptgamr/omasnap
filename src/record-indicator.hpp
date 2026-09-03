@@ -34,6 +34,11 @@ public:
 signals:
   void stopRequested();
   void pauseRequested(bool paused);
+  /**
+   * The pill's natural size changed. A layer surface has to be told its size
+   * separately from the widget, and a stale one clips the contents.
+   */
+  void desiredSizeChanged(const QSize &size);
 
 protected:
   void leaveEvent(QEvent *event) override;
@@ -44,6 +49,10 @@ protected:
 
 private:
   enum class Control { None, Pause, Stop };
+
+  /// Resizes to the current contents and announces it, so the layer surface
+  /// follows the widget.
+  void applySize();
 
   [[nodiscard]] QString timeText() const;
   [[nodiscard]] QRectF pauseRect() const;

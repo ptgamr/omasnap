@@ -115,6 +115,14 @@ RecordIndicator::controlAt(const QPointF &position) const {
   return Control::None;
 }
 
+void RecordIndicator::applySize() {
+  updateGeometry();
+  const QSize wanted = sizeHint();
+  resize(wanted);
+  emit desiredSizeChanged(wanted);
+  update();
+}
+
 void RecordIndicator::setPhase(Phase phase) {
   if (phase_ == phase)
     return;
@@ -123,24 +131,23 @@ void RecordIndicator::setPhase(Phase phase) {
     message_.clear();
   hovered_ = Control::None;
   pressed_ = Control::None;
-  updateGeometry();
-  resize(sizeHint());
-  update();
+  applySize();
 }
 
 void RecordIndicator::setElapsed(qint64 milliseconds) {
   if (elapsedMs_ / 1000 == milliseconds / 1000)
     return; // The pill only shows whole seconds.
   elapsedMs_ = milliseconds;
-  if (phase_ == Phase::Recording || phase_ == Phase::Paused)
-    update();
+  if (phase_ != Phase::Recording && phase_ != Phase::Paused)
+    return;
+  // Crossing an hour makes the clock wider; every other tick resizes to the
+  // same value and costs nothing.
+  applySize();
 }
 
 void RecordIndicator::setMessage(const QString &message) {
   message_ = message;
-  updateGeometry();
-  resize(sizeHint());
-  update();
+  applySize();
 }
 
 void RecordIndicator::leaveEvent(QEvent *event) {

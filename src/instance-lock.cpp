@@ -103,8 +103,15 @@ InstanceAction decideInstanceAction(InstanceLockProbe probe,
   }
   if (holder != InstanceHolder::Alive)
     return InstanceAction::ClearStaleLock;
-  return mode == InstanceMode::EditFile ? InstanceAction::ReplaceRunning
-                                        : InstanceAction::CancelRunning;
+  switch (mode) {
+  case InstanceMode::EditFile:
+    return InstanceAction::ReplaceRunning;
+  case InstanceMode::RecordTarget:
+    return InstanceAction::ReportBusy;
+  case InstanceMode::Capture:
+    break;
+  }
+  return InstanceAction::CancelRunning;
 }
 
 InstanceLockResult acquireInstanceLock(QLockFile &lock, InstanceMode mode) {
@@ -148,6 +155,11 @@ InstanceLockResult acquireInstanceLock(QLockFile &lock, InstanceMode mode) {
                            "the single-instance lock")
                 .arg(holderPid),
             holderPid};
+  case InstanceAction::ReportBusy:
+    return {false, kInstanceBusyExitCode,
+            QStringLiteral("An omasnap overlay is already open; close it "
+                           "before starting a recording"),
+            0};
   case InstanceAction::Fail:
     return {false, kInstanceLockErrorExitCode,
             (probe == InstanceLockProbe::PermissionError
