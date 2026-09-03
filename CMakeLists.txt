@@ -166,6 +166,8 @@ qt_add_executable(omasnap-smoke
   tests/record-session-smoke.hpp
   tests/record-indicator-smoke.cpp
   tests/record-indicator-smoke.hpp
+  tests/record-select-smoke.cpp
+  tests/record-select-smoke.hpp
   src/record-target.cpp
   src/record-target.hpp
   src/cli-path.cpp

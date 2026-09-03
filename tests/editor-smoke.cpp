@@ -13,6 +13,7 @@
 #include "palette-config-smoke.hpp"
 #include "pin-layout-smoke.hpp"
 #include "record-indicator-smoke.hpp"
+#include "record-select-smoke.hpp"
 #include "record-session-smoke.hpp"
 #include "record-target-smoke.hpp"
 #include "stitch-smoke.hpp"
@@ -9000,6 +9001,12 @@ int main(int argc, char **argv) {
   QString recordTargetError;
   if (!runRecordTargetSmoke(recordTargetError)) {
     qWarning().noquote() << "record target smoke failed:" << recordTargetError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordSelectError;
+  if (!runRecordSelectSmoke(application, recordSelectError)) {
+    qWarning().noquote() << "record select smoke failed:" << recordSelectError;
     return EXIT_FAILURE;
   }
 
