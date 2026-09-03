@@ -204,7 +204,8 @@ int main(int argc, char **argv) {
   const QStringList positional = parser.positionalArguments();
   if (parser.isSet(pinOption)) {
     if (!filePath.isEmpty() || clipboardInput || requestedModes > 0 ||
-        !positional.isEmpty() || quickOutputMode != QuickOutputMode::None) {
+        !positional.isEmpty() || quickOutputMode != QuickOutputMode::None ||
+        parser.isSet(recordOption)) {
       qCritical()
           << "Pinned mode cannot be combined with capture or edit targets";
       return 2;
@@ -263,8 +264,8 @@ int main(int argc, char **argv) {
 
   const bool recording = parser.isSet(recordOption);
   if (!recording && (parser.isSet(audioOption) || parser.isSet(micOption) ||
-                     parser.isSet(stopOption))) {
-    qCritical() << "--audio, --mic and --stop only apply to --record";
+                     parser.isSet(stopOption) || parser.isSet(fpsOption))) {
+    qCritical() << "--audio, --mic, --fps and --stop only apply to --record";
     return 2;
   }
   if (recording && parser.isSet(stopOption)) {

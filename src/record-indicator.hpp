@@ -3,6 +3,7 @@
  *  only way to stop from the UI. */
 #pragma once
 
+#include <QSize>
 #include <QString>
 #include <QWidget>
 
@@ -59,6 +60,7 @@ private:
   [[nodiscard]] QRectF stopRect() const;
   [[nodiscard]] Control controlAt(const QPointF &position) const;
 
+  QSize announcedSize_;
   Phase phase_ = Phase::Starting;
   qint64 elapsedMs_ = 0;
   QString message_;

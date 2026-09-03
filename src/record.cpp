@@ -20,7 +20,9 @@
 #include <QLockFile>
 #include <QProcess>
 #include <QScreen>
+#include <QSignalBlocker>
 #include <QStandardPaths>
+#include <QSysInfo>
 #include <QTimer>
 #include <QUuid>
 #include <QWindow>
@@ -105,6 +107,19 @@ QString promoteMatroska(const QDir &directory, const QString &stem,
   const QString promoted = QFile::rename(master, kept) ? kept : master;
   restrictToOwner(promoted);
   return promoted;
+}
+
+/**
+ * Whether `pid` is an omasnap right now. Read from /proc immediately before
+ * signalling, because a lock file only records what the pid was when it was
+ * written and the kernel reuses pids.
+ */
+bool processIsOmasnap(qint64 pid) {
+  QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
+  if (!comm.open(QIODevice::ReadOnly))
+    return false;
+  return QString::fromLatin1(comm.readLine()).trimmed() ==
+         QCoreApplication::applicationName();
 }
 
 /** The Studio next to this executable, then one on PATH, else nothing. */
@@ -241,10 +256,25 @@ bool stopActiveRecording(QString &error) {
   }
   QLockFile lock(QDir(runtime).filePath(QStringLiteral("omasnap.record")));
   lock.setStaleLockTime(0);
+  // Taking the lock means nobody is holding it, and QLockFile clears one
+  // whose owner is gone, so this also rules out a dead recorder's leftovers.
+  if (lock.tryLock(0)) {
+    lock.unlock();
+    error = QStringLiteral("No recording is running");
+    return false;
+  }
   qint64 pid = 0;
   QString hostname;
   QString application;
-  if (!lock.getLockInfo(&pid, &hostname, &application) || pid <= 0) {
+  if (!lock.getLockInfo(&pid, &hostname, &application) || pid <= 0 ||
+      (!hostname.isEmpty() && hostname != QSysInfo::machineHostName())) {
+    error = QStringLiteral("No recording is running");
+    return false;
+  }
+  // Pids are reused. Signalling one read out of a file, on the strength of
+  // the file alone, is how a recorder's stop key ends up killing a stranger's
+  // process; check what the pid actually is, immediately before signalling.
+  if (!processIsOmasnap(pid)) {
     error = QStringLiteral("No recording is running");
     return false;
   }
@@ -443,7 +473,14 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
     qCritical() << "Could not create the recording indicator layer";
     return 1;
   }
-  if (!session.start(error)) {
+  // start() reports a synchronous failure through `error`; letting it also
+  // emit failed would notify twice about the same thing.
+  bool started = false;
+  {
+    const QSignalBlocker quiet(&session);
+    started = session.start(error);
+  }
+  if (!started) {
     qCritical().noquote() << error;
     notifyRecording(QStringLiteral("Recording failed: %1").arg(error), {});
     return 1;

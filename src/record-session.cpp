@@ -28,6 +28,10 @@ constexpr int kReadyAttempts = 240; // 12 s
 /// recording is not instant.
 constexpr int kStopTimeoutMs = 20000;
 constexpr int kCommandTimeoutMs = 5000;
+/// After the encoder says it saved the file it should exit almost at once.
+/// Long enough not to race a slow unmount, short enough that the indicator
+/// does not sit on "Saving…" forever.
+constexpr int kExitWatchdogMs = 10000;
 /// Enough context to name a failure; not a log of the whole session.
 constexpr qsizetype kDiagnosticTailBytes = 2048;
 
@@ -332,7 +336,11 @@ void RecordSession::setPaused(bool paused) {
   // wants, so a dropped reply cannot leave the two sides disagreeing.
   sendCommand(QStringLiteral("set-paused"), QJsonValue(paused),
               [this, paused](bool ok, const QString &) {
-                if (!ok)
+                // The reply can land after the user has already stopped, and
+                // moving back to Recording there would restart the clock on a
+                // session that is finishing.
+                if (!ok || (state_ != State::Recording &&
+                            state_ != State::Paused))
                   return;
                 if (paused) {
                   pauseStartedMs_ = clock_.elapsed();
@@ -352,7 +360,17 @@ void RecordSession::stop() {
   sendCommand(QStringLiteral("stop"), {}, [this](bool ok, const QString &path) {
     if (ok && !path.isEmpty()) {
       savedPath_ = path;
-      return; // The encoder exits next; handleProcessFinished reports.
+      // The encoder exits next and handleProcessFinished reports. If it does
+      // not, end it rather than leaving the indicator saving forever.
+      QTimer::singleShot(kExitWatchdogMs, this, [this] {
+        if (state_ != State::Stopping || !process_ ||
+            process_->state() == QProcess::NotRunning)
+          return;
+        process_->terminate();
+        if (!process_->waitForFinished(2000))
+          process_->kill();
+      });
+      return;
     }
     // The socket went away or refused. The child is still ours by pid, and
     // SIGINT is GSR's documented save-and-exit.

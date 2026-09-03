@@ -119,7 +119,12 @@ void RecordIndicator::applySize() {
   updateGeometry();
   const QSize wanted = sizeHint();
   resize(wanted);
-  emit desiredSizeChanged(wanted);
+  // Only when it really moved: the clock calls this once a second, and each
+  // announcement is a Wayland round trip.
+  if (wanted != announcedSize_) {
+    announcedSize_ = wanted;
+    emit desiredSizeChanged(wanted);
+  }
   update();
 }
 
