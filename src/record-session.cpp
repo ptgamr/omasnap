@@ -249,6 +249,15 @@ bool RecordSession::start(QString &error) {
     error = QStringLiteral("Nothing usable to record");
     return false;
   }
+  if (QFile::encodeName(config_.ipcSocketPath).size() >
+      kMaxControlSocketPathBytes) {
+    // Better here than as an unexplained bind() failure inside the encoder.
+    error = QStringLiteral("The control socket path is too long (%1 bytes, "
+                           "limit %2)")
+                .arg(QFile::encodeName(config_.ipcSocketPath).size())
+                .arg(kMaxControlSocketPathBytes);
+    return false;
+  }
   // A leftover socket from a killed session makes readiness detection lie.
   QFile::remove(config_.ipcSocketPath);
 

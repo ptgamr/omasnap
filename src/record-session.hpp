@@ -38,6 +38,13 @@ struct RecordConfig {
  */
 [[nodiscard]] QStringList recordSessionArguments(const RecordConfig &config);
 
+/**
+ * Longest usable control-socket path in bytes. `sockaddr_un` caps it, and
+ * going over it fails at bind() inside the encoder with nothing useful said
+ * about why.
+ */
+inline constexpr int kMaxControlSocketPathBytes = 107;
+
 /** Absolute path of the gpu-screen-recorder to run, or empty when it is not
  *  installed. */
 [[nodiscard]] QString findRecorderExecutable();
