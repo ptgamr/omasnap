@@ -473,10 +473,14 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                          });
         QObject::connect(remux, &QProcess::errorOccurred, &indicator,
                          [conclude] { conclude(false); });
+        // -map 0 rather than ffmpeg's default stream selection, which keeps
+        // one audio stream: recording with --audio and --mic produces two,
+        // and the remux would silently drop the microphone.
         remux->start(ffmpeg, {QStringLiteral("-hide_banner"),
                               QStringLiteral("-loglevel"),
                               QStringLiteral("error"), QStringLiteral("-y"),
                               QStringLiteral("-i"), master,
+                              QStringLiteral("-map"), QStringLiteral("0"),
                               QStringLiteral("-c"), QStringLiteral("copy"),
                               QStringLiteral("-map_metadata"),
                               QStringLiteral("-1"),

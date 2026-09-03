@@ -89,6 +89,13 @@ QStringList studioExportArguments(const QString &source,
           source,
           QStringLiteral("-t"),
           studioTimecode(outPoint - inPoint),
+          // Explicit, because ffmpeg's default selection keeps a single
+          // audio stream and a recording made with --audio and --mic has
+          // two. `?` so a silent recording is not an error.
+          QStringLiteral("-map"),
+          QStringLiteral("0:v:0"),
+          QStringLiteral("-map"),
+          QStringLiteral("0:a?"),
           QStringLiteral("-c:v"),
           QStringLiteral("libx264"),
           QStringLiteral("-crf"),

@@ -66,6 +66,12 @@ bool runExportCommandChecks(QString &error) {
                  QStringLiteral("-1"),
              error, QStringLiteral("export keeps the source metadata")))
     return false;
+  // Every audio stream, not ffmpeg's default pick of one: a recording made
+  // with --audio and --mic has two, and the export must not drop the mic.
+  if (!check(arguments.contains(QStringLiteral("0:a?")) &&
+                 arguments.contains(QStringLiteral("0:v:0")),
+             error, QStringLiteral("export does not map every stream")))
+    return false;
   for (const QString &argument : arguments) {
     if (argument.contains(QLatin1Char(';')) ||
         argument.contains(QLatin1Char('|')) ||
