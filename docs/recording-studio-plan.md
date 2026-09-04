@@ -590,9 +590,22 @@ Known gaps, all of them things the plan asks for:
   indicator off the recorded rectangle — which works for region and window
   targets and cannot work for a whole display on a single monitor. This
   needs deciding before the exclusion promise can be kept.
-- No camera, no separate audio track policy proven by `ffprobe`, no pointer
-  or keystroke sidecar, no captions.
+- Audio track separation **is** proven: two `-a` flags produce two separate
+  opus streams (ffprobe: `1,opus,audio` and `2,opus,audio`), which is the
+  form `recordSessionArguments()` emits, while GSR's `|` syntax merges
+  sources into one. What remains unproven is the A/V drift gate — no
+  30-minute run has been measured, and no pause/resume drift test.
+- No camera, no pointer or keystroke sidecar, no captions.
 - Coordinates are proven on 1× and 1.5× only.
+- CFR was frozen as the timing policy without measuring VFR against it, which
+  the plan asks for. It is the defensible default for an editor, but it is a
+  choice, not a result.
+- **The MLT spike has not been run at all.** What ships is Qt Multimedia
+  playback plus a one-shot ffmpeg export, which is Studio increment 1 and
+  cannot become increment 2: there is no compiled graph shared between
+  preview and export, so multi-clip, speed, and effects have nothing to
+  build on. The plan is explicit that Phase 4 must not start before that
+  spike passes.
 - Storage quotas, cache pruning, and the free-space preflight are absent.
 
 ## Delivery phases
