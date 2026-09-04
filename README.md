@@ -278,9 +278,17 @@ Each zoom eases in and out on a smoothstep, so it starts and stops without a
 jerk, and panning stops at the frame edge rather than showing past it.
 
 What you see is what you get: the preview and the export are driven by the same
-model, and a golden test renders the same frames both ways at rest, mid-ramp and
-holding to keep it that way. A recording zoomed past roughly 3× will look soft,
-because the export scales up from the cropped region.
+model, and a golden test renders the same frames both ways across seven
+scenarios — one cue, adjacent cues, overlapping cues, a cue shorter than its own
+ramps, a 30000/1001 source, a trimmed export, and a portrait file with a display
+matrix. A recording zoomed past roughly 3× will look soft, because the export
+scales up from the cropped region.
+
+Portrait phone recordings work: the container's rotation is read and applied to
+the preview the same way ffmpeg applies it before the export's zoom, so a cue
+lands on the same thing in both. One clip holds at most 200 cues, which is far
+past any real edit and keeps the generated filter well inside the limit on a
+single command-line argument.
 
 **Trim.** `Space` plays and pauses, `Left`/`Right` seek five seconds, `I` and `O`
 set the in and out points at the playhead, `R` clears the trim, and `Ctrl`+`E`

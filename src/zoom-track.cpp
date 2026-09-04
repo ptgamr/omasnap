@@ -19,23 +19,11 @@ qreal smoothstep(qreal t) {
 qreal cueWeight(const ZoomCue &cue, qint64 timeMs) {
   if (timeMs <= cue.startMs || timeMs >= cue.endMs)
     return 0.0;
-  const qint64 length = cue.endMs - cue.startMs;
-  // Ramps never overlap, however they were written down: a cue shorter than
-  // its own ramps splits its length between them.
-  qint64 easeIn = qMax<qint64>(kMinEaseMs, cue.easeInMs);
-  qint64 easeOut = qMax<qint64>(kMinEaseMs, cue.easeOutMs);
-  if (easeIn + easeOut > length) {
-    const qreal share = static_cast<qreal>(length) / (easeIn + easeOut);
-    easeIn = static_cast<qint64>(easeIn * share);
-    easeOut = length - easeIn;
-  }
-  const qint64 into = timeMs - cue.startMs;
-  const qint64 left = cue.endMs - timeMs;
-  if (easeIn > 0 && into < easeIn)
-    return smoothstep(static_cast<qreal>(into) / static_cast<qreal>(easeIn));
-  if (easeOut > 0 && left < easeOut)
-    return smoothstep(static_cast<qreal>(left) / static_cast<qreal>(easeOut));
-  return 1.0;
+  const ZoomRamps ramps = zoomRamps(cue);
+  const auto into = static_cast<qreal>(timeMs - cue.startMs);
+  const auto left = static_cast<qreal>(cue.endMs - timeMs);
+  return qMin(smoothstep(into / ramps.easeInMs),
+              smoothstep(left / ramps.easeOutMs));
 }
 
 /// The centre a view of `scale` may actually use: panning stops at the frame
@@ -54,6 +42,26 @@ QString number(qreal value) {
 
 } // namespace
 
+ZoomRamps zoomRamps(const ZoomCue &cue) {
+  const auto length = static_cast<qreal>(qMax<qint64>(1, cue.endMs - cue.startMs));
+  // A floor on each ramp, so neither the preview's division nor the filter
+  // expression's can ever be by zero, however a hand-edited cue is written.
+  ZoomRamps ramps{
+      static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeInMs)),
+      static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeOutMs))};
+  // Ramps never overlap: a cue shorter than its own ramps splits its length
+  // between them. In floating point on both sides, because the two used to
+  // round differently and disagreed around the midpoint of a short cue.
+  if (ramps.easeInMs + ramps.easeOutMs > length) {
+    const qreal share = length / (ramps.easeInMs + ramps.easeOutMs);
+    ramps.easeInMs *= share;
+    ramps.easeOutMs = length - ramps.easeInMs;
+  }
+  ramps.easeInMs = qMax<qreal>(1.0, ramps.easeInMs);
+  ramps.easeOutMs = qMax<qreal>(1.0, ramps.easeOutMs);
+  return ramps;
+}
+
 QVector<ZoomCue> sortedCues(const ZoomTrack &track) {
   QVector<ZoomCue> cues;
   cues.reserve(track.cues.size());
@@ -68,7 +76,21 @@ QVector<ZoomCue> sortedCues(const ZoomTrack &track) {
             [](const ZoomCue &a, const ZoomCue &b) {
               return a.startMs < b.startMs;
             });
-  return cues;
+  // Overlaps are resolved here, once, so everything downstream sees disjoint
+  // cues. While two cues overlap, "the deepest cue" and "the cue that is
+  // running" are different questions with different answers, and the preview
+  // and the export were answering them differently: the preview took the
+  // centre of the deepest, the filter took the centre of the last to start.
+  QVector<ZoomCue> disjoint;
+  disjoint.reserve(cues.size());
+  for (qsizetype index = 0; index < cues.size(); ++index) {
+    ZoomCue cue = cues.at(index);
+    if (index + 1 < cues.size())
+      cue.endMs = qMin(cue.endMs, cues.at(index + 1).startMs);
+    if (cue.endMs - cue.startMs >= kMinCueMs)
+      disjoint.push_back(cue);
+  }
+  return disjoint;
 }
 
 ZoomView zoomViewAt(const ZoomTrack &track, qint64 timeMs) {
@@ -97,12 +119,13 @@ QRectF zoomSourceRect(const ZoomTrack &track, qint64 timeMs) {
           size};
 }
 
-ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fps,
+ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fpsNumerator,
+                                      int fpsDenominator,
                                       qint64 startOffsetMs) {
   ZoomPanExpressions expressions;
   expressions.z = QStringLiteral("1");
   const QVector<ZoomCue> cues = sortedCues(track);
-  if (cues.isEmpty() || fps <= 0) {
+  if (cues.isEmpty() || fpsNumerator <= 0 || fpsDenominator <= 0) {
     // iw/2 and ih/2 keep the untouched frame centred, which is what a zoom
     // of 1 means.
     expressions.x = QStringLiteral("iw/2-(iw/zoom/2)");
@@ -113,12 +136,16 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fps,
 
   // zoompan counts output frames in `on`; time is that over the frame rate,
   // plus wherever this filter's first frame sits on the timeline, which is
-  // the same clock zoomViewAt() is evaluated on.
+  // the same clock zoomViewAt() is evaluated on. The rate is a ratio because
+  // rounding 30000/1001 to 30 drifts the camera against the picture.
+  const QString elapsed = QStringLiteral("(on*%1/%2)")
+                              .arg(QString::number(fpsDenominator),
+                                   QString::number(fpsNumerator));
   const QString time =
       startOffsetMs == 0
-          ? QStringLiteral("(on/%1)").arg(fps)
-          : QStringLiteral("((on/%1)+%2)")
-                .arg(QString::number(fps),
+          ? elapsed
+          : QStringLiteral("(%1+%2)")
+                .arg(elapsed,
                      number(static_cast<qreal>(startOffsetMs) / 1000.0));
   QString scale = QStringLiteral("1");
   QString centreX = QStringLiteral("0.5");
@@ -127,16 +154,10 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fps,
   for (const ZoomCue &cue : cues) {
     const qreal start = static_cast<qreal>(cue.startMs) / 1000.0;
     const qreal end = static_cast<qreal>(cue.endMs) / 1000.0;
-    const qreal length = end - start;
-    qreal easeIn =
-        static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeInMs)) / 1000.0;
-    qreal easeOut =
-        static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeOutMs)) / 1000.0;
-    if (easeIn + easeOut > length) {
-      const qreal share = length / (easeIn + easeOut);
-      easeIn *= share;
-      easeOut = length - easeIn;
-    }
+    // The same split the preview uses, from the same function.
+    const ZoomRamps ramps = zoomRamps(cue);
+    const qreal easeIn = ramps.easeInMs / 1000.0;
+    const qreal easeOut = ramps.easeOutMs / 1000.0;
     // The same smoothstep the preview uses, written out: ramp up, hold at 1,
     // ramp down. `clip` keeps each ramp's input inside 0..1 so the holding
     // section is exactly 1 rather than an extrapolation.
@@ -151,13 +172,16 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fps,
     const QString cueScale =
         QStringLiteral("(1+%1*%2)").arg(number(cue.scale - 1.0), weight);
     const QPointF centre = clampCentre(cue.target, cue.scale);
-    // Later cues win where they are further in, matching zoomViewAt()'s
-    // choice of the deepest cue at that instant.
+    // Cues are disjoint by the time they get here, so at most one is running
+    // at any instant and "whichever is active" is unambiguous.
     scale = QStringLiteral("max(%1,%2)").arg(scale, cueScale);
-    centreX = QStringLiteral("if(gt(%1,1.0001),%2,%3)")
-                  .arg(cueScale, number(centre.x()), centreX);
-    centreY = QStringLiteral("if(gt(%1,1.0001),%2,%3)")
-                  .arg(cueScale, number(centre.y()), centreY);
+    const QString running =
+        QStringLiteral("between(%1,%2,%3)").arg(time, number(start),
+                                                number(end));
+    centreX = QStringLiteral("if(%1,%2,%3)")
+                  .arg(running, number(centre.x()), centreX);
+    centreY = QStringLiteral("if(%1,%2,%3)")
+                  .arg(running, number(centre.y()), centreY);
   }
 
   expressions.z = scale;
@@ -213,13 +237,20 @@ bool readZoomTrack(const QJsonObject &object, ZoomTrack &track,
 }
 
 quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
-                   qreal scale, qint64 durationMs) {
+                   qreal scale, qint64 durationMs, qint64 limitMs) {
+  if (track.cues.size() >= kMaxZoomCues)
+    return 0;
   const QVector<ZoomCue> existing = sortedCues(track);
   // A new cue starts at the playhead and runs for as long as it can without
   // touching the next one, so dropping cues in quick succession never
   // silently produces an overlap the model would have to resolve.
   const qint64 start = qMax<qint64>(0, atMs);
-  qint64 end = start + qMax<qint64>(kMinCueMs, durationMs);
+  // Never past the end of the clip: a cue there renders nothing, exports
+  // nothing, and sits as an unreachable sliver at the edge of the lane.
+  const qint64 limit = limitMs > 0 ? limitMs : start + durationMs;
+  if (limit - start < kMinCueMs)
+    return 0;
+  qint64 end = qMin(limit, start + qMax<qint64>(kMinCueMs, durationMs));
   for (const ZoomCue &cue : existing) {
     if (cue.endMs <= start)
       continue;

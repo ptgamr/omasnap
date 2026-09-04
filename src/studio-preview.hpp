@@ -33,6 +33,19 @@ public:
   void setPosition(qint64 milliseconds);
   /** Draws a marker at `target` (normalized) while a cue is selected. */
   void setTargetMarker(bool shown, const QPointF &target = {});
+  /** Whether clicking aims a zoom. Off while exporting, and off when the
+   *  export could not read the source and so could apply no zoom at all. */
+  void setPickable(bool pickable);
+  /**
+   * Clockwise rotation to apply to incoming frames, in degrees.
+   *
+   * ffmpeg rotates a phone recording before the zoom filter sees it, and
+   * QVideoFrame::toImage() hands back the coded picture with that dropped,
+   * so a preview that skipped this would show a different picture from the
+   * export and a click would mean a different point. The caller converts the
+   * container's counter-clockwise display angle into this clockwise one.
+   */
+  void setRotation(int degrees);
   [[nodiscard]] QSize sizeHint() const override;
 
 signals:
@@ -57,5 +70,7 @@ private:
   qint64 positionMs_ = 0;
   QPointF marker_;
   QPointF hover_{-1, -1};
+  int rotation_ = 0;
   bool markerShown_ = false;
+  bool pickable_ = true;
 };

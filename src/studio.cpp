@@ -18,6 +18,8 @@
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
+#include <QTimer>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QUrl>
@@ -58,6 +60,8 @@ constexpr qint64 kMinimumTrimMs = 100;
 constexpr int kProbeTimeoutMs = 5000;
 /// How long a cue runs when it is dropped rather than dragged.
 constexpr qint64 kDefaultCueMs = 2500;
+/// How long dragging settles before the cues are written out.
+constexpr int kSaveDebounceMs = 400;
 
 const auto kControlStyle = QStringLiteral(R"(
 QWidget { color: #e2e2e8; }
@@ -96,30 +100,54 @@ StudioSource probeStudioSource(const QString &path) {
   if (probe.isEmpty() || path.isEmpty())
     return media;
   QProcess ffprobe;
-  ffprobe.start(probe, {QStringLiteral("-v"), QStringLiteral("error"),
-                        QStringLiteral("-select_streams"),
-                        QStringLiteral("v:0"),
-                        QStringLiteral("-show_entries"),
-                        QStringLiteral("stream=width,height,r_frame_rate"),
-                        QStringLiteral("-of"), QStringLiteral("csv=p=0"),
-                        path});
+  ffprobe.start(probe,
+                {QStringLiteral("-v"), QStringLiteral("error"),
+                 QStringLiteral("-select_streams"), QStringLiteral("v:0"),
+                 QStringLiteral("-show_entries"),
+                 QStringLiteral("stream=width,height,r_frame_rate"),
+                 QStringLiteral("-show_entries"),
+                 QStringLiteral("stream_side_data=rotation"),
+                 QStringLiteral("-of"),
+                 QStringLiteral("default=noprint_wrappers=1"), path});
   if (!ffprobe.waitForFinished(kProbeTimeoutMs)) {
     ffprobe.kill();
     ffprobe.waitForFinished(1000);
     return media;
   }
-  const QStringList fields =
-      QString::fromLatin1(ffprobe.readAllStandardOutput()).trimmed().split(
-          QLatin1Char(','));
-  if (fields.size() < 3)
-    return media;
-  media.size = {fields.at(0).toInt(), fields.at(1).toInt()};
-  // r_frame_rate is a rational such as 60/1 or 30000/1001.
-  const QStringList rate = fields.at(2).split(QLatin1Char('/'));
-  const double numerator = rate.value(0).toDouble();
-  const double denominator = rate.size() > 1 ? rate.at(1).toDouble() : 1.0;
-  if (denominator > 0.0)
-    media.fps = qRound(numerator / denominator);
+  int width = 0;
+  int height = 0;
+  const QStringList lines =
+      QString::fromLatin1(ffprobe.readAllStandardOutput()).split(
+          QLatin1Char('\n'), Qt::SkipEmptyParts);
+  for (const QString &line : lines) {
+    const qsizetype split = line.indexOf(QLatin1Char('='));
+    if (split < 0)
+      continue;
+    const QString key = line.left(split).trimmed();
+    const QString value = line.mid(split + 1).trimmed();
+    if (key == QStringLiteral("width"))
+      width = value.toInt();
+    else if (key == QStringLiteral("height"))
+      height = value.toInt();
+    else if (key == QStringLiteral("rotation"))
+      // ffprobe reports av_display_rotation_get: the angle by which the
+      // matrix turns the coded frame *counter-clockwise* for display. Qt's
+      // QTransform::rotate is clockwise, so what gets stored here is the
+      // clockwise angle to apply -- the negation is the conversion, not a
+      // mistake. A phone portrait file reports -90 and is displayed by
+      // turning the stored landscape pixels 90 clockwise.
+      media.rotation = ((-value.toInt() % 360) + 360) % 360;
+    else if (key == QStringLiteral("r_frame_rate")) {
+      const QStringList rate = value.split(QLatin1Char('/'));
+      media.fpsNumerator = rate.value(0).toInt();
+      media.fpsDenominator = rate.size() > 1 ? rate.at(1).toInt() : 1;
+    }
+  }
+  // ffmpeg autorotates before the filter chain, so the size the zoom filter
+  // has to produce is the rotated one.
+  media.size = media.rotation == 90 || media.rotation == 270
+                   ? QSize(height, width)
+                   : QSize(width, height);
   return media;
 }
 
@@ -129,19 +157,19 @@ QStringList studioExportArguments(const QString &source,
                                   const StudioSource &media) {
   if (source.isEmpty() || destination.isEmpty() || outPoint <= inPoint)
     return {};
-  const bool canZoom = media.size.isValid() && !media.size.isEmpty() &&
-                       media.fps > 0;
   const ZoomPanExpressions camera =
-      canZoom ? zoomPanExpressions(zoom, media.fps, inPoint)
-              : ZoomPanExpressions{};
+      media.usable() ? zoomPanExpressions(zoom, media.fpsNumerator,
+                                          media.fpsDenominator, inPoint)
+                     : ZoomPanExpressions{};
   QStringList filter;
   if (!camera.identity) {
     filter << QStringLiteral("-vf")
-           << QStringLiteral("zoompan=z='%1':x='%2':y='%3':d=1:s=%4x%5:fps=%6")
+           << QStringLiteral("zoompan=z='%1':x='%2':y='%3':d=1:s=%4x%5:fps=%6/%7")
                   .arg(camera.z, camera.x, camera.y,
                        QString::number(media.size.width()),
                        QString::number(media.size.height()),
-                       QString::number(media.fps));
+                       QString::number(media.fpsNumerator),
+                       QString::number(media.fpsDenominator));
   }
   // -ss before -i so ffmpeg seeks rather than decoding the whole head, and
   // -t rather than -to because a duration means the same thing whichever
@@ -203,6 +231,19 @@ QSize StudioTimeline::sizeHint() const { return {480, kTimelineHeight}; }
 
 void StudioTimeline::setTrack(const ZoomTrack *track) {
   track_ = track;
+  update();
+}
+
+void StudioTimeline::setCuesEditable(bool editable) {
+  if (cuesEditable_ == editable)
+    return;
+  cuesEditable_ = editable;
+  if (!editable) {
+    grabbedCue_ = 0;
+    if (grabbed_ == Grab::CueBody || grabbed_ == Grab::CueStart ||
+        grabbed_ == Grab::CueEnd)
+      grabbed_ = Grab::None;
+  }
   update();
 }
 
@@ -328,7 +369,7 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
   if (cueLaneRect().contains(event->position())) {
     Grab edge = Grab::CueBody;
     const quint64 cue = cueAt(event->position(), &edge);
-    grabbedCue_ = cue;
+    grabbedCue_ = cuesEditable_ ? cue : 0;
     if (cue != 0 && track_) {
       for (const ZoomCue &entry : track_->cues) {
         if (entry.id == cue)
@@ -366,14 +407,18 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
         continue;
       qint64 start = cue.startMs;
       qint64 end = cue.endMs;
+      // Every bound is ordered before use: on a clip shorter than a cue the
+      // natural expressions invert, and qBound is undefined there.
       if (grabbed_ == Grab::CueBody) {
         const qint64 length = end - start;
-        start = qBound<qint64>(0, time - grabOffsetMs_, duration_ - length);
+        const qint64 latest = qMax<qint64>(0, duration_ - length);
+        start = qBound<qint64>(0, time - grabOffsetMs_, latest);
         end = start + length;
       } else if (grabbed_ == Grab::CueStart) {
-        start = qBound<qint64>(0, time, end - kMinCueMs);
+        start = qBound<qint64>(0, time, qMax<qint64>(0, end - kMinCueMs));
       } else {
-        end = qBound<qint64>(start + kMinCueMs, time, duration_);
+        end = qBound<qint64>(start + kMinCueMs, time,
+                             qMax<qint64>(start + kMinCueMs, duration_));
       }
       emit cueMoved(grabbedCue_, start, end);
       return;
@@ -552,8 +597,15 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   connect(sink_, &QVideoSink::videoFrameChanged, this,
           [this](const QVideoFrame &frame) {
             const QImage image = frame.toImage();
-            if (!image.isNull())
-              preview_->setFrame(image);
+            if (image.isNull())
+              return;
+            // The frame's own timestamp, not whatever position last arrived:
+            // the two signals have no ordering contract, so during playback
+            // or a seek the widget could otherwise crop one frame using the
+            // time of its neighbour.
+            if (frame.startTime() >= 0)
+              preview_->setPosition(frame.startTime() / 1000);
+            preview_->setFrame(image);
           });
 
   connect(playButton_, &QPushButton::clicked, this,
@@ -571,8 +623,19 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
     setSelectedZoomScale(value / 10.0);
   });
   connect(preview_, &StudioPreview::targetPicked, this, &StudioWindow::aimZoom);
-  connect(timeline_, &StudioTimeline::cueSelected, this,
-          [this](quint64) { refreshControls(); });
+  connect(timeline_, &StudioTimeline::cueSelected, this, [this](quint64 id) {
+    // Move the playhead into the cue that was clicked. Without this the
+    // marker and slider describe one cue while the picture shows another,
+    // and a click on the picture edits a third.
+    for (const ZoomCue &cue : zoom_.cues) {
+      if (cue.id != id)
+        continue;
+      if (player_->position() < cue.startMs || player_->position() >= cue.endMs)
+        player_->setPosition(cue.startMs + (cue.endMs - cue.startMs) / 2);
+      break;
+    }
+    refreshControls();
+  });
   connect(timeline_, &StudioTimeline::cueMoved, this,
           [this](quint64 id, qint64 startMs, qint64 endMs) {
             for (ZoomCue &cue : zoom_.cues) {
@@ -634,9 +697,16 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
           });
 
   preview_->setTrack(&zoom_);
+  saveTimer_ = new QTimer(this);
+  saveTimer_->setSingleShot(true);
+  saveTimer_->setInterval(kSaveDebounceMs);
+  connect(saveTimer_, &QTimer::timeout, this, &StudioWindow::saveZoom);
   // ffprobe rather than the player: the export needs the source's exact
-  // frame rate, and a wrong one slides every cue.
+  // frame rate, and a wrong one slides every cue. It also reports the
+  // display rotation, which ffmpeg applies before the zoom filter and Qt
+  // drops when converting a frame.
   media_ = probeStudioSource(path_);
+  preview_->setRotation(media_.rotation);
   loadZoom();
   player_->setSource(QUrl::fromLocalFile(path_));
   refreshControls();
@@ -655,7 +725,9 @@ const ZoomCue *StudioWindow::activeCue() const {
 void StudioWindow::zoomChanged() {
   preview_->update();
   timeline_->update();
-  saveZoom();
+  // Coalesced: a drag emits this on every mouse move, and writing the file
+  // each time is foreground I/O on a path that may be a network mount.
+  saveTimer_->start();
   refreshControls();
 }
 
@@ -675,9 +747,11 @@ void StudioWindow::aimZoom(const QPointF &target) {
   }
   const qreal scale = zoomSlider_->value() / 10.0;
   const quint64 id = addZoomCue(zoom_, player_->position(), target, scale,
-                                kDefaultCueMs);
+                                kDefaultCueMs, player_->duration());
   if (id == 0) {
-    setStatus(QStringLiteral("No room for a zoom here"));
+    setStatus(zoom_.cues.size() >= kMaxZoomCues
+                  ? QStringLiteral("That is as many zooms as one clip takes")
+                  : QStringLiteral("No room for a zoom here"));
     return;
   }
   timeline_->setSelectedCue(id);
@@ -687,10 +761,14 @@ void StudioWindow::aimZoom(const QPointF &target) {
 void StudioWindow::addZoomAtPlayhead() {
   const ZoomCue *current = activeCue();
   const QPointF target = current ? current->target : QPointF(0.5, 0.5);
-  const quint64 id = addZoomCue(zoom_, player_->position(), target,
-                                zoomSlider_->value() / 10.0, kDefaultCueMs);
+  const quint64 id =
+      addZoomCue(zoom_, player_->position(), target,
+                 zoomSlider_->value() / 10.0, kDefaultCueMs,
+                 player_->duration());
   if (id == 0) {
-    setStatus(QStringLiteral("No room for a zoom here"));
+    setStatus(zoom_.cues.size() >= kMaxZoomCues
+                  ? QStringLiteral("That is as many zooms as one clip takes")
+                  : QStringLiteral("No room for a zoom here"));
     return;
   }
   timeline_->setSelectedCue(id);
@@ -724,7 +802,12 @@ QString StudioWindow::zoomSidecarPath() const {
 }
 
 void StudioWindow::loadZoom() {
-  QFile file(zoomSidecarPath());
+  const QString path = zoomSidecarPath();
+  if (QFileInfo(path).isSymLink()) {
+    setStatus(QStringLiteral("Ignoring a symlinked zoom sidecar"));
+    return;
+  }
+  QFile file(path);
   if (!file.open(QIODevice::ReadOnly))
     return;
   QString error;
@@ -734,15 +817,28 @@ void StudioWindow::loadZoom() {
 }
 
 void StudioWindow::saveZoom() {
+  const QString path = zoomSidecarPath();
+  // Never through a link. The path is predictable and sits next to a file the
+  // user cares about, so a symlink there pointed a truncating write at
+  // whatever it named -- including the recording itself.
+  if (QFileInfo(path).isSymLink()) {
+    setStatus(QStringLiteral("Refusing to write the zoom cues through a "
+                             "symlink"));
+    return;
+  }
   // Beside the recording rather than inside it: the master stays untouched,
-  // and reopening the file brings the cues back.
-  QFile file(zoomSidecarPath());
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+  // and reopening the file brings the cues back. QSaveFile writes a
+  // temporary and renames it into place, so an interrupted save leaves the
+  // previous cues rather than half a file.
+  QSaveFile file(path);
+  if (!file.open(QIODevice::WriteOnly)) {
     setStatus(QStringLiteral("Could not save the zoom cues"));
     return;
   }
   file.write(QJsonDocument(writeZoomTrack(zoom_)).toJson(
       QJsonDocument::Indented));
+  if (!file.commit())
+    setStatus(QStringLiteral("Could not save the zoom cues"));
 }
 
 bool StudioWindow::hasMedia() const { return !mediaFailed_; }
@@ -772,9 +868,20 @@ void StudioWindow::refreshControls() {
                studioClock(timeline_->trimOut())));
 
   const ZoomCue *cue = activeCue();
-  addZoomButton_->setEnabled(duration > 0 && !mediaFailed_ && !exporting);
-  removeZoomButton_->setEnabled(cue != nullptr && !exporting);
-  zoomSlider_->setEnabled(!exporting);
+  // Editing is off while an export runs: ffmpeg already has its expressions,
+  // so a cue moved now would change the preview and the sidecar while the
+  // file being written keeps the old framing -- and it would still be
+  // announced as saved. It is also off when the source could not be probed,
+  // because the export cannot apply a zoom it has no frame rate for, and
+  // letting cues be built that silently vanish is worse than not offering
+  // them.
+  const bool editable = duration > 0 && !mediaFailed_ && !exporting &&
+                        media_.usable();
+  addZoomButton_->setEnabled(editable);
+  removeZoomButton_->setEnabled(editable && cue != nullptr);
+  zoomSlider_->setEnabled(editable && cue != nullptr);
+  preview_->setPickable(editable);
+  timeline_->setCuesEditable(editable);
   {
     // Reflecting the cue must not look like the user moved the slider.
     const QSignalBlocker quiet(zoomSlider_);
@@ -785,8 +892,11 @@ void StudioWindow::refreshControls() {
                           : QStringLiteral("—"));
   preview_->setTargetMarker(cue != nullptr,
                             cue ? cue->target : QPointF(0.5, 0.5));
-  if (!media_.size.isValid() || media_.fps <= 0)
-    zoomLabel_->setText(QStringLiteral("no zoom: unreadable source"));
+  if (!media_.usable())
+    zoomLabel_->setText(
+        QStringLiteral("no zoom: ffprobe could not read this file"));
+  else if (exporting)
+    zoomLabel_->setText(QStringLiteral("exporting…"));
 }
 
 void StudioWindow::togglePlayback() {

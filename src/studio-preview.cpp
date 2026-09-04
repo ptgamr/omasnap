@@ -3,6 +3,7 @@
 
 #include <QMouseEvent>
 #include <QPainter>
+#include <QTransform>
 
 namespace {
 
@@ -24,7 +25,29 @@ StudioPreview::StudioPreview(QWidget *parent) : QWidget(parent) {
 QSize StudioPreview::sizeHint() const { return {960, 540}; }
 
 void StudioPreview::setFrame(const QImage &frame) {
-  frame_ = frame;
+  // QVideoFrame::toImage() hands back the coded picture and drops the
+  // display rotation, while ffmpeg applies it before the zoom filter. Undo
+  // that difference here, or a portrait phone recording previews sideways
+  // and every normalized target addresses the wrong axis.
+  frame_ = rotation_ == 0 ? frame
+                          : frame.transformed(QTransform().rotate(rotation_),
+                                              Qt::SmoothTransformation);
+  update();
+}
+
+void StudioPreview::setRotation(int degrees) {
+  const int normalized = ((degrees % 360) + 360) % 360;
+  if (rotation_ == normalized)
+    return;
+  rotation_ = normalized;
+  update();
+}
+
+void StudioPreview::setPickable(bool pickable) {
+  if (pickable_ == pickable)
+    return;
+  pickable_ = pickable;
+  setCursor(pickable ? Qt::CrossCursor : Qt::ArrowCursor);
   update();
 }
 
@@ -78,7 +101,7 @@ std::optional<QPointF> StudioPreview::sourceAt(const QPointF &position) const {
 }
 
 void StudioPreview::mousePressEvent(QMouseEvent *event) {
-  if (event->button() != Qt::LeftButton)
+  if (event->button() != Qt::LeftButton || !pickable_)
     return;
   if (const std::optional<QPointF> target = sourceAt(event->position()))
     emit targetPicked(*target);
@@ -128,7 +151,7 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     }
   }
 
-  if (drawn.contains(hover_)) {
+  if (pickable_ && drawn.contains(hover_)) {
     painter.setPen(kHint);
     painter.setFont(font());
     painter.drawText(drawn.adjusted(0, 0, -10, -8),

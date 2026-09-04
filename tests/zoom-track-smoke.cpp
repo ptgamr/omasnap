@@ -118,15 +118,15 @@ bool runZoomTrackSmoke(QString &error) {
   // Placing cues: one lands, a second inside it is refused, and one placed
   // just before an existing cue is trimmed to meet it rather than overlap.
   ZoomTrack built;
-  const quint64 first = addZoomCue(built, 5000, {0.5, 0.5}, 2.0, 2000);
+  const quint64 first = addZoomCue(built, 5000, {0.5, 0.5}, 2.0, 2000, 20000);
   if (!check(first != 0 && built.cues.size() == 1, error,
              QStringLiteral("the first cue was not placed")))
     return false;
-  if (!check(addZoomCue(built, 5500, {0.5, 0.5}, 2.0, 2000) == 0 &&
+  if (!check(addZoomCue(built, 5500, {0.5, 0.5}, 2.0, 2000, 20000) == 0 &&
                  built.cues.size() == 1,
              error, QStringLiteral("a cue was placed inside another")))
     return false;
-  const quint64 before = addZoomCue(built, 4000, {0.5, 0.5}, 2.0, 3000);
+  const quint64 before = addZoomCue(built, 4000, {0.5, 0.5}, 2.0, 3000, 20000);
   if (!check(before != 0 && built.cues.size() == 2, error,
              QStringLiteral("a cue before an existing one was refused")))
     return false;
@@ -144,6 +144,50 @@ bool runZoomTrackSmoke(QString &error) {
   if (!check(removeZoomCue(built, before) && built.cues.size() == 1 &&
                  !removeZoomCue(built, 999),
              error, QStringLiteral("removing a cue is wrong")))
+    return false;
+
+  // A cue is never created past the end of the clip, where it would render
+  // nothing and sit as an unreachable sliver at the edge of the lane.
+  ZoomTrack shortClip;
+  if (!check(addZoomCue(shortClip, 1900, {0.5, 0.5}, 2.0, 2500, 2000) == 0,
+             error, QStringLiteral("a cue was created past the end")))
+    return false;
+  const quint64 trimmed =
+      addZoomCue(shortClip, 500, {0.5, 0.5}, 2.0, 2500, 2000);
+  if (!check(trimmed != 0 && shortClip.cues.first().endMs == 2000, error,
+             QStringLiteral("a cue was not trimmed to the clip length")))
+    return false;
+
+  // The cue count is capped, because every cue lengthens the single ffmpeg
+  // argument the export has to exec with.
+  ZoomTrack many;
+  for (int index = 0; index < kMaxZoomCues + 10; ++index)
+    static_cast<void>(addZoomCue(many, index * 1000, {0.5, 0.5}, 2.0, 500,
+                                 1000000));
+  if (!check(many.cues.size() == kMaxZoomCues, error,
+             QStringLiteral("the cue count is not capped at %1")
+                 .arg(kMaxZoomCues)))
+    return false;
+  {
+    // Even at the cap the filter stays well inside the exec argument limit.
+    const ZoomPanExpressions full = zoomPanExpressions(many, 30000, 1001);
+    const qsizetype bytes = full.z.size() + full.x.size() + full.y.size();
+    if (!check(bytes < 120000, error,
+               QStringLiteral("a full track generates a %1-byte filter, which "
+                              "is near the exec argument limit")
+                   .arg(bytes)))
+      return false;
+  }
+
+  // Overlapping cues are resolved before anything reads them, so the preview
+  // and the export cannot pick different centres for the same instant.
+  ZoomTrack overlapping;
+  overlapping.cues = {ZoomCue{1, 500, 4000, 400, 400, {0.25, 0.25}, 3.0},
+                      ZoomCue{2, 2000, 5000, 400, 400, {0.75, 0.75}, 2.0}};
+  const QVector<ZoomCue> resolved = sortedCues(overlapping);
+  if (!check(resolved.size() == 2 && resolved.at(0).endMs == 2000 &&
+                 resolved.at(1).startMs == 2000,
+             error, QStringLiteral("overlapping cues were not made disjoint")))
     return false;
 
   // The track crosses a process boundary as part of the project.
@@ -174,7 +218,7 @@ bool runZoomTrackSmoke(QString &error) {
   // A real track produces expressions in zoompan's own variables, and no
   // shell metacharacters: these are passed in an argument vector.
   const ZoomPanExpressions expressions = zoomPanExpressions(track, 60);
-  if (!check(!expressions.identity && expressions.z.contains("on/60") &&
+  if (!check(!expressions.identity && expressions.z.contains("on*1/60") &&
                  expressions.x.contains(QStringLiteral("iw")) &&
                  expressions.y.contains(QStringLiteral("ih")),
              error, QStringLiteral("the zoompan expressions look wrong")))

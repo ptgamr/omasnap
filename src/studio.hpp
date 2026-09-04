@@ -16,8 +16,22 @@ class StudioPreview;
 
 /** What the export needs to know about the file it is reading. */
 struct StudioSource {
+  /** Display size: already swapped when the file carries a 90/270 rotation,
+   *  because that is the shape both the preview and the export produce. */
   QSize size;
-  int fps = 0;
+  /** Frame rate as the ratio the file states, never rounded: 30000/1001 read
+   *  as 30 drifts the camera against the picture. */
+  int fpsNumerator = 0;
+  int fpsDenominator = 1;
+  /** Display rotation in degrees, 0/90/180/270. ffmpeg applies it before the
+   *  zoom filter, so the preview has to apply it too or the two disagree
+   *  about which way is up -- and a normalized target means a different
+   *  point on each. */
+  int rotation = 0;
+  [[nodiscard]] bool usable() const {
+    return size.isValid() && !size.isEmpty() && fpsNumerator > 0 &&
+           fpsDenominator > 0;
+  }
 };
 
 /**
@@ -37,6 +51,8 @@ public:
   /** Borrowed; the window owns the track and outlives this widget. */
   void setTrack(const ZoomTrack *track);
   void setSelectedCue(quint64 id);
+  /** Whether cues can be moved or resized; off while an export runs. */
+  void setCuesEditable(bool editable);
   [[nodiscard]] quint64 selectedCue() const { return selected_; }
   [[nodiscard]] qint64 duration() const { return duration_; }
   [[nodiscard]] qint64 trimIn() const { return trimIn_; }
@@ -84,6 +100,7 @@ private:
   qint64 grabOffsetMs_ = 0;
   Grab grabbed_ = Grab::None;
   Grab hovered_ = Grab::None;
+  bool cuesEditable_ = true;
 };
 
 /**
@@ -144,6 +161,7 @@ private:
   class QPushButton *removeZoomButton_ = nullptr;
   class QSlider *zoomSlider_ = nullptr;
   class QLabel *zoomLabel_ = nullptr;
+  class QTimer *saveTimer_ = nullptr;
   bool mediaFailed_ = false;
   /// Whether a first frame has been coaxed out of the player, so opening
   /// the window shows the recording rather than an empty rectangle.

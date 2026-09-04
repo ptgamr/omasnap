@@ -59,9 +59,31 @@ inline constexpr qreal kMaxZoomScale = 8.0;
 /// Shortest cue worth having, and the shortest visible ramp.
 inline constexpr qint64 kMinCueMs = 200;
 inline constexpr qint64 kMinEaseMs = 60;
+/// Most cues one clip may carry. Every cue adds to the ffmpeg expression the
+/// export passes as a single argument, and Linux caps one argument at 32
+/// pages; measured at roughly 500 bytes per cue, this leaves the generated
+/// filter about an order of magnitude short of that ceiling. It is also far
+/// past any real edit.
+inline constexpr int kMaxZoomCues = 200;
 
-/** Cues sorted by start, with degenerate ones dropped. */
+/**
+ * Cues sorted by start, degenerate ones dropped, and overlaps resolved by
+ * trimming the earlier cue to where the next one begins.
+ *
+ * Both the preview and the export read this, never the raw list, which is
+ * what makes them agree: with disjoint cues "the deepest cue" and "the cue
+ * that is running" are the same cue, so there is no way for the two
+ * descriptions to pick different centres.
+ */
 [[nodiscard]] QVector<ZoomCue> sortedCues(const ZoomTrack &track);
+
+/** How long a cue's ramps actually last, after fitting them into its own
+ *  length. Shared so the preview and the export split them identically. */
+struct ZoomRamps {
+  qreal easeInMs = 0;
+  qreal easeOutMs = 0;
+};
+[[nodiscard]] ZoomRamps zoomRamps(const ZoomCue &cue);
 
 /**
  * The camera at `timeMs`. Between cues this is 1x centred; inside one it
@@ -94,9 +116,13 @@ struct ZoomPanExpressions {
 
 /**
  * Expressions for ffmpeg's `zoompan`, in terms of its output frame counter
- * `on` at `fps`. zoompan crops `iw/z` by `ih/z` at (`x`,`y`) and scales that
- * to the output size, which is the same operation `zoomSourceRect()`
- * describes.
+ * `on` at `fpsNumerator/fpsDenominator`. zoompan crops `iw/z` by `ih/z` at
+ * (`x`,`y`) and scales that to the output size, which is the same operation
+ * `zoomSourceRect()` describes.
+ *
+ * The frame rate is a ratio, not a number, because rounding it is a drift:
+ * 30000/1001 read as 30 puts the camera about 3.6 seconds out of step with
+ * the picture over an hour, and shortens the video against its own audio.
  *
  * `startOffsetMs` is where the filter's first frame sits on the timeline.
  * zoompan counts frames from its own input, so a trimmed export starts `on`
@@ -105,7 +131,8 @@ struct ZoomPanExpressions {
  * zoompan reads the frame counter, not the timestamp.
  */
 [[nodiscard]] ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track,
-                                                    int fps,
+                                                    int fpsNumerator,
+                                                    int fpsDenominator = 1,
                                                     qint64 startOffsetMs = 0);
 
 [[nodiscard]] QJsonObject writeZoomTrack(const ZoomTrack &track);
@@ -114,10 +141,12 @@ struct ZoomPanExpressions {
 
 /**
  * Places a cue centred on `target` at `atMs`, sized so it does not collide
- * with its neighbours, and returns its id. Zero when there is no room.
+ * with its neighbours and stays inside `limitMs`, and returns its id. Zero
+ * when there is no room -- including at the very end of a clip, where a cue
+ * would otherwise be created past the last frame and never render.
  */
 quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
-                   qreal scale, qint64 durationMs);
+                   qreal scale, qint64 durationMs, qint64 limitMs);
 /** Removes the cue with `id`; false when there is no such cue. */
 bool removeZoomCue(ZoomTrack &track, quint64 id);
 /** The cue covering `timeMs`, or nullptr. */
