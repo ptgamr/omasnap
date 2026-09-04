@@ -519,6 +519,29 @@ bool runZoomExportGoldenChecks(QString &error) {
                    {45, 90, 135},
                    90});
 
+  // A full track, handed to ffmpeg. The limit that bites is ffmpeg's own
+  // expression complexity, not the length of the argument, so counting
+  // characters proves nothing about whether an export will run.
+  {
+    ZoomTrack full;
+    for (int index = 0; index < kMaxZoomCues + 5; ++index)
+      static_cast<void>(addZoomCue(full, index * 200, {0.4, 0.6}, 2.0, 150,
+                                   1000000));
+    if (full.cues.size() != kMaxZoomCues) {
+      error = QStringLiteral("expected a full track of %1 cues, got %2")
+                  .arg(kMaxZoomCues)
+                  .arg(full.cues.size());
+      return false;
+    }
+    GoldenCase capped{"capped", QStringLiteral("30"), full, 0, {30}, 0};
+    if (compareCase(capped, ffmpeg, scratch.path(), error) < 0.0) {
+      error = QStringLiteral("a full %1-cue track does not export: %2")
+                  .arg(kMaxZoomCues)
+                  .arg(error);
+      return false;
+    }
+  }
+
   double worst = 0.0;
   for (const GoldenCase &scenario : cases) {
     const double difference = compareCase(scenario, ffmpeg, scratch.path(), error);

@@ -23,14 +23,18 @@ struct StudioSource {
    *  as 30 drifts the camera against the picture. */
   int fpsNumerator = 0;
   int fpsDenominator = 1;
-  /** Display rotation in degrees, 0/90/180/270. ffmpeg applies it before the
-   *  zoom filter, so the preview has to apply it too or the two disagree
-   *  about which way is up -- and a normalized target means a different
-   *  point on each. */
+  /** Clockwise display rotation to apply, 0/90/180/270. ffmpeg applies the
+   *  container's rotation before the zoom filter, so the preview has to
+   *  apply it too or the two disagree about which way is up -- and a
+   *  normalized target then means a different point on each. */
   int rotation = 0;
+  /** Set when the file asks for something the zoom cannot reproduce
+   *  faithfully: a rotation that is not a right angle, where ffmpeg takes a
+   *  general rotation path the preview's transpose would not match. */
+  bool unsupportedTransform = false;
   [[nodiscard]] bool usable() const {
     return size.isValid() && !size.isEmpty() && fpsNumerator > 0 &&
-           fpsDenominator > 0;
+           fpsDenominator > 0 && !unsupportedTransform;
   }
 };
 
@@ -113,6 +117,7 @@ class StudioWindow final : public QWidget {
   Q_OBJECT
 public:
   explicit StudioWindow(QString path, QWidget *parent = nullptr);
+  ~StudioWindow() override;
 
   /** False when the file could not be opened at all. */
   [[nodiscard]] bool hasMedia() const;

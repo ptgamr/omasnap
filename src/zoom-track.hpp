@@ -59,12 +59,27 @@ inline constexpr qreal kMaxZoomScale = 8.0;
 /// Shortest cue worth having, and the shortest visible ramp.
 inline constexpr qint64 kMinCueMs = 200;
 inline constexpr qint64 kMinEaseMs = 60;
-/// Most cues one clip may carry. Every cue adds to the ffmpeg expression the
-/// export passes as a single argument, and Linux caps one argument at 32
-/// pages; measured at roughly 500 bytes per cue, this leaves the generated
-/// filter about an order of magnitude short of that ceiling. It is also far
-/// past any real edit.
-inline constexpr int kMaxZoomCues = 200;
+/// Most cues one clip may carry.
+///
+/// The binding limit is not the length of the argument but ffmpeg's own
+/// expression complexity: measured against ffmpeg n9.0.1, this generator's
+/// filter is accepted at 88 cues and rejected at 89 with "Failed to
+/// configure output pad", long before the 131072-byte single-argument
+/// ceiling. The cap is set well under the measured cliff rather than at it,
+/// and the golden test proves the cap by handing a full track to ffmpeg
+/// rather than by counting characters.
+inline constexpr int kMaxZoomCues = 40;
+
+/**
+ * Puts a track into the form everything downstream agrees on: disjoint,
+ * inside the clip, and within the cue cap.
+ *
+ * The renderers already read cues through sortedCues(), but the timeline and
+ * the editing lookups read the stored list, so an overlap left the lane
+ * drawing and editing cue tails that neither renderer would ever show.
+ * Normalizing what is stored keeps one description of the track.
+ */
+void normalizeZoomTrack(ZoomTrack &track, qint64 durationMs);
 
 /**
  * Cues sorted by start, degenerate ones dropped, and overlaps resolved by

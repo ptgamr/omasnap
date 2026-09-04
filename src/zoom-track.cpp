@@ -119,6 +119,27 @@ QRectF zoomSourceRect(const ZoomTrack &track, qint64 timeMs) {
           size};
 }
 
+void normalizeZoomTrack(ZoomTrack &track, qint64 durationMs) {
+  QVector<ZoomCue> cues = sortedCues(track);
+  if (durationMs > 0) {
+    QVector<ZoomCue> inside;
+    inside.reserve(cues.size());
+    for (ZoomCue cue : cues) {
+      // A sidecar written before the clip was known, or against a different
+      // file, can hold cues past the end. They render nothing and export
+      // nothing, so they are trimmed or dropped rather than left to be
+      // selected and dragged.
+      cue.endMs = qMin(cue.endMs, durationMs);
+      if (cue.startMs < durationMs && cue.endMs - cue.startMs >= kMinCueMs)
+        inside.push_back(cue);
+    }
+    cues = inside;
+  }
+  if (cues.size() > kMaxZoomCues)
+    cues.resize(kMaxZoomCues);
+  track.cues = cues;
+}
+
 ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fpsNumerator,
                                       int fpsDenominator,
                                       qint64 startOffsetMs) {
@@ -231,6 +252,8 @@ bool readZoomTrack(const QJsonObject &object, ZoomTrack &track,
                   entry.value(QStringLiteral("targetY")).toDouble(0.5)};
     cue.scale = entry.value(QStringLiteral("scale")).toDouble(2.0);
     parsed.cues.push_back(cue);
+    if (parsed.cues.size() >= kMaxZoomCues)
+      break; // A file may say anything; the cap is ours to keep.
   }
   track = parsed;
   return true;

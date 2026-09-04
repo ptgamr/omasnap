@@ -136,7 +136,18 @@ StudioSource probeStudioSource(const QString &path) {
       // clockwise angle to apply -- the negation is the conversion, not a
       // mistake. A phone portrait file reports -90 and is displayed by
       // turning the stored landscape pixels 90 clockwise.
-      media.rotation = ((-value.toInt() % 360) + 360) % 360;
+      {
+        // A right angle is a transpose, which the preview can reproduce
+        // exactly. Anything else -- ffmpeg takes a general rotation path
+        // that resizes the canvas differently -- is refused rather than
+        // framed differently in the two places.
+        const double degrees = value.toDouble();
+        const double snapped = qRound(degrees / 90.0) * 90.0;
+        if (std::abs(degrees - snapped) > 0.5)
+          media.unsupportedTransform = true;
+        media.rotation =
+            ((static_cast<int>(-snapped) % 360) + 360) % 360;
+      }
     else if (key == QStringLiteral("r_frame_rate")) {
       const QStringList rate = value.split(QLatin1Char('/'));
       media.fpsNumerator = rate.value(0).toInt();
@@ -656,6 +667,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   connect(player_, &QMediaPlayer::durationChanged, this,
           [this](qint64 duration) {
             timeline_->setDuration(duration);
+            // The clip length is only known now, so a sidecar loaded before
+            // it can hold cues past the end.
+            normalizeZoomTrack(zoom_, duration);
             refreshControls();
           });
   connect(player_, &QMediaPlayer::mediaStatusChanged, this,
@@ -675,7 +689,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   connect(player_, &QMediaPlayer::positionChanged, this,
           [this](qint64 position) {
             timeline_->setPosition(position);
-            preview_->setPosition(position);
+            // Not the preview: its clock comes from the frame being painted,
+            // and two writers with no ordering between them meant whichever
+            // signal arrived last decided the crop.
             // Playback stops at the out point: the trim is what is being
             // reviewed, so playing past it would be reviewing the wrong cut.
             if (player_->playbackState() == QMediaPlayer::PlayingState &&
@@ -723,6 +739,10 @@ const ZoomCue *StudioWindow::activeCue() const {
 }
 
 void StudioWindow::zoomChanged() {
+  // Normalize what is stored, not just what is rendered: the timeline and
+  // the editing lookups read this list, and an overlap otherwise left the
+  // lane drawing and editing cue tails no renderer would ever show.
+  normalizeZoomTrack(zoom_, player_->duration());
   preview_->update();
   timeline_->update();
   // Coalesced: a drag emits this on every mouse move, and writing the file
@@ -841,6 +861,15 @@ void StudioWindow::saveZoom() {
     setStatus(QStringLiteral("Could not save the zoom cues"));
 }
 
+StudioWindow::~StudioWindow() {
+  // The save is coalesced behind a timer, and closing destroys that timer
+  // before it fires. Anything still pending is written now.
+  if (saveTimer_ && saveTimer_->isActive()) {
+    saveTimer_->stop();
+    saveZoom();
+  }
+}
+
 bool StudioWindow::hasMedia() const { return !mediaFailed_; }
 
 void StudioWindow::setStatus(const QString &status) {
@@ -860,7 +889,12 @@ void StudioWindow::refreshControls() {
                            : QStringLiteral("Play"));
   playButton_->setEnabled(!mediaFailed_ && duration > 0);
   resetButton_->setEnabled(trimmed && !exporting);
-  exportButton_->setEnabled(duration > 0 && !mediaFailed_ && !exporting);
+  // Export is refused rather than quietly producing an unzoomed file: when
+  // ffprobe could not read the source there is no frame rate to build the
+  // zoom from, and the preview is showing cues the export would drop.
+  const bool zoomWouldBeLost = !zoom_.cues.isEmpty() && !media_.usable();
+  exportButton_->setEnabled(duration > 0 && !mediaFailed_ && !exporting &&
+                            !zoomWouldBeLost);
   timeLabel_->setText(
       QStringLiteral("%1 / %2   ·   keep %3 – %4")
           .arg(studioClock(player_->position()), studioClock(duration),
@@ -892,9 +926,18 @@ void StudioWindow::refreshControls() {
                           : QStringLiteral("—"));
   preview_->setTargetMarker(cue != nullptr,
                             cue ? cue->target : QPointF(0.5, 0.5));
-  if (!media_.usable())
-    zoomLabel_->setText(
-        QStringLiteral("no zoom: ffprobe could not read this file"));
+  if (!media_.usable()) {
+    const QString why =
+        media_.unsupportedTransform
+            ? QStringLiteral("this file is rotated by something other than a "
+                             "right angle")
+            : QStringLiteral("ffprobe could not read this file");
+    zoomLabel_->setText(zoom_.cues.isEmpty()
+                            ? QStringLiteral("no zoom: %1").arg(why)
+                            : QStringLiteral("cannot export: %1, so these "
+                                             "zooms cannot be applied")
+                                  .arg(why));
+  }
   else if (exporting)
     zoomLabel_->setText(QStringLiteral("exporting…"));
 }

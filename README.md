@@ -286,9 +286,23 @@ scales up from the cropped region.
 
 Portrait phone recordings work: the container's rotation is read and applied to
 the preview the same way ffmpeg applies it before the export's zoom, so a cue
-lands on the same thing in both. One clip holds at most 200 cues, which is far
-past any real edit and keeps the generated filter well inside the limit on a
-single command-line argument.
+lands on the same thing in both.
+
+Limits worth knowing, all of them measured rather than guessed:
+
+- **40 zooms per clip.** The ceiling is ffmpeg's expression complexity, not
+  anything of ours: this generator's filter is accepted at 88 cues and rejected
+  at 89. The cap sits well under that, and the test proves it by handing a full
+  track to ffmpeg rather than by counting characters.
+- **Constant frame rate only.** A rational rate like 30000/1001 is handled
+  exactly. A genuinely variable-rate file — some phone recordings — will drift,
+  because the export moves the camera per output frame while the preview follows
+  each frame's own timestamp. Remux to CFR first if you hit this.
+- **Right-angle rotations only.** Anything else is refused with a reason rather
+  than framed differently in the two places, because ffmpeg takes a general
+  rotation path that a transpose cannot match.
+- **Zooming past roughly 3× looks soft**, because the export scales up from the
+  cropped region.
 
 **Trim.** `Space` plays and pauses, `Left`/`Right` seek five seconds, `I` and `O`
 set the in and out points at the playhead, `R` clears the trim, and `Ctrl`+`E`

@@ -168,16 +168,36 @@ bool runZoomTrackSmoke(QString &error) {
              QStringLiteral("the cue count is not capped at %1")
                  .arg(kMaxZoomCues)))
     return false;
-  {
-    // Even at the cap the filter stays well inside the exec argument limit.
-    const ZoomPanExpressions full = zoomPanExpressions(many, 30000, 1001);
-    const qsizetype bytes = full.z.size() + full.x.size() + full.y.size();
-    if (!check(bytes < 120000, error,
-               QStringLiteral("a full track generates a %1-byte filter, which "
-                              "is near the exec argument limit")
-                   .arg(bytes)))
-      return false;
-  }
+  // A file may say anything, so the cap is applied on the way in too.
+  ZoomTrack overfull;
+  for (int index = 0; index < kMaxZoomCues + 25; ++index)
+    overfull.cues.push_back(
+        ZoomCue{static_cast<quint64>(index + 1), index * 1000,
+                index * 1000 + 500, 100, 100, {0.5, 0.5}, 2.0});
+  ZoomTrack loaded;
+  QString loadError;
+  if (!check(readZoomTrack(writeZoomTrack(overfull), loaded, loadError) &&
+                 loaded.cues.size() == kMaxZoomCues,
+             error,
+             QStringLiteral("a sidecar with too many cues was not capped")))
+    return false;
+
+  // Normalizing puts the stored track into the shape the renderers read:
+  // disjoint, inside the clip, capped.
+  ZoomTrack contained;
+  contained.cues = {ZoomCue{1, 0, 10000, 400, 400, {0.2, 0.2}, 3.0},
+                    ZoomCue{2, 4000, 5000, 400, 400, {0.8, 0.8}, 2.0},
+                    ZoomCue{3, 20000, 30000, 400, 400, {0.5, 0.5}, 2.0}};
+  normalizeZoomTrack(contained, 12000);
+  if (!check(contained.cues.size() == 2 &&
+                 contained.cues.at(0).endMs == 4000 &&
+                 contained.cues.at(1).endMs == 5000,
+             error,
+             QStringLiteral("normalizing left the stored track disagreeing "
+                            "with what is rendered")))
+    return false;
+  // Whether the generated filter is acceptable is ffmpeg's question, not a
+  // character count's; the studio smoke asks ffmpeg directly at the cap.
 
   // Overlapping cues are resolved before anything reads them, so the preview
   // and the export cannot pick different centres for the same instant.
