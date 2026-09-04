@@ -538,6 +538,53 @@ Maintain MIT licensing for new first-party code unless the project owner chooses
 
 Transcription is not a base dependency. Phase 5 must select a local engine and model license, require an explicit model download/import, pin its version and checksum, show storage size before acquisition, and allow complete removal. The recorder and Studio themselves still make no network requests.
 
+## What the first increment actually shipped
+
+This section is a record of where the implementation stands against the plan
+above, written after the fact. It is deliberately specific about the places
+the code does something other than what the plan asks for.
+
+Built:
+
+- `omasnap <mode> --record` reusing the frozen selector, `--audio`, `--mic`,
+  `--fps`, and `omasnap --record --stop`.
+- The target contract (`src/record-target.*`), with the GSR coordinate space
+  measured rather than assumed — see [recording-targets.md](recording-targets.md).
+- One owned encoder child with a private control socket, pause/stop,
+  parent-death handling, and a stop that also answers SIGTERM.
+- A capture-excluded indicator, notification, Matroska master remuxed to a
+  validated MP4, and next-launch recovery of an abandoned master.
+- `omasnap-studio`: playback, a trim range, and an ffmpeg export.
+
+Deliberate deviations:
+
+- **Two processes, not three.** The record UI and the encoder supervisor are
+  one process. The plan separates them so a picker bug cannot corrupt the
+  master; at this size the "picker" is a pill with two buttons, and the
+  master is written by the encoder rather than by us. Killing the recorder
+  is covered by the parent-death signal and next-launch recovery, both
+  tested. Revisit when the UI grows a settings surface.
+- **`omasnap` remains one binary**, with the recorder inside it, because
+  nothing it needs is a new library. Only the Studio is split out, and only
+  because Qt Multimedia would otherwise be linked into the screenshot path.
+- **No project directory yet.** A recording is one file in
+  `~/Videos/Recordings`, not a versioned `.omasnap-video` package with a
+  journal, proxies, and an edit document. The Studio edits in place and
+  exports beside the original.
+- **The notification click action is a shell command string**, because that
+  is the interface `omarchy-notification-send --exec` offers. It is
+  shell-quoted the same way the screenshot path already quotes it.
+
+Known gaps, all of them things the plan asks for:
+
+- Capture exclusion is not verified. The `omasnap-record` namespace is
+  assigned and the rule is documented, but no canary-frame test proves the
+  indicator is absent, so a missing rule fails open.
+- No camera, no separate audio track policy proven by `ffprobe`, no pointer
+  or keystroke sidecar, no captions.
+- Coordinates are proven on 1× and 1.5× only.
+- Storage quotas, cache pruning, and the free-space preflight are absent.
+
 ## Delivery phases
 
 Estimates are solo developer effort and include implementation/test work inside each phase. The headline ranges add roughly 15% cross-phase integration and release contingency.

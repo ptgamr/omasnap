@@ -28,6 +28,8 @@
 #include <QUuid>
 #include <QWindow>
 
+#include <unistd.h>
+
 #include <memory>
 
 #include <cerrno>
@@ -199,6 +201,39 @@ QString promoteMatroska(const QDir &directory, const QString &stem,
   const QString promoted = QFile::rename(master, kept) ? kept : master;
   restrictToOwner(promoted);
   return promoted;
+}
+
+/**
+ * Pids of gpu-screen-recorder processes this user already has running.
+ *
+ * Read-only on purpose: the plan is explicit that a recorder we did not
+ * spawn is never signalled, paused, adopted, or stopped. Knowing it is there
+ * is enough, because the stock Omarchy recorder controls encoders by broad
+ * discovery and could otherwise pause or stop ours.
+ */
+QVector<qint64> runningEncoders() {
+  // /proc/<pid>/comm is capped at 15 characters, so the name arrives
+  // truncated and has to be compared that way.
+  static const QString encoder =
+      QStringLiteral("gpu-screen-recorder").left(15);
+  const uint self = ::geteuid();
+  QVector<qint64> pids;
+  const QStringList entries =
+      QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+  for (const QString &entry : entries) {
+    bool numeric = false;
+    const qint64 pid = entry.toLongLong(&numeric);
+    if (!numeric)
+      continue;
+    QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
+    if (!comm.open(QIODevice::ReadOnly) ||
+        QString::fromLatin1(comm.readLine()).trimmed() != encoder)
+      continue;
+    if (QFileInfo(QStringLiteral("/proc/%1").arg(pid)).ownerId() != self)
+      continue;
+    pids.append(pid);
+  }
+  return pids;
 }
 
 /**
@@ -508,6 +543,20 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
     }
     master.close();
     restrictToOwner(config.outputPath);
+  }
+
+  // Refuse rather than compete. Another recorder on this desktop -- the
+  // stock Omarchy one included -- controls its encoder by broad discovery,
+  // and running alongside it would let it pause or stop ours.
+  if (const QVector<qint64> others = runningEncoders(); !others.isEmpty()) {
+    const QString message =
+        QStringLiteral("Another screen recorder is already running (pid %1); "
+                       "stop it first")
+            .arg(others.first());
+    qCritical().noquote() << message;
+    notifyRecording(message, {});
+    QFile::remove(config.outputPath);
+    return 1;
   }
 
   RecordIndicator indicator;

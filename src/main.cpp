@@ -29,11 +29,44 @@
 #include <optional>
 
 
+namespace {
+/// Exactly `omasnap --record --stop`, in either order and nothing else.
+/// Anything with more arguments falls through to the normal path, which
+/// reports the usage error rather than quietly ignoring them.
+bool isBareStopRequest(int argc, char **argv) {
+  bool record = false;
+  bool stop = false;
+  for (int index = 1; index < argc; ++index) {
+    const QLatin1StringView argument(argv[index]);
+    if (argument == QLatin1StringView("--record"))
+      record = true;
+    else if (argument == QLatin1StringView("--stop"))
+      stop = true;
+    else
+      return false;
+  }
+  return record && stop;
+}
+} // namespace
+
 int main(int argc, char **argv) {
   startupTimingMark("entered main");
   QCoreApplication::setApplicationName(QStringLiteral("omasnap"));
   QCoreApplication::setApplicationVersion(QString::fromLatin1(OMASNAP_VERSION));
   QCoreApplication::setOrganizationName(QStringLiteral("Omarchy"));
+
+  // Stopping a recording is a signal to another process and needs no
+  // display, so it is answered before any GUI toolkit is brought up: it has
+  // to work from a script, over SSH, and while the session is going away.
+  if (isBareStopRequest(argc, argv)) {
+    QCoreApplication stopper(argc, argv);
+    QString stopError;
+    if (!stopActiveRecording(stopError)) {
+      qCritical().noquote() << stopError;
+      return 1;
+    }
+    return 0;
+  }
   qputenv("QT_WAYLAND_SHELL_INTEGRATION", "layer-shell");
   // Omarchy exports QT_QPA_PLATFORMTHEME=gtk3 session-wide. Honouring it
   // loads the qgtk3 plugin, which initialises GTK inside this process

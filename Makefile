@@ -27,7 +27,11 @@ build: configure
 smoke: build
 	QT_QPA_PLATFORM=offscreen $(BUILD_DIR)/omasnap-smoke \
 		$(BUILD_DIR)/omasnap-smoke-output
-	QT_QPA_PLATFORM=offscreen $(BUILD_DIR)/omasnap-studio-smoke
+	@if test -x "$(BUILD_DIR)/omasnap-studio-smoke"; then \
+		QT_QPA_PLATFORM=offscreen "$(BUILD_DIR)/omasnap-studio-smoke"; \
+	else \
+		echo "make check: built without the Studio; skipping its smoke"; \
+	fi
 
 lint: build
 	@set -eu; \

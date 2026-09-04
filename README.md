@@ -269,7 +269,27 @@ annotation overlay is open reports that it is busy (exit 3) rather than throwing
 overlay away.
 
 Requires `gpu-screen-recorder`. `ffmpeg` is optional: with it, the Matroska master is
-remuxed to MP4 by stream copy; without it, the `.mkv` is kept as-is.
+remuxed to MP4 by stream copy; without it, the `.mkv` is kept as-is. Only one
+recording runs at a time, and Omasnap refuses to start one while another screen
+recorder is already running — it never signals a recorder it did not start.
+
+### Known gaps
+
+- **The indicator is only excluded from the recording if you add the layer rule.**
+  Omasnap gives it the `omasnap-record` namespace, but nothing verifies that Hyprland
+  is actually honouring `no_screen_share` for it, so a missed rule means the pill and
+  its Stop button appear in the video rather than the recording refusing to start.
+  Apply the rule above and check one recording.
+- **`~/Videos/Recordings` is not configurable**, and the frame rate is the only
+  recording setting.
+- **Coordinates are proven on 1× and 1.5× outputs only.** See
+  [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
+  what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
+- **The Studio is a first increment**: one clip, trim, export. No multi-clip
+  timeline, zoom cues, captions, or masks; see
+  [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
+- **`omasnap-studio` is optional at build time.** Configure with
+  `-DOMASNAP_STUDIO=OFF` for a screenshot-only build that needs no Qt Multimedia.
 
 ### One instance, toggled by the same hotkey
 
