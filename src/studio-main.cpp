@@ -17,15 +17,26 @@ int main(int argc, char **argv) {
   // opens no native dialogs, so loading a desktop theme plugin buys nothing.
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QGuiApplication::setDesktopFileName(QStringLiteral("omasnap-studio"));
-  QApplication application(argc, argv);
+  const QApplication application(argc, argv);
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral(
-      "Review and trim an OmaSnap screen recording.\n"
+      "Review, zoom and trim a screen recording. Any file will do -- it does "
+      "not\nhave to have been recorded by omasnap.\n"
+      "\n"
+      "Click the picture to aim a zoom: inside an existing cue that re-aims "
+      "it,\nand anywhere else it starts a new one at the playhead. Cues are "
+      "the blocks\non the lane under the trim bar; drag their bodies to move "
+      "them and their\nedges to change how long they run. The slider sets how "
+      "far in the selected\ncue goes.\n"
       "\n"
       "Space plays and pauses, Left/Right seek five seconds, I and O set the "
       "in\nand out points at the playhead, R clears the trim, and Ctrl+E "
       "exports the\nkept range beside the original.\n"
+      "\n"
+      "Zoom cues are saved beside the recording as "
+      "`<recording>.omasnap-zoom.json`,\nso the original file is never "
+      "touched and reopening brings them back.\n"
       "\n"
       "Exit codes: 0 success; 1 the recording could not be opened; 2 usage "
       "error."));

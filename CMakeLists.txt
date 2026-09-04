@@ -215,6 +215,8 @@ qt_add_executable(omasnap-studio-smoke
   tests/zoom-track-smoke.hpp
   src/studio.cpp
   src/studio.hpp
+  src/studio-preview.cpp
+  src/studio-preview.hpp
   src/zoom-track.cpp
   src/zoom-track.hpp
   src/overlay-chrome.cpp
@@ -243,6 +245,8 @@ qt_add_executable(omasnap-studio
   src/studio-main.cpp
   src/studio.cpp
   src/studio.hpp
+  src/studio-preview.cpp
+  src/studio-preview.hpp
   src/zoom-track.cpp
   src/zoom-track.hpp
   src/overlay-chrome.cpp

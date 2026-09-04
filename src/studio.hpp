@@ -11,7 +11,14 @@
 class QAudioOutput;
 class QMediaPlayer;
 class QProcess;
-class QVideoWidget;
+class QVideoSink;
+class StudioPreview;
+
+/** What the export needs to know about the file it is reading. */
+struct StudioSource {
+  QSize size;
+  int fps = 0;
+};
 
 /**
  * The trim band under the video: the whole recording as one bar, the kept
@@ -27,6 +34,10 @@ public:
   void setDuration(qint64 milliseconds);
   void setPosition(qint64 milliseconds);
   void setTrim(qint64 inPoint, qint64 outPoint);
+  /** Borrowed; the window owns the track and outlives this widget. */
+  void setTrack(const ZoomTrack *track);
+  void setSelectedCue(quint64 id);
+  [[nodiscard]] quint64 selectedCue() const { return selected_; }
   [[nodiscard]] qint64 duration() const { return duration_; }
   [[nodiscard]] qint64 trimIn() const { return trimIn_; }
   [[nodiscard]] qint64 trimOut() const { return trimOut_; }
@@ -35,6 +46,10 @@ public:
 signals:
   void scrubbed(qint64 milliseconds);
   void trimChanged(qint64 inPoint, qint64 outPoint);
+  /** A cue was clicked, or 0 when the click landed on empty lane. */
+  void cueSelected(quint64 id);
+  /** A cue was dragged or resized to a new span. */
+  void cueMoved(quint64 id, qint64 startMs, qint64 endMs);
 
 protected:
   void leaveEvent(QEvent *event) override;
@@ -44,17 +59,29 @@ protected:
   void paintEvent(QPaintEvent *event) override;
 
 private:
-  enum class Grab { None, In, Out, Playhead };
+  enum class Grab { None, In, Out, Playhead, CueBody, CueStart, CueEnd };
 
+  /** The trim bar's row. */
   [[nodiscard]] QRectF trackRect() const;
+  /** The zoom cues' row, under it. */
+  [[nodiscard]] QRectF cueLaneRect() const;
+  [[nodiscard]] QRectF cueRect(const ZoomCue &cue) const;
   [[nodiscard]] qreal xForTime(qint64 milliseconds) const;
   [[nodiscard]] qint64 timeForX(qreal x) const;
   [[nodiscard]] Grab grabAt(const QPointF &position) const;
+  /** The cue under `position`, or 0. `edge` reports which end was hit. */
+  [[nodiscard]] quint64 cueAt(const QPointF &position, Grab *edge) const;
 
+  const ZoomTrack *track_ = nullptr;
   qint64 duration_ = 0;
   qint64 position_ = 0;
   qint64 trimIn_ = 0;
   qint64 trimOut_ = 0;
+  quint64 selected_ = 0;
+  quint64 grabbedCue_ = 0;
+  /// Where in the cue the drag started, so moving one does not snap its
+  /// start to the pointer.
+  qint64 grabOffsetMs_ = 0;
   Grab grabbed_ = Grab::None;
   Grab hovered_ = Grab::None;
 };
@@ -86,30 +113,46 @@ private:
   void startExport();
   void setStatus(const QString &status);
   void refreshControls();
+  /** Clicking the preview aims the cue under the playhead, or makes one. */
+  void aimZoom(const QPointF &target);
+  void addZoomAtPlayhead();
+  void removeSelectedZoom();
+  void setSelectedZoomScale(qreal scale);
+  /** The cue the controls act on: the selection, else the one under the
+   *  playhead. */
+  [[nodiscard]] const ZoomCue *activeCue() const;
+  void zoomChanged();
+  [[nodiscard]] QString zoomSidecarPath() const;
+  void loadZoom();
+  void saveZoom();
 
   QString path_;
   QMediaPlayer *player_ = nullptr;
   QAudioOutput *audio_ = nullptr;
-  QVideoWidget *video_ = nullptr;
+  QVideoSink *sink_ = nullptr;
+  StudioPreview *preview_ = nullptr;
   StudioTimeline *timeline_ = nullptr;
   QProcess *export_ = nullptr;
+  ZoomTrack zoom_;
+  StudioSource media_;
   class QLabel *statusLabel_ = nullptr;
   class QLabel *timeLabel_ = nullptr;
   class QPushButton *playButton_ = nullptr;
   class QPushButton *exportButton_ = nullptr;
   class QPushButton *resetButton_ = nullptr;
+  class QPushButton *addZoomButton_ = nullptr;
+  class QPushButton *removeZoomButton_ = nullptr;
+  class QSlider *zoomSlider_ = nullptr;
+  class QLabel *zoomLabel_ = nullptr;
   bool mediaFailed_ = false;
+  /// Whether a first frame has been coaxed out of the player, so opening
+  /// the window shows the recording rather than an empty rectangle.
+  bool primed_ = false;
 };
 
 /** `hh:mm:ss.mmm` for ffmpeg, and `m:ss` for people. */
 [[nodiscard]] QString studioTimecode(qint64 milliseconds);
 [[nodiscard]] QString studioClock(qint64 milliseconds);
-/** What the export needs to know about the file it is reading. */
-struct StudioSource {
-  QSize size;
-  int fps = 0;
-};
-
 /**
  * The ffmpeg argument vector that writes `[inPoint, outPoint)` of `source`
  * to `destination`, with `zoom` applied.

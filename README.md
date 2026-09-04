@@ -261,9 +261,33 @@ interrupted harder than that is promoted to a playable file the next time you re
 
 Recordings land in `~/Videos/Recordings` as
 `recording-<date>_<time>-<what>.mp4`, owner-readable only. The notification that
-follows opens the recording in **OmaSnap Studio**, where `Space` plays,
-`I` and `O` set the in and out points at the playhead, `R` clears the trim, and
-`Ctrl`+`E` exports the kept range beside the original.
+follows opens the recording in **OmaSnap Studio**.
+
+## Studio
+
+```bash
+omasnap-studio ~/Videos/Recordings/recording-2026-09-04_13-30-58-hdmi-a-1.mp4
+omasnap-studio ~/Downloads/from-my-ipad.mov     # any file, not just ours
+```
+
+**Zoom.** Click the picture where you want the camera to go. Inside an existing
+cue that re-aims it; anywhere else it starts a new one at the playhead. Cues are
+the blocks on the lane under the trim bar — drag a body to move it, an edge to
+change how long it runs — and the slider sets how far in the selected one goes.
+Each zoom eases in and out on a smoothstep, so it starts and stops without a
+jerk, and panning stops at the frame edge rather than showing past it.
+
+What you see is what you get: the preview and the export are driven by the same
+model, and a golden test renders the same frames both ways at rest, mid-ramp and
+holding to keep it that way. A recording zoomed past roughly 3× will look soft,
+because the export scales up from the cropped region.
+
+**Trim.** `Space` plays and pauses, `Left`/`Right` seek five seconds, `I` and `O`
+set the in and out points at the playhead, `R` clears the trim, and `Ctrl`+`E`
+exports the kept range beside the original.
+
+Cues are saved next to the recording as `<recording>.omasnap-zoom.json`, so the
+original file is never touched and reopening brings your work back.
 
 Recording and screenshots are independent: they use separate locks, so taking a
 screenshot during a recording does not stop it, and starting a recording while an

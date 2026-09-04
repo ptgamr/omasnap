@@ -118,17 +118,20 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fps,
       startOffsetMs == 0
           ? QStringLiteral("(on/%1)").arg(fps)
           : QStringLiteral("((on/%1)+%2)")
-                .arg(QString::number(fps), number(startOffsetMs / 1000.0));
+                .arg(QString::number(fps),
+                     number(static_cast<qreal>(startOffsetMs) / 1000.0));
   QString scale = QStringLiteral("1");
   QString centreX = QStringLiteral("0.5");
   QString centreY = QStringLiteral("0.5");
 
   for (const ZoomCue &cue : cues) {
-    const qreal start = cue.startMs / 1000.0;
-    const qreal end = cue.endMs / 1000.0;
+    const qreal start = static_cast<qreal>(cue.startMs) / 1000.0;
+    const qreal end = static_cast<qreal>(cue.endMs) / 1000.0;
     const qreal length = end - start;
-    qreal easeIn = qMax<qint64>(kMinEaseMs, cue.easeInMs) / 1000.0;
-    qreal easeOut = qMax<qint64>(kMinEaseMs, cue.easeOutMs) / 1000.0;
+    qreal easeIn =
+        static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeInMs)) / 1000.0;
+    qreal easeOut =
+        static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeOutMs)) / 1000.0;
     if (easeIn + easeOut > length) {
       const qreal share = length / (easeIn + easeOut);
       easeIn *= share;
@@ -215,7 +218,7 @@ quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
   // A new cue starts at the playhead and runs for as long as it can without
   // touching the next one, so dropping cues in quick succession never
   // silently produces an overlap the model would have to resolve.
-  qint64 start = qMax<qint64>(0, atMs);
+  const qint64 start = qMax<qint64>(0, atMs);
   qint64 end = start + qMax<qint64>(kMinCueMs, durationMs);
   for (const ZoomCue &cue : existing) {
     if (cue.endMs <= start)

@@ -2,6 +2,7 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio.hpp"
+#include "studio-preview.hpp"
 #include "zoom-track.hpp"
 #include "zoom-track-smoke.hpp"
 
@@ -16,10 +17,15 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <QPainter>
+
 #include <cmath>
+#include <limits>
 
 /** Renders one frame both ways and compares them. Defined at the end. */
 [[nodiscard]] bool runZoomExportGoldenChecks(QString &error);
+/** Checks the preview surface offscreen. Defined at the end. */
+[[nodiscard]] bool runPreviewChecks(QString &error);
 
 namespace {
 
@@ -216,6 +222,7 @@ int main(int argc, char **argv) {
                 {"export path", runExportPathChecks},
                 {"timeline", runTimelineChecks},
                 {"zoom track", runZoomTrackSmoke},
+                {"preview", runPreviewChecks},
                 {"zoom export agreement", runZoomExportGoldenChecks}};
   for (const auto &check : checks) {
     if (!check.run(error)) {
@@ -395,5 +402,151 @@ bool runZoomExportGoldenChecks(QString &error) {
                  .arg(worst, 0, 'f', 1)))
     return false;
   qInfo("studio smoke: preview and export agree within %.1f/255", worst);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// The preview surface: what it shows, and what a click on it means.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Four flat quadrants, so "which part of the source is on camera" is a
+/// question about colour rather than about pixel arithmetic.
+QImage quadrantFrame() {
+  QImage frame(640, 360, QImage::Format_RGB32);
+  QPainter painter(&frame);
+  painter.fillRect(QRect(0, 0, 320, 180), QColor(220, 40, 40));    // top-left
+  painter.fillRect(QRect(320, 0, 320, 180), QColor(40, 200, 40));  // top-right
+  painter.fillRect(QRect(0, 180, 320, 180), QColor(40, 60, 220));  // bottom-left
+  painter.fillRect(QRect(320, 180, 320, 180), QColor(230, 200, 40)); // bottom-right
+  return frame;
+}
+
+/// The quadrant colour nearest `sample`, as a name, for readable failures.
+QString nearestQuadrant(const QColor &sample) {
+  const QVector<QPair<QString, QColor>> named{
+      {QStringLiteral("top-left"), QColor(220, 40, 40)},
+      {QStringLiteral("top-right"), QColor(40, 200, 40)},
+      {QStringLiteral("bottom-left"), QColor(40, 60, 220)},
+      {QStringLiteral("bottom-right"), QColor(230, 200, 40)}};
+  QString best;
+  int bestDistance = std::numeric_limits<int>::max();
+  for (const auto &[name, colour] : named) {
+    const int distance = std::abs(sample.red() - colour.red()) +
+                         std::abs(sample.green() - colour.green()) +
+                         std::abs(sample.blue() - colour.blue());
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = name;
+    }
+  }
+  return best;
+}
+
+} // namespace
+
+bool runPreviewChecks(QString &error) {
+  StudioPreview preview;
+  // 16:9, so the frame fills the widget and there is no letterbox to dodge.
+  preview.resize(320, 180);
+  preview.setFrame(quadrantFrame());
+  preview.show();
+
+  ZoomTrack track;
+  preview.setTrack(&track);
+  preview.setPosition(0);
+
+  // Resting: the whole frame is on camera, so each corner of the widget
+  // shows its own quadrant.
+  {
+    const QImage shot = preview.grab().toImage();
+    const QVector<QPair<QPoint, QString>> corners{
+        {{40, 30}, QStringLiteral("top-left")},
+        {{280, 30}, QStringLiteral("top-right")},
+        {{40, 150}, QStringLiteral("bottom-left")},
+        {{280, 150}, QStringLiteral("bottom-right")}};
+    for (const auto &[point, expected] : corners) {
+      const QString seen = nearestQuadrant(shot.pixelColor(point));
+      if (seen != expected) {
+        error = QStringLiteral("resting preview shows %1 where %2 belongs")
+                    .arg(seen, expected);
+        return false;
+      }
+    }
+  }
+
+  // Zoomed into the bottom-left quadrant: the whole widget is that colour,
+  // which is the model's window being honoured rather than the frame being
+  // drawn whole.
+  ZoomCue cue;
+  cue.id = 1;
+  cue.startMs = 0;
+  cue.endMs = 4000;
+  cue.easeInMs = 100;
+  cue.easeOutMs = 100;
+  cue.target = {0.25, 0.75};
+  cue.scale = 2.0;
+  track.cues = {cue};
+  preview.setTrack(&track);
+  preview.setPosition(2000);
+  {
+    const QImage shot = preview.grab().toImage();
+    for (const QPoint point : {QPoint(20, 20), QPoint(300, 20), QPoint(20, 160),
+                               QPoint(300, 160), QPoint(160, 90)}) {
+      const QString seen = nearestQuadrant(shot.pixelColor(point));
+      if (seen != QStringLiteral("bottom-left")) {
+        error = QStringLiteral("zoomed preview shows %1 at %2,%3; the whole "
+                               "view should be the targeted quadrant")
+                    .arg(seen)
+                    .arg(point.x())
+                    .arg(point.y());
+        return false;
+      }
+    }
+  }
+
+  // A click reports a point on the *source*, not on the visible window: while
+  // zoomed into the bottom-left quadrant, the middle of the widget is the
+  // middle of that quadrant, not the middle of the frame.
+  {
+    QSignalSpy picked(&preview, &StudioPreview::targetPicked);
+    QTest::mouseClick(&preview, Qt::LeftButton, {}, QPoint(160, 90));
+    if (picked.count() != 1) {
+      error = QStringLiteral("clicking the preview reported no target");
+      return false;
+    }
+    const QPointF target = picked.at(0).at(0).toPointF();
+    if (std::abs(target.x() - 0.25) > 0.03 ||
+        std::abs(target.y() - 0.75) > 0.03) {
+      error = QStringLiteral("a click while zoomed reported %1,%2 instead of "
+                             "the point under the pointer (0.25,0.75)")
+                  .arg(target.x(), 0, 'f', 3)
+                  .arg(target.y(), 0, 'f', 3);
+      return false;
+    }
+  }
+
+  // And unzoomed, a click maps straight through to the frame.
+  {
+    track.cues.clear();
+    preview.setTrack(&track);
+    preview.setPosition(0);
+    QSignalSpy picked(&preview, &StudioPreview::targetPicked);
+    QTest::mouseClick(&preview, Qt::LeftButton, {}, QPoint(240, 45));
+    if (picked.count() != 1) {
+      error = QStringLiteral("clicking the resting preview reported no target");
+      return false;
+    }
+    const QPointF target = picked.at(0).at(0).toPointF();
+    if (std::abs(target.x() - 0.75) > 0.02 ||
+        std::abs(target.y() - 0.25) > 0.02) {
+      error = QStringLiteral("a click at rest reported %1,%2 instead of "
+                             "0.75,0.25")
+                  .arg(target.x(), 0, 'f', 3)
+                  .arg(target.y(), 0, 'f', 3);
+      return false;
+    }
+  }
   return true;
 }
