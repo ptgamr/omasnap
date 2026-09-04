@@ -290,6 +290,17 @@ recorder is already running — it never signals a recorder it did not start.
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **`omasnap-studio` is optional at build time.** Configure with
   `-DOMASNAP_STUDIO=OFF` for a screenshot-only build that needs no Qt Multimedia.
+- **A few narrow races remain, all with the same shape: a same-user process
+  impersonating one of ours.** Stopping proves the lock holder is an
+  `omasnap --record-run` owned by this user and signals it through a pidfd, but
+  that is not proof it is *the* recorder that took the lock; recovery proves a
+  master is a single-linked 0600 regular file we own, but not that this program
+  wrote it; and a second recorder started in the moment after the conflict scan
+  still gets through. Closing these properly needs the plan's per-session
+  journal.
+- **The parent-death guarantee is unchecked.** If `prctl(PR_SET_PDEATHSIG)` is
+  denied — a restrictive seccomp profile, say — nothing notices, and an encoder
+  could outlive a hard-killed recorder.
 
 ### One instance, toggled by the same hotkey
 
