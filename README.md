@@ -106,8 +106,10 @@ hl.layer_rule({
   no_screen_share = true,
 })
 
--- The recording indicator is a separate namespace, so that a screen
--- recording does not film its own stop button.
+-- The recording indicator is a separate namespace. Note that
+-- no_screen_share only hides it from compositor-mediated capture
+-- (screenshots, screen sharing) -- NOT from gpu-screen-recorder's default
+-- KMS capture, which reads the scanout directly. See "Known gaps".
 hl.layer_rule({
   match = { namespace = "^omasnap-record$" },
   no_anim = true,
@@ -275,11 +277,16 @@ recorder is already running — it never signals a recorder it did not start.
 
 ### Known gaps
 
-- **The indicator is only excluded from the recording if you add the layer rule.**
-  Omasnap gives it the `omasnap-record` namespace, but nothing verifies that Hyprland
-  is actually honouring `no_screen_share` for it, so a missed rule means the pill and
-  its Stop button appear in the video rather than the recording refusing to start.
-  Apply the rule above and check one recording.
+- **The indicator appears in the recording, and the layer rule does not stop it.**
+  Measured on this machine at 4K60: with `no_screen_share` applied to the
+  `omasnap-record` namespace, a `grim` screenshot has the pill blacked out — the
+  compositor honours the rule — while the recorded video shows it in full. That is
+  not a bug in the rule. `gpu-screen-recorder`'s default path captures the KMS
+  scanout directly, so the compositor never sees the request and cannot exclude
+  anything from it. Any layer rule is powerless there, and so is a canary test:
+  the fix has to be a capture path that goes through the compositor (GSR's
+  `-w portal`) or an indicator placed outside the recorded rectangle. Until then,
+  assume the pill is in your recording and trim it in the Studio.
 - **`~/Videos/Recordings` is not configurable**, and the frame rate is the only
   recording setting.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See

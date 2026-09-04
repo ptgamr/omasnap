@@ -577,9 +577,19 @@ Deliberate deviations:
 
 Known gaps, all of them things the plan asks for:
 
-- Capture exclusion is not verified. The `omasnap-record` namespace is
-  assigned and the rule is documented, but no canary-frame test proves the
-  indicator is absent, so a missing rule fails open.
+- **Capture exclusion does not work on the default capture path, and the
+  plan's remedy cannot make it work.** Measured: with `no_screen_share` on
+  the `omasnap-record` namespace, `grim` blacks the indicator out and the
+  recorded video still shows it. `gpu-screen-recorder`'s default path reads
+  the KMS scanout, so the compositor is not in the loop and no layer rule
+  reaches it. The plan's canary-frame test would therefore fail on every
+  supported display path rather than catching a misconfiguration, and its
+  "failed probe disables recording" rule would disable recording outright.
+  The real options are a compositor-mediated source (`-w portal`, which
+  costs a consent dialog and a stored session token) or keeping the
+  indicator off the recorded rectangle — which works for region and window
+  targets and cannot work for a whole display on a single monitor. This
+  needs deciding before the exclusion promise can be kept.
 - No camera, no separate audio track policy proven by `ffprobe`, no pointer
   or keystroke sidecar, no captions.
 - Coordinates are proven on 1× and 1.5× only.
