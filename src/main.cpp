@@ -547,8 +547,11 @@ int main(int argc, char **argv) {
   // dismissed overlay gives.
   if (chosenTarget.globalLogical.isEmpty())
     return 0;
-  // The overlay is gone and this process is about to release the screenshot
-  // lock, so the recorder starts free of it.
+  // Released before the handoff, not after: handOffToRecorder waits for the
+  // recorder to take its own lock, and holding this one meanwhile would make
+  // a screenshot started in that window cancel an overlay that has already
+  // closed, or time out waiting to take over.
+  instanceLock.unlock();
   QString handoffError;
   if (!handOffToRecorder(chosenTarget, recordOptions, handoffError)) {
     qCritical().noquote() << handoffError;

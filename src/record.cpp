@@ -20,6 +20,7 @@
 #include <QLockFile>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QScreen>
 #include <QSignalBlocker>
 #include <QStandardPaths>
@@ -59,6 +60,9 @@ constexpr int kHandoffLockWaitMs = 3000;
 constexpr int kHandoffPollMs = 15;
 /// Reading container metadata is a fast, bounded operation.
 constexpr int kProbeTimeoutMs = 5000;
+/// Remuxing copies streams, so it is bounded by disk rather than by codecs;
+/// generous enough for a long recording on a slow filesystem.
+constexpr int kRemuxTimeoutMs = 600000;
 
 QString runtimeRecordDirectory() {
   const QString runtime = secureRuntimeDirectory();
@@ -82,13 +86,21 @@ void restrictToOwner(const QString &path) {
  */
 bool createExclusiveFile(const QString &path) {
   const QByteArray encoded = QFile::encodeName(path);
-  const int fd = ::open(encoded.constData(),
-                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                        S_IRUSR | S_IWUSR);
+  int fd = -1;
+  do {
+    fd = ::open(encoded.constData(),
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR);
+  } while (fd < 0 && errno == EINTR);
   if (fd < 0)
     return false;
+  // open()'s mode is masked by the umask, so 0600 is only a request; make it
+  // the actual mode, through the descriptor, before anything else sees it.
+  const bool secured = ::fchmod(fd, S_IRUSR | S_IWUSR) == 0;
   ::close(fd);
-  return true;
+  if (!secured)
+    QFile::remove(path);
+  return secured;
 }
 
 /// `recording-<timestamp>[-<what>]`, date first so the folder sorts
@@ -188,18 +200,24 @@ int recoverAbandonedRecordings(const QDir &directory) {
     if (!ours.match(part).hasMatch())
       continue;
     const QString source = directory.filePath(part);
-    // Never follow a link out of the directory: renaming through one, and
-    // then tightening permissions on what it points at, would act on a file
-    // that is not ours at all.
-    if (QFileInfo(source).isSymLink()) {
+    // The name alone is not provenance. A master we made is a plain file
+    // with exactly one link, owned by us, at exactly the mode we created it
+    // with -- which rules out a symlink, a hard link to somebody's video,
+    // and a file that merely happens to be named like ours.
+    struct stat info{};
+    if (::lstat(QFile::encodeName(source).constData(), &info) != 0 ||
+        !S_ISREG(info.st_mode) || info.st_nlink != 1 ||
+        info.st_uid != ::geteuid() ||
+        (info.st_mode & 07777) != (S_IRUSR | S_IWUSR)) {
       qWarning().noquote()
-          << QStringLiteral("Ignored a symlinked interrupted recording: %1")
+          << QStringLiteral("Ignored an interrupted recording this program "
+                            "did not write: %1")
                  .arg(part);
       continue;
     }
     // A zero-byte master is the file the recorder creates before the encoder
     // writes anything: there is no recording in it to lose.
-    if (QFileInfo(source).size() <= 0) {
+    if (info.st_size <= 0) {
       QFile::remove(source);
       continue;
     }
@@ -231,7 +249,7 @@ int recoverAbandonedRecordings(const QDir &directory) {
  * errorOccurred arrives first.
  */
 void runTool(QObject *context, const QString &program,
-             const QStringList &arguments,
+             const QStringList &arguments, int timeoutMs,
              std::function<void(bool ok, const QByteArray &output)> done) {
   auto *process = new QProcess(context);
   process->setProcessChannelMode(QProcess::SeparateChannels);
@@ -241,9 +259,14 @@ void runTool(QObject *context, const QString &program,
       return;
     *settled = true;
     const QByteArray output = process->readAllStandardOutput();
+    if (process->state() != QProcess::NotRunning)
+      process->kill();
     process->deleteLater();
     done(ok, output);
   };
+  // Media on a stalled network or FUSE mount can hang either tool
+  // indefinitely, and the indicator would sit on "Saving…" for good.
+  QTimer::singleShot(timeoutMs, process, [conclude] { conclude(false); });
   QObject::connect(process, &QProcess::finished, context,
                    [conclude](int code, QProcess::ExitStatus status) {
                      conclude(code == 0 && status == QProcess::NormalExit);
@@ -665,6 +688,11 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
 
   RecordIndicator indicator;
   RecordSession session(config);
+  // Locals are destroyed in reverse order, so everything the callbacks below
+  // capture dies before ~RecordSession runs -- and that destructor waits for
+  // the encoder, which can deliver a process exit and fire them. Declared
+  // after the session so it runs first and takes the connections down.
+  const auto unwire = qScopeGuard([&session] { session.disconnect(); });
 
   auto finish = [&indicator](int code) {
     indicator.hide();
@@ -726,13 +754,12 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
         qCritical().noquote() << message;
         indicator.setPhase(RecordIndicator::Phase::Failed);
         indicator.setMessage(message.left(60));
-        // Whatever was captured before it went wrong is left exactly where
-        // it is: the encoder is being shut down and may still hold the file
-        // open, so renaming it here would race that. It stays a .part.mkv
-        // and the next recording promotes it, after checking it can be read.
+        // Whatever is in the master is left exactly where it is, renamed or
+        // removed by nobody here: the encoder is still being shut down and
+        // may hold it open, so a rename would race that and an unlink would
+        // throw away bytes it has yet to flush. The next recording promotes
+        // it if it can be read and removes it if it stayed empty.
         const bool kept = QFileInfo(config.outputPath).size() > 0;
-        if (!kept)
-          QFile::remove(config.outputPath); // The empty one we made.
         notifyRecording(
             kept ? QStringLiteral("Recording failed: %1 · what was captured "
                                   "is kept and restored next time you record")
@@ -754,8 +781,8 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                                 "file; using the requested one");
         const QString master = config.outputPath;
         if (QFileInfo(master).size() <= 0) {
-          // The file we created before the encoder started, still empty.
-          QFile::remove(master);
+          // Left for the next recording to clear, for the same reason the
+          // failure path leaves it: the encoder is only just exiting.
           notifyRecording(QStringLiteral("Recording produced no file"), {});
           finish(1);
           return;
@@ -826,6 +853,7 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                  QStringLiteral("-1"), QStringLiteral("-f"),
                  QStringLiteral("mp4"), QStringLiteral("-movflags"),
                  QStringLiteral("+faststart"), draft},
+                kRemuxTimeoutMs,
                 [&, draft, acceptDraft, giveUpDraft](bool ok,
                                                      const QByteArray &) {
                   if (!ok || QFileInfo(draft).size() <= 0) {
@@ -840,6 +868,7 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                   // Read back asynchronously: the indicator is on screen
                   // saying "Saving…" and has to keep painting.
                   runTool(&indicator, probe, mediaProbeArguments(draft),
+                          kProbeTimeoutMs,
                           [acceptDraft, giveUpDraft](
                               bool readable, const QByteArray &output) {
                             if (readable && probeOutputIsPlayable(output))

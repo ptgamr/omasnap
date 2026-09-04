@@ -7488,6 +7488,17 @@ int main(int argc, char **argv) {
   // platform theme loads a plugin that wants a display, which an offscreen
   // run does not have.
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
+
+  // The suite writes into the runtime directory -- the single-instance lock,
+  // the remembered last region, pinned snapshots -- so two runs at once, or
+  // a run alongside a real omasnap, overwrite each other's state and fail
+  // for reasons that have nothing to do with the code. Give it one of its
+  // own. Skipped for the live-capture check below, which needs the real
+  // directory to find the compositor's socket.
+  QTemporaryDir smokeRuntime;
+  if (!qEnvironmentVariableIsSet("OMASNAP_SMOKE_OUTPUT") &&
+      smokeRuntime.isValid())
+    qputenv("XDG_RUNTIME_DIR", smokeRuntime.path().toUtf8());
   QApplication application(argc, argv);
   QApplication::setFont(chromeDefaultFont()); // as main() does
   if (!loadCaptureFonts())
