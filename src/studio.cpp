@@ -40,6 +40,8 @@ constexpr qint64 kSeekStepMs = 5000;
 /// Nothing useful can be trimmed to less than this, and a zero-length export
 /// is just a broken file.
 constexpr qint64 kMinimumTrimMs = 100;
+/// Reading container metadata is fast and bounded.
+constexpr int kProbeTimeoutMs = 5000;
 
 const auto kControlStyle = QStringLiteral(R"(
 QWidget { color: #e2e2e8; }
@@ -71,15 +73,64 @@ QString studioClock(qint64 milliseconds) {
       .arg(total % 60, 2, 10, QLatin1Char('0'));
 }
 
+StudioSource probeStudioSource(const QString &path) {
+  StudioSource media;
+  const QString probe = QStandardPaths::findExecutable(
+      QStringLiteral("ffprobe"));
+  if (probe.isEmpty() || path.isEmpty())
+    return media;
+  QProcess ffprobe;
+  ffprobe.start(probe, {QStringLiteral("-v"), QStringLiteral("error"),
+                        QStringLiteral("-select_streams"),
+                        QStringLiteral("v:0"),
+                        QStringLiteral("-show_entries"),
+                        QStringLiteral("stream=width,height,r_frame_rate"),
+                        QStringLiteral("-of"), QStringLiteral("csv=p=0"),
+                        path});
+  if (!ffprobe.waitForFinished(kProbeTimeoutMs)) {
+    ffprobe.kill();
+    ffprobe.waitForFinished(1000);
+    return media;
+  }
+  const QStringList fields =
+      QString::fromLatin1(ffprobe.readAllStandardOutput()).trimmed().split(
+          QLatin1Char(','));
+  if (fields.size() < 3)
+    return media;
+  media.size = {fields.at(0).toInt(), fields.at(1).toInt()};
+  // r_frame_rate is a rational such as 60/1 or 30000/1001.
+  const QStringList rate = fields.at(2).split(QLatin1Char('/'));
+  const double numerator = rate.value(0).toDouble();
+  const double denominator = rate.size() > 1 ? rate.at(1).toDouble() : 1.0;
+  if (denominator > 0.0)
+    media.fps = qRound(numerator / denominator);
+  return media;
+}
+
 QStringList studioExportArguments(const QString &source,
                                   const QString &destination, qint64 inPoint,
-                                  qint64 outPoint) {
+                                  qint64 outPoint, const ZoomTrack &zoom,
+                                  const StudioSource &media) {
   if (source.isEmpty() || destination.isEmpty() || outPoint <= inPoint)
     return {};
+  const bool canZoom = media.size.isValid() && !media.size.isEmpty() &&
+                       media.fps > 0;
+  const ZoomPanExpressions camera =
+      canZoom ? zoomPanExpressions(zoom, media.fps, inPoint)
+              : ZoomPanExpressions{};
+  QStringList filter;
+  if (!camera.identity) {
+    filter << QStringLiteral("-vf")
+           << QStringLiteral("zoompan=z='%1':x='%2':y='%3':d=1:s=%4x%5:fps=%6")
+                  .arg(camera.z, camera.x, camera.y,
+                       QString::number(media.size.width()),
+                       QString::number(media.size.height()),
+                       QString::number(media.fps));
+  }
   // -ss before -i so ffmpeg seeks rather than decoding the whole head, and
   // -t rather than -to because a duration means the same thing whichever
   // timeline it is read against.
-  return {QStringLiteral("-hide_banner"),
+  return QStringList{QStringLiteral("-hide_banner"),
           QStringLiteral("-loglevel"),
           QStringLiteral("error"),
           QStringLiteral("-y"),
@@ -88,7 +139,9 @@ QStringList studioExportArguments(const QString &source,
           QStringLiteral("-i"),
           source,
           QStringLiteral("-t"),
-          studioTimecode(outPoint - inPoint),
+          studioTimecode(outPoint - inPoint)} +
+         filter +
+         QStringList{
           // Explicit, because ffmpeg's default selection keeps a single
           // audio stream and a recording made with --audio and --mic has
           // two. `?` so a silent recording is not an error.

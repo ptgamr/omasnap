@@ -211,8 +211,12 @@ if(OMASNAP_STUDIO)
 # screenshot smoke suite must not link a media stack to test a video window.
 qt_add_executable(omasnap-studio-smoke
   tests/studio-smoke.cpp
+  tests/zoom-track-smoke.cpp
+  tests/zoom-track-smoke.hpp
   src/studio.cpp
   src/studio.hpp
+  src/zoom-track.cpp
+  src/zoom-track.hpp
   src/overlay-chrome.cpp
   src/overlay-chrome.hpp
 )
@@ -239,6 +243,8 @@ qt_add_executable(omasnap-studio
   src/studio-main.cpp
   src/studio.cpp
   src/studio.hpp
+  src/zoom-track.cpp
+  src/zoom-track.hpp
   src/overlay-chrome.cpp
   src/overlay-chrome.hpp
 )

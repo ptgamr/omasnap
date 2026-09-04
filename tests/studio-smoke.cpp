@@ -2,14 +2,24 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio.hpp"
+#include "zoom-track.hpp"
+#include "zoom-track-smoke.hpp"
 
 #include <QApplication>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QImage>
+#include <QProcess>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
+
+#include <cmath>
+
+/** Renders one frame both ways and compares them. Defined at the end. */
+[[nodiscard]] bool runZoomExportGoldenChecks(QString &error);
 
 namespace {
 
@@ -204,7 +214,9 @@ int main(int argc, char **argv) {
   } checks[] = {{"timecode", runTimecodeChecks},
                 {"export command", runExportCommandChecks},
                 {"export path", runExportPathChecks},
-                {"timeline", runTimelineChecks}};
+                {"timeline", runTimelineChecks},
+                {"zoom track", runZoomTrackSmoke},
+                {"zoom export agreement", runZoomExportGoldenChecks}};
   for (const auto &check : checks) {
     if (!check.run(error)) {
       qWarning().noquote() << QStringLiteral("studio %1 smoke failed: %2")
@@ -213,4 +225,175 @@ int main(int argc, char **argv) {
     }
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Preview/export agreement.
+//
+// The whole reason the zoom lives in one model is that the picture the person
+// framed has to be the picture that comes out. This renders the same frame
+// both ways -- through zoomSourceRect() the way the preview does, and through
+// the ffmpeg command the export builds -- and compares them.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Runs a tool to completion; false on anything other than a clean exit.
+bool runTool(const QString &program, const QStringList &arguments) {
+  QProcess process;
+  process.start(program, arguments);
+  if (!process.waitForFinished(120000)) {
+    process.kill();
+    process.waitForFinished(2000);
+    return false;
+  }
+  return process.exitStatus() == QProcess::NormalExit &&
+         process.exitCode() == 0;
+}
+
+/// One frame at `seconds`, decoded to an image.
+QImage frameAt(const QString &ffmpeg, const QString &path, double seconds,
+               const QString &scratch) {
+  const QString png =
+      QStringLiteral("%1/frame-%2.png")
+          .arg(scratch, QString::number(qRound(seconds * 1000)));
+  QFile::remove(png);
+  if (!runTool(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+                        QStringLiteral("-ss"), QString::number(seconds, 'f', 3),
+                        QStringLiteral("-i"), path, QStringLiteral("-frames:v"),
+                        QStringLiteral("1"), QStringLiteral("-y"), png}))
+    return {};
+  return QImage(png);
+}
+
+/// The preview's answer: the model's window of the source frame, filled out
+/// to the output size. This is the same operation the preview widget paints.
+QImage renderThroughModel(const QImage &source, const ZoomTrack &track,
+                          qint64 timeMs) {
+  const QRectF window = zoomSourceRect(track, timeMs);
+  const QRect pixels(qRound(window.x() * source.width()),
+                     qRound(window.y() * source.height()),
+                     qRound(window.width() * source.width()),
+                     qRound(window.height() * source.height()));
+  return source.copy(pixels).scaled(source.size(), Qt::IgnoreAspectRatio,
+                                    Qt::SmoothTransformation);
+}
+
+/// Mean absolute per-channel difference, 0..255. Encoding and two different
+/// scalers put a floor under this; framing errors put it far above.
+double meanDifference(const QImage &a, const QImage &b) {
+  if (a.isNull() || b.isNull() || a.size() != b.size())
+    return 255.0;
+  const QImage left = a.convertToFormat(QImage::Format_RGB888);
+  const QImage right = b.convertToFormat(QImage::Format_RGB888);
+  double total = 0.0;
+  for (int y = 0; y < left.height(); ++y) {
+    const uchar *l = left.constScanLine(y);
+    const uchar *r = right.constScanLine(y);
+    for (int x = 0; x < left.width() * 3; ++x)
+      total += std::abs(static_cast<int>(l[x]) - static_cast<int>(r[x]));
+  }
+  return total / (left.width() * left.height() * 3.0);
+}
+
+} // namespace
+
+bool runZoomExportGoldenChecks(QString &error) {
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  const QString ffprobe =
+      QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+  if (ffmpeg.isEmpty() || ffprobe.isEmpty()) {
+    qInfo("studio smoke: ffmpeg/ffprobe absent; skipping export agreement");
+    return true;
+  }
+  QTemporaryDir scratch;
+  if (!scratch.isValid()) {
+    error = QStringLiteral("could not create a temporary directory");
+    return false;
+  }
+
+  // Every frame a keyframe, so sampling a time lands on the frame the model
+  // was asked about rather than the nearest keyframe before it.
+  const QString source = QDir(scratch.path()).filePath(QStringLiteral("src.mp4"));
+  if (!runTool(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+                        QStringLiteral("-y"), QStringLiteral("-f"),
+                        QStringLiteral("lavfi"), QStringLiteral("-i"),
+                        QStringLiteral("testsrc2=size=640x360:rate=30"),
+                        QStringLiteral("-t"), QStringLiteral("4"),
+                        QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                        QStringLiteral("-g"), QStringLiteral("1"),
+                        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+                        source})) {
+    error = QStringLiteral("could not generate the golden source clip");
+    return false;
+  }
+
+  const StudioSource media = probeStudioSource(source);
+  if (!check(media.size == QSize(640, 360) && media.fps == 30, error,
+             QStringLiteral("the source probe read the wrong size or rate")))
+    return false;
+
+  ZoomTrack track;
+  ZoomCue cue;
+  cue.id = 1;
+  cue.startMs = 1000;
+  cue.endMs = 3000;
+  cue.easeInMs = 400;
+  cue.easeOutMs = 400;
+  cue.target = {0.25, 0.75};
+  cue.scale = 2.0;
+  track.cues = {cue};
+
+  const QString exported =
+      QDir(scratch.path()).filePath(QStringLiteral("out.mp4"));
+  const QStringList arguments =
+      studioExportArguments(source, exported, 0, 4000, track, media);
+  if (!check(!arguments.isEmpty() &&
+                 arguments.contains(QStringLiteral("-vf")),
+             error, QStringLiteral("the export built no zoom filter")))
+    return false;
+  if (!runTool(ffmpeg, arguments)) {
+    error = QStringLiteral("the generated export command failed to run");
+    return false;
+  }
+
+  // Resting, mid-ramp, and holding: the ramp is where the two descriptions
+  // of time would drift apart if they disagreed.
+  double worst = 0.0;
+  for (const double seconds : {0.5, 1.2, 2.0, 2.9, 3.5}) {
+    const auto timeMs = static_cast<qint64>(seconds * 1000);
+    const QImage sourceFrame = frameAt(ffmpeg, source, seconds, scratch.path());
+    const QImage exportFrame = frameAt(ffmpeg, exported, seconds, scratch.path());
+    if (sourceFrame.isNull() || exportFrame.isNull()) {
+      error = QStringLiteral("could not decode the frame at %1 s").arg(seconds);
+      return false;
+    }
+    const double difference =
+        meanDifference(renderThroughModel(sourceFrame, track, timeMs),
+                       exportFrame);
+    worst = qMax(worst, difference);
+    if (difference > 14.0) {
+      error = QStringLiteral("preview and export disagree at %1 s "
+                             "(mean difference %2/255)")
+                  .arg(seconds)
+                  .arg(difference, 0, 'f', 1);
+      return false;
+    }
+  }
+
+  // The comparison has to be capable of failing: framing the same frame a
+  // second off should score far worse than the agreement above.
+  const QImage sourceFrame = frameAt(ffmpeg, source, 2.0, scratch.path());
+  const QImage exportFrame = frameAt(ffmpeg, exported, 2.0, scratch.path());
+  const double wrong =
+      meanDifference(renderThroughModel(sourceFrame, track, 500), exportFrame);
+  if (!check(wrong > worst * 3.0, error,
+             QStringLiteral("the frame comparison cannot tell a wrong "
+                            "framing (%1) from a right one (%2)")
+                 .arg(wrong, 0, 'f', 1)
+                 .arg(worst, 0, 'f', 1)))
+    return false;
+  qInfo("studio smoke: preview and export agree within %.1f/255", worst);
+  return true;
 }

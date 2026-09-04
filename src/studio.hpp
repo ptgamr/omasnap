@@ -2,6 +2,9 @@
  *  into. Playback, a scrubbable timeline, a trim range, and an export. */
 #pragma once
 
+#include "zoom-track.hpp"
+
+#include <QSize>
 #include <QString>
 #include <QWidget>
 
@@ -101,14 +104,32 @@ private:
 /** `hh:mm:ss.mmm` for ffmpeg, and `m:ss` for people. */
 [[nodiscard]] QString studioTimecode(qint64 milliseconds);
 [[nodiscard]] QString studioClock(qint64 milliseconds);
+/** What the export needs to know about the file it is reading. */
+struct StudioSource {
+  QSize size;
+  int fps = 0;
+};
+
 /**
  * The ffmpeg argument vector that writes `[inPoint, outPoint)` of `source`
- * to `destination`. Output seeking, so the cut is frame-accurate rather than
- * snapped to the nearest keyframe, which is why it re-encodes.
+ * to `destination`, with `zoom` applied.
+ *
+ * The zoom comes from the same `ZoomTrack` the preview draws, turned into
+ * `zoompan` expressions -- there is no second description of where the
+ * camera is. Cue times are absolute in the source, so the offset of the trim
+ * is handed to the expressions rather than papered over with `setpts`:
+ * zoompan reads its own frame counter, not the timestamp.
+ *
+ * The zoom is skipped, rather than guessed at, when `media` does not carry a
+ * usable size and frame rate: a wrong frame rate slides every cue.
  */
 [[nodiscard]] QStringList studioExportArguments(const QString &source,
                                                 const QString &destination,
                                                 qint64 inPoint,
-                                                qint64 outPoint);
+                                                qint64 outPoint,
+                                                const ZoomTrack &zoom = {},
+                                                const StudioSource &media = {});
+/** Reads the size and frame rate the export needs. Blocking; bounded. */
+[[nodiscard]] StudioSource probeStudioSource(const QString &path);
 /** `<stem>-trim.mp4` beside the source, under a name nothing has taken. */
 [[nodiscard]] QString studioExportPath(const QString &source);
