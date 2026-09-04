@@ -719,9 +719,14 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   if (!started) {
     qCritical().noquote() << error;
     notifyRecording(QStringLiteral("Recording failed: %1").arg(error), {});
+    QFile::remove(config.outputPath); // The empty master we made, unused.
     return 1;
   }
   if (showIndicator(indicator, target.output) == nullptr) {
+    // A recording with no visible indicator is exactly what must not happen,
+    // so leave. The encoder is already running and holds the master open;
+    // the session destructor stops it, and whatever it wrote is left for the
+    // next launch to recover rather than deleted out from under it.
     qCritical() << "Could not create the recording indicator layer";
     return 1;
   }
