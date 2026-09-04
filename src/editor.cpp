@@ -2975,8 +2975,8 @@ void CaptureEditor::setRecordTargetMode(bool enabled) {
   setStatus(captureMode_ == CaptureMode::Window
                 ? QStringLiteral("Window mode · click or Super+Arrows then "
                                  "Enter to record it")
-                : QStringLiteral("Drag the area to record · Enter starts "
-                                 "recording · Esc cancels"));
+                : QStringLiteral("Drag the area to record · recording starts "
+                                 "when you let go · Esc cancels"));
 }
 
 void CaptureEditor::enterSelectedCapture(QString editStatus) {
