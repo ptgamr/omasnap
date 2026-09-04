@@ -208,9 +208,21 @@ int main(int argc, char **argv) {
   // The recorder never touches the screenshot instance lock, the capture
   // fonts, or a monitor grab: it has a target already and only needs a layer
   // surface for the indicator.
-  if (parser.isSet(recordRunOption))
+  if (parser.isSet(recordRunOption)) {
+    // It is written by handOffToRecorder, so anything else alongside it is a
+    // mistake rather than a request; say so instead of ignoring it.
+    if (parser.isSet(recordOption) || parser.isSet(stopOption) ||
+        parser.isSet(pinOption) || parser.isSet(fileOption) ||
+        parser.isSet(clipboardOption) || parser.isSet(copyOption) ||
+        parser.isSet(saveOption) || parser.isSet(scrollOption) ||
+        parser.isSet(fullscreenOption) || parser.isSet(windowOption) ||
+        parser.isSet(regionOption) || !parser.positionalArguments().isEmpty()) {
+      qCritical() << "--record-run takes no other options";
+      return 2;
+    }
     return runRecorder(parser.value(recordRunOption), recordOptions,
                        &signalNotifier);
+  }
 
   QString filePath = parser.value(fileOption);
   const bool clipboardInput = parser.isSet(clipboardOption);

@@ -7484,6 +7484,10 @@ int main(int argc, char **argv) {
   if (qEnvironmentVariableIsSet(kFakeRecorderVariable))
     return runFakeRecorder(argc, argv);
 
+  // As main() does, and for the same reason: honouring the session's gtk3
+  // platform theme loads a plugin that wants a display, which an offscreen
+  // run does not have.
+  qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QApplication application(argc, argv);
   QApplication::setFont(chromeDefaultFont()); // as main() does
   if (!loadCaptureFonts())

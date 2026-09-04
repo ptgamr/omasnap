@@ -24,9 +24,10 @@ namespace {
 /// before giving up on it having started.
 constexpr int kReadyPollMs = 50;
 constexpr int kReadyAttempts = 240; // 12 s
-/// A stop reply only arrives once the file is written, which for a long
-/// recording is not instant.
-constexpr int kStopTimeoutMs = 20000;
+/// A stop reply only arrives once the file is written. Generous, because
+/// finalizing a long recording on a slow or nearly full filesystem is a
+/// legitimately slow thing to do and interrupting it truncates the file.
+constexpr int kStopTimeoutMs = 120000;
 constexpr int kCommandTimeoutMs = 5000;
 /// After the encoder says it saved the file it should exit almost at once.
 /// Long enough not to race a slow unmount, short enough that the indicator
@@ -78,7 +79,10 @@ public:
     const int connected =
         ::connect(fd_, reinterpret_cast<struct sockaddr *>(&address),
                   sizeof(address));
-    if (connected != 0 && errno != EINPROGRESS) {
+    // EINPROGRESS is the documented answer; Linux can also answer EAGAIN for
+    // an AF_UNIX socket whose listen queue is momentarily full, and that is
+    // not a failure either.
+    if (connected != 0 && errno != EINPROGRESS && errno != EAGAIN) {
       finishLater(false, QString::fromLocal8Bit(std::strerror(errno)));
       return;
     }
@@ -190,7 +194,7 @@ private:
       reply(ok, payload);
   }
 
-  static constexpr qsizetype kMaxReplyBytes = 64 * 1024;
+  static constexpr qsizetype kMaxReplyBytes = qsizetype{64} * 1024;
 
   QByteArray request_;
   QByteArray response_;
@@ -390,18 +394,28 @@ void RecordSession::sendCommand(
 }
 
 void RecordSession::setPaused(bool paused) {
+  // One at a time, and only when it would change something: the state only
+  // moves when a reply lands, so a second click before that arrives would
+  // otherwise send a duplicate whose reply applies the same transition twice
+  // and double-counts the paused interval.
+  if (pauseInFlight_)
+    return;
   if (paused ? state_ != State::Recording : state_ != State::Paused)
     return;
+  pauseInFlight_ = true;
   // set-paused rather than toggle-pause: the request carries the state it
   // wants, so a dropped reply cannot leave the two sides disagreeing.
   sendCommand(QStringLiteral("set-paused"), QJsonValue(paused),
               [this, paused](bool ok, const QString &) {
+                pauseInFlight_ = false;
                 // The reply can land after the user has already stopped, and
                 // moving back to Recording there would restart the clock on a
                 // session that is finishing.
                 if (!ok || (state_ != State::Recording &&
                             state_ != State::Paused))
                   return;
+                if (paused == (state_ == State::Paused))
+                  return; // Already there; applying it again would double up.
                 if (paused) {
                   pauseStartedMs_ = clock_.elapsed();
                   state_ = State::Paused;

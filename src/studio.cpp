@@ -142,8 +142,9 @@ qreal StudioTimeline::xForTime(qint64 milliseconds) const {
   const QRectF track = trackRect();
   if (duration_ <= 0)
     return track.left();
-  const qreal fraction =
-      qBound<qreal>(0.0, static_cast<qreal>(milliseconds) / duration_, 1.0);
+  const qreal fraction = qBound<qreal>(
+      0.0, static_cast<qreal>(milliseconds) / static_cast<qreal>(duration_),
+      1.0);
   return track.left() + fraction * track.width();
 }
 
@@ -151,7 +152,8 @@ qint64 StudioTimeline::timeForX(qreal x) const {
   const QRectF track = trackRect();
   const qreal fraction =
       qBound<qreal>(0.0, (x - track.left()) / track.width(), 1.0);
-  return static_cast<qint64>(std::llround(fraction * duration_));
+  return static_cast<qint64>(
+      std::llround(fraction * static_cast<qreal>(duration_)));
 }
 
 StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {

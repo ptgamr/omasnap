@@ -23,14 +23,20 @@
 #include <QScreen>
 #include <QSignalBlocker>
 #include <QStandardPaths>
+#include <QDeadlineTimer>
 #include <QSysInfo>
+#include <QThread>
 #include <QTimer>
 #include <QUuid>
 #include <QWindow>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <memory>
+#include <utility>
 
 #include <cerrno>
 #include <csignal>
@@ -46,6 +52,11 @@ constexpr int kIndicatorRightMargin = 12;
 constexpr int kClockIntervalMs = 250;
 /// How long the pill stays up after a failure, so the reason is readable.
 constexpr int kFailureLingerMs = 4000;
+/// How long the selector waits for the recorder it started to take the
+/// recording lock. Short: the child takes it almost immediately, and this
+/// runs after the overlay is gone.
+constexpr int kHandoffLockWaitMs = 3000;
+constexpr int kHandoffPollMs = 15;
 /// Reading container metadata is a fast, bounded operation.
 constexpr int kProbeTimeoutMs = 5000;
 
@@ -58,7 +69,26 @@ QString runtimeRecordDirectory() {
 }
 
 void restrictToOwner(const QString &path) {
-  QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+  if (!QFile::setPermissions(path,
+                             QFileDevice::ReadOwner | QFileDevice::WriteOwner))
+    qWarning().noquote()
+        << QStringLiteral("Could not make %1 owner-only").arg(path);
+}
+
+/**
+ * Creates `path` owner-only, and only if nothing is there. O_EXCL because
+ * the name is predictable: without it a same-named file left by an earlier
+ * recovery, or a symlink someone dropped in, would be truncated instead.
+ */
+bool createExclusiveFile(const QString &path) {
+  const QByteArray encoded = QFile::encodeName(path);
+  const int fd = ::open(encoded.constData(),
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                        S_IRUSR | S_IWUSR);
+  if (fd < 0)
+    return false;
+  ::close(fd);
+  return true;
 }
 
 /// `recording-<timestamp>[-<what>]`, date first so the folder sorts
@@ -88,6 +118,32 @@ QString findProbeExecutable() {
   return QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
 }
 
+/** Asks for the one video stream's codec and the container duration. */
+QStringList mediaProbeArguments(const QString &path) {
+  return {QStringLiteral("-v"),
+          QStringLiteral("error"),
+          QStringLiteral("-select_streams"),
+          QStringLiteral("v:0"),
+          QStringLiteral("-show_entries"),
+          QStringLiteral("stream=codec_name"),
+          QStringLiteral("-show_entries"),
+          QStringLiteral("format=duration"),
+          QStringLiteral("-of"),
+          QStringLiteral("csv=p=0"),
+          path};
+}
+
+/// A codec name and a duration above zero. A container ffprobe can open but
+/// which holds no playable time is not a recording anyone can watch.
+bool probeOutputIsPlayable(const QByteArray &output) {
+  const QList<QByteArray> lines = output.trimmed().split('\n');
+  if (lines.size() < 2 || lines.first().trimmed().isEmpty())
+    return false;
+  bool numeric = false;
+  const double duration = lines.last().trimmed().toDouble(&numeric);
+  return numeric && duration > 0.0;
+}
+
 /**
  * Whether `path` is media something can actually open. Without ffprobe the
  * best available answer is "it has bytes in it", and saying so is better
@@ -99,20 +155,15 @@ bool looksPlayable(const QString &path, const QString &probe) {
   if (probe.isEmpty())
     return true;
   QProcess ffprobe;
-  ffprobe.start(probe, {QStringLiteral("-v"), QStringLiteral("error"),
-                        QStringLiteral("-select_streams"),
-                        QStringLiteral("v:0"),
-                        QStringLiteral("-show_entries"),
-                        QStringLiteral("stream=codec_name"),
-                        QStringLiteral("-of"), QStringLiteral("csv=p=0"),
-                        path});
+  ffprobe.start(probe, mediaProbeArguments(path));
   if (!ffprobe.waitForFinished(kProbeTimeoutMs)) {
     ffprobe.kill();
     ffprobe.waitForFinished(1000);
     return false;
   }
   return ffprobe.exitStatus() == QProcess::NormalExit &&
-         ffprobe.exitCode() == 0 && !ffprobe.readAllStandardOutput().trimmed().isEmpty();
+         ffprobe.exitCode() == 0 &&
+         probeOutputIsPlayable(ffprobe.readAllStandardOutput());
 }
 
 /**
@@ -137,6 +188,15 @@ int recoverAbandonedRecordings(const QDir &directory) {
     if (!ours.match(part).hasMatch())
       continue;
     const QString source = directory.filePath(part);
+    // Never follow a link out of the directory: renaming through one, and
+    // then tightening permissions on what it points at, would act on a file
+    // that is not ours at all.
+    if (QFileInfo(source).isSymLink()) {
+      qWarning().noquote()
+          << QStringLiteral("Ignored a symlinked interrupted recording: %1")
+                 .arg(part);
+      continue;
+    }
     // A zero-byte master is the file the recorder creates before the encoder
     // writes anything: there is no recording in it to lose.
     if (QFileInfo(source).size() <= 0) {
@@ -171,16 +231,18 @@ int recoverAbandonedRecordings(const QDir &directory) {
  * errorOccurred arrives first.
  */
 void runTool(QObject *context, const QString &program,
-             const QStringList &arguments, std::function<void(bool)> done) {
+             const QStringList &arguments,
+             std::function<void(bool ok, const QByteArray &output)> done) {
   auto *process = new QProcess(context);
-  process->setProcessChannelMode(QProcess::MergedChannels);
+  process->setProcessChannelMode(QProcess::SeparateChannels);
   auto settled = std::make_shared<bool>(false);
-  auto conclude = [process, settled, done](bool ok) {
+  auto conclude = [process, settled, done = std::move(done)](bool ok) {
     if (*settled)
       return;
     *settled = true;
+    const QByteArray output = process->readAllStandardOutput();
     process->deleteLater();
-    done(ok);
+    done(ok, output);
   };
   QObject::connect(process, &QProcess::finished, context,
                    [conclude](int code, QProcess::ExitStatus status) {
@@ -201,6 +263,32 @@ QString promoteMatroska(const QDir &directory, const QString &stem,
   const QString promoted = QFile::rename(master, kept) ? kept : master;
   restrictToOwner(promoted);
   return promoted;
+}
+
+/**
+ * Signals `pid` without the pid-reuse window between checking what it is and
+ * signalling it. A pidfd refers to the process itself, so `verify` runs on a
+ * process that cannot be replaced underneath it. Falls back to kill() where
+ * the syscalls are unavailable, which reopens only the window that always
+ * existed there.
+ */
+bool signalVerifiedProcess(qint64 pid, int signalNumber,
+                           const std::function<bool(qint64)> &verify) {
+#if defined(SYS_pidfd_open) && defined(SYS_pidfd_send_signal)
+  const int pidfd =
+      static_cast<int>(::syscall(SYS_pidfd_open, static_cast<pid_t>(pid), 0));
+  if (pidfd >= 0) {
+    // The handle is open, so the pid cannot now be reused by something else;
+    // whatever /proc says about it is still true when the signal lands.
+    const bool ours = verify(pid);
+    const bool sent =
+        ours && ::syscall(SYS_pidfd_send_signal, pidfd, signalNumber,
+                          nullptr, 0) == 0;
+    ::close(pidfd);
+    return sent;
+  }
+#endif
+  return verify(pid) && ::kill(static_cast<pid_t>(pid), signalNumber) == 0;
 }
 
 /**
@@ -263,6 +351,9 @@ bool isHandoffFile(const QString &path) {
  * written and the kernel reuses pids.
  */
 bool processIsRecorder(qint64 pid) {
+  // Same user, or it is not a recorder of ours whatever it calls itself.
+  if (QFileInfo(QStringLiteral("/proc/%1").arg(pid)).ownerId() != ::geteuid())
+    return false;
   QFile comm(QStringLiteral("/proc/%1/comm").arg(pid));
   if (!comm.open(QIODevice::ReadOnly) ||
       QString::fromLatin1(comm.readLine()).trimmed() !=
@@ -278,8 +369,8 @@ bool processIsRecorder(qint64 pid) {
 
 /** The Studio next to this executable, then one on PATH, else nothing. */
 QString studioExecutable() {
-  const QString sibling = QDir(QCoreApplication::applicationDirPath())
-                              .filePath(QStringLiteral("omasnap-studio"));
+  QString sibling = QDir(QCoreApplication::applicationDirPath())
+                        .filePath(QStringLiteral("omasnap-studio"));
   if (QFileInfo(sibling).isExecutable())
     return sibling;
   return QStandardPaths::findExecutable(QStringLiteral("omasnap-studio"));
@@ -393,11 +484,36 @@ bool handOffToRecorder(const RecordTarget &target, const RecordOptions &options,
   if (options.microphone)
     arguments << QStringLiteral("--mic");
   arguments << QStringLiteral("--fps") << QString::number(options.fps);
+  qint64 recorderPid = 0;
   if (!QProcess::startDetached(QCoreApplication::applicationFilePath(),
-                               arguments)) {
+                               arguments, {}, &recorderPid)) {
     QFile::remove(path);
     error = QStringLiteral("Could not start the recorder");
     return false;
+  }
+
+  // The recorder is not recording until it holds the lock, and `omasnap
+  // --record --stop` reads that lock to find it. Returning before the child
+  // takes it makes an immediate stop -- a double-pressed key, or a script --
+  // report that nothing is running and then leave a recording behind.
+  const QString runtime = secureRuntimeDirectory();
+  if (runtime.isEmpty())
+    return true;
+  QLockFile lock(QDir(runtime).filePath(QStringLiteral("omasnap.record")));
+  lock.setStaleLockTime(0);
+  const QDeadlineTimer deadline(kHandoffLockWaitMs);
+  while (!deadline.hasExpired()) {
+    qint64 holder = 0;
+    QString hostname;
+    QString application;
+    if (lock.getLockInfo(&holder, &hostname, &application) &&
+        holder == recorderPid)
+      return true;
+    // The child can also have failed and said so itself; either way there is
+    // nothing more for this process to wait on once it is gone.
+    if (!QFileInfo::exists(QStringLiteral("/proc/%1").arg(recorderPid)))
+      return true;
+    QThread::msleep(kHandoffPollMs);
   }
   return true;
 }
@@ -427,18 +543,10 @@ bool stopActiveRecording(QString &error) {
   }
   // Pids are reused. Signalling one read out of a file, on the strength of
   // the file alone, is how a recorder's stop key ends up killing a stranger's
-  // process; check what the pid actually is, immediately before signalling.
-  if (!processIsRecorder(pid)) {
+  // process. SIGTERM rather than a socket of our own: the recorder already
+  // turns the first one into the same stop-and-save the indicator does.
+  if (!signalVerifiedProcess(pid, SIGTERM, processIsRecorder)) {
     error = QStringLiteral("No recording is running");
-    return false;
-  }
-  // SIGTERM rather than a socket of our own: the recorder already turns the
-  // first one into the same stop-and-save the indicator button does.
-  if (::kill(static_cast<pid_t>(pid), SIGTERM) != 0) {
-    error = errno == ESRCH
-                ? QStringLiteral("No recording is running")
-                : QStringLiteral("Could not stop the recorder (pid %1)")
-                      .arg(pid);
     return false;
   }
   return true;
@@ -500,6 +608,19 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                                              QFileDevice::WriteOwner |
                                              QFileDevice::ExeOwner);
   }
+  // Before recovery, not after: an encoder we did not spawn may be writing
+  // one of those .part.mkv files right now, and promoting a file that is
+  // still being written would be worse than refusing.
+  if (const QVector<qint64> others = runningEncoders(); !others.isEmpty()) {
+    const QString message =
+        QStringLiteral("Another screen recorder is already running (pid %1); "
+                       "stop it first")
+            .arg(others.first());
+    qCritical().noquote() << message;
+    notifyRecording(message, {});
+    return 1;
+  }
+
   const QDir directory(directoryPath);
   if (const int recovered = recoverAbandonedRecordings(directory);
       recovered > 0) {
@@ -516,7 +637,8 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   config.fps = options.fps;
   config.systemAudio = options.systemAudio;
   config.microphone = options.microphone;
-  config.outputPath = directory.filePath(stem + QStringLiteral(".part.mkv"));
+  config.outputPath =
+      uncontendedPath(directory, stem, QStringLiteral(".part.mkv"));
   // Short by necessity: a unix socket path is capped at 108 bytes, which a
   // path under the recordings directory would not fit inside.
   const QString socketDirectory = runtimeRecordDirectory();
@@ -531,31 +653,13 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
 
   // Create the master before the encoder does, so it is owner-only for the
   // whole recording rather than from the moment it is finished. The encoder
-  // truncates it and keeps the mode.
-  {
-    QFile master(config.outputPath);
-    if (!master.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-      const QString message =
-          QStringLiteral("Could not write into %1").arg(directoryPath);
-      qCritical().noquote() << message;
-      notifyRecording(message, {});
-      return 1;
-    }
-    master.close();
-    restrictToOwner(config.outputPath);
-  }
-
-  // Refuse rather than compete. Another recorder on this desktop -- the
-  // stock Omarchy one included -- controls its encoder by broad discovery,
-  // and running alongside it would let it pause or stop ours.
-  if (const QVector<qint64> others = runningEncoders(); !others.isEmpty()) {
+  // truncates it and keeps the mode. Exclusively, so this can only ever be
+  // a file we made.
+  if (!createExclusiveFile(config.outputPath)) {
     const QString message =
-        QStringLiteral("Another screen recorder is already running (pid %1); "
-                       "stop it first")
-            .arg(others.first());
+        QStringLiteral("Could not write into %1").arg(directoryPath);
     qCritical().noquote() << message;
     notifyRecording(message, {});
-    QFile::remove(config.outputPath);
     return 1;
   }
 
@@ -566,6 +670,9 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
     indicator.hide();
     QCoreApplication::exit(code);
   };
+  // Set when the user stops before the encoder is up. What follows is an
+  // encoder exiting on our own signal, which is not a failure to report.
+  bool cancelling = false;
 
   QObject::connect(&session, &RecordSession::recording, &indicator, [&] {
     indicator.setPhase(RecordIndicator::Phase::Recording);
@@ -590,6 +697,7 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
       // Nothing has been recorded yet, so there is nothing to save. Leave
       // rather than sit on "Starting…": the encoder's parent-death signal
       // takes the child with us.
+      cancelling = true;
       finish(1);
       return;
     case RecordSession::State::Stopping:
@@ -610,23 +718,27 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
   QObject::connect(
       &session, &RecordSession::failed, &indicator,
       [&](const QString &message) {
+        if (cancelling) {
+          // The encoder exiting on the signal we just sent it.
+          finish(1);
+          return;
+        }
         qCritical().noquote() << message;
         indicator.setPhase(RecordIndicator::Phase::Failed);
         indicator.setMessage(message.left(60));
-        // Whatever was captured before it went wrong is still worth keeping,
-        // and is named as partial rather than presented as a finished
-        // recording. The empty file we created ourselves is not.
-        QString kept;
-        if (QFileInfo(config.outputPath).size() > 0)
-          kept = promoteMatroska(directory, stem, config.outputPath);
-        else
-          QFile::remove(config.outputPath);
+        // Whatever was captured before it went wrong is left exactly where
+        // it is: the encoder is being shut down and may still hold the file
+        // open, so renaming it here would race that. It stays a .part.mkv
+        // and the next recording promotes it, after checking it can be read.
+        const bool kept = QFileInfo(config.outputPath).size() > 0;
+        if (!kept)
+          QFile::remove(config.outputPath); // The empty one we made.
         notifyRecording(
-            kept.isEmpty()
-                ? QStringLiteral("Recording failed: %1").arg(message)
-                : QStringLiteral("Recording failed: %1 · partial file kept")
-                      .arg(message),
-            kept);
+            kept ? QStringLiteral("Recording failed: %1 · what was captured "
+                                  "is kept and restored next time you record")
+                       .arg(message)
+                 : QStringLiteral("Recording failed: %1").arg(message),
+            {});
         QTimer::singleShot(kFailureLingerMs, &indicator, [&] { finish(1); });
       });
 
@@ -650,7 +762,6 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
         }
         restrictToOwner(master);
 
-        const QString probe = findProbeExecutable();
         const auto keepMaster = [&, master](const QString &why) {
           const QString kept = promoteMatroska(directory, stem, master);
           notifyRecording(why.isEmpty() ? QStringLiteral("Recording saved")
@@ -670,10 +781,39 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
         }
         // Written under a working name and renamed into place only once it
         // has been read back: a crash mid-remux must not leave a corrupt
-        // file sitting at the name the notification points at.
+        // file sitting at the name the notification points at. Reserved the
+        // same way the master is, so ffmpeg's -y can only ever truncate a
+        // file this process just created.
         const QString mp4 =
             uncontendedPath(directory, stem, QStringLiteral(".mp4"));
         const QString draft = mp4 + QStringLiteral(".part");
+        const QString mp4Failed =
+            QStringLiteral("Recording saved (could not convert to MP4)");
+        if (!createExclusiveFile(draft)) {
+          keepMaster(mp4Failed);
+          return;
+        }
+
+        // Declared here rather than inside the callbacks below: these
+        // outlive each asynchronous hop by being copied into the next one,
+        // and their references point at this handler's captures, which live
+        // as long as the connection does.
+        const auto giveUpDraft = [draft, keepMaster, mp4Failed] {
+          QFile::remove(draft);
+          keepMaster(mp4Failed);
+        };
+        const auto acceptDraft = [&, master, draft, mp4, giveUpDraft] {
+          restrictToOwner(draft);
+          if (!QFile::rename(draft, mp4)) {
+            giveUpDraft();
+            return;
+          }
+          // Only now is the master redundant.
+          QFile::remove(master);
+          notifyRecording(QStringLiteral("Recording saved"), mp4);
+          finish(0);
+        };
+
         // -map 0 rather than ffmpeg's default stream selection, which keeps
         // one audio stream: recording with --audio and --mic produces two,
         // and the remux would silently drop the microphone.
@@ -686,24 +826,27 @@ int runRecorder(const QString &targetPath, const RecordOptions &options,
                  QStringLiteral("-1"), QStringLiteral("-f"),
                  QStringLiteral("mp4"), QStringLiteral("-movflags"),
                  QStringLiteral("+faststart"), draft},
-                [&, master, draft, mp4, probe, keepMaster](bool ok) {
-                  if (!ok || !looksPlayable(draft, probe)) {
-                    QFile::remove(draft);
-                    keepMaster(QStringLiteral("Recording saved (could not "
-                                              "convert to MP4)"));
+                [&, draft, acceptDraft, giveUpDraft](bool ok,
+                                                     const QByteArray &) {
+                  if (!ok || QFileInfo(draft).size() <= 0) {
+                    giveUpDraft();
                     return;
                   }
-                  restrictToOwner(draft);
-                  if (!QFile::rename(draft, mp4)) {
-                    QFile::remove(draft);
-                    keepMaster(QStringLiteral("Recording saved (could not "
-                                              "convert to MP4)"));
+                  const QString probe = findProbeExecutable();
+                  if (probe.isEmpty()) {
+                    acceptDraft();
                     return;
                   }
-                  // Only now is the master redundant.
-                  QFile::remove(master);
-                  notifyRecording(QStringLiteral("Recording saved"), mp4);
-                  finish(0);
+                  // Read back asynchronously: the indicator is on screen
+                  // saying "Saving…" and has to keep painting.
+                  runTool(&indicator, probe, mediaProbeArguments(draft),
+                          [acceptDraft, giveUpDraft](
+                              bool readable, const QByteArray &output) {
+                            if (readable && probeOutputIsPlayable(output))
+                              acceptDraft();
+                            else
+                              giveUpDraft();
+                          });
                 });
       });
 

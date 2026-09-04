@@ -108,6 +108,9 @@ private:
   int nextRequestId_ = 1;
   int readyAttempts_ = 0;
   bool probeInFlight_ = false;
+  /// One pause request at a time. Without this, rapid clicks put several
+  /// idempotent requests in flight and their replies apply out of order.
+  bool pauseInFlight_ = false;
   State state_ = State::Idle;
   QString savedPath_;
   QString stderrTail_;

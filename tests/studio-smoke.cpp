@@ -193,6 +193,9 @@ bool runTimelineChecks(QString &error) {
 } // namespace
 
 int main(int argc, char **argv) {
+  // As omasnap-studio does: no desktop theme plugin, so an offscreen run
+  // needs no display.
+  qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QApplication application(argc, argv);
   QString error;
   const struct {

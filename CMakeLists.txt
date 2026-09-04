@@ -204,7 +204,7 @@ target_compile_options(omasnap-smoke PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(omasnap-smoke PRIVATE omasnap-core Qt6::Test)
 target_precompile_headers(omasnap-smoke REUSE_FROM omasnap-core)
 add_test(NAME omasnap-smoke COMMAND omasnap-smoke "${CMAKE_CURRENT_BINARY_DIR}/omasnap-smoke-output")
-set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic")
 
 if(OMASNAP_STUDIO)
 # Its own binary for the same reason the Studio is its own binary: the
@@ -226,7 +226,7 @@ target_link_libraries(omasnap-studio-smoke PRIVATE
   Qt6::Multimedia Qt6::MultimediaWidgets
 )
 add_test(NAME omasnap-studio-smoke COMMAND omasnap-studio-smoke)
-set_tests_properties(omasnap-studio-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(omasnap-studio-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic")
 endif()
 endif()
 

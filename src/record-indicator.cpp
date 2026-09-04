@@ -208,9 +208,9 @@ void RecordIndicator::paintEvent(QPaintEvent *) {
   if (phase_ == Phase::Recording) {
     const qreal wave =
         0.5 + 0.5 * std::cos(2.0 * M_PI * pulseTick_ / kPulsePeriod);
-    dot.setAlphaF(0.55 + 0.45 * wave);
+    dot.setAlphaF(static_cast<float>(0.55 + 0.45 * wave));
   } else if (phase_ != Phase::Paused && phase_ != Phase::Failed) {
-    dot.setAlphaF(0.4);
+    dot.setAlphaF(0.4F);
   }
   painter.setPen(Qt::NoPen);
   painter.setBrush(dot);
