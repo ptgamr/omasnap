@@ -321,7 +321,66 @@ bool runRecordSessionLifecycleSmoke(QString &error) {
       return false;
   }
 
-  // 2. The race: a set-paused reply that arrives after the user has already
+  // 2. Pause and resume, and the duplicate clicks that used to double-count
+  //    the paused interval because state only moves when a reply lands.
+  {
+    qputenv(kFakeRecorderVariable, "normal");
+    const RecordConfig config = configure(QStringLiteral("pause"));
+    RecordSession session(config);
+    QSignalSpy recording(&session, &RecordSession::recording);
+    QSignalSpy pausedChanged(&session, &RecordSession::pausedChanged);
+    QString startError;
+    if (!check(session.start(startError), error,
+               QStringLiteral("pause session did not start: %1")
+                   .arg(startError)))
+      return false;
+    if (!check(spinUntil([&] { return !recording.isEmpty(); }, 15000), error,
+               QStringLiteral("pause session never reported recording")))
+      return false;
+
+    // Three clicks before any reply lands must be one transition.
+    session.setPaused(true);
+    session.setPaused(true);
+    session.setPaused(true);
+    if (!check(spinUntil([&] { return !pausedChanged.isEmpty(); }, 10000),
+               error, QStringLiteral("pausing had no effect")))
+      return false;
+    static_cast<void>(spinUntil([] { return false; }, 300));
+    if (!check(pausedChanged.count() == 1 &&
+                   pausedChanged.at(0).at(0).toBool() &&
+                   session.state() == RecordSession::State::Paused,
+               error,
+               QStringLiteral("repeated pause clicks were not collapsed into "
+                              "one transition")))
+      return false;
+
+    // The clock stops while paused, and picks up where it left off.
+    const qint64 held = session.elapsedMs();
+    static_cast<void>(spinUntil([] { return false; }, 600));
+    if (!check(session.elapsedMs() == held, error,
+               QStringLiteral("the clock kept running while paused")))
+      return false;
+    session.setPaused(false);
+    if (!check(spinUntil([&] { return pausedChanged.count() == 2; }, 10000),
+               error, QStringLiteral("resuming had no effect")))
+      return false;
+    if (!check(!pausedChanged.at(1).at(0).toBool() &&
+                   session.state() == RecordSession::State::Recording,
+               error, QStringLiteral("resuming did not resume")))
+      return false;
+    static_cast<void>(spinUntil([] { return false; }, 300));
+    if (!check(session.elapsedMs() >= held &&
+                   session.elapsedMs() < held + 900,
+               error,
+               QStringLiteral("the paused time was not excluded from the "
+                              "clock")))
+      return false;
+    session.stop();
+    static_cast<void>(spinUntil(
+        [&] { return session.state() == RecordSession::State::Done; }, 15000));
+  }
+
+  // 3. The race: a set-paused reply that arrives after the user has already
   //    stopped must not move the session back to recording.
   {
     qputenv(kFakeRecorderVariable, "slow-pause");
@@ -354,7 +413,7 @@ bool runRecordSessionLifecycleSmoke(QString &error) {
       return false;
   }
 
-  // 3. An encoder that dies before opening its control socket is a failure,
+  // 4. An encoder that dies before opening its control socket is a failure,
   //    not a session that waits forever.
   {
     qputenv(kFakeRecorderVariable, "no-socket");
