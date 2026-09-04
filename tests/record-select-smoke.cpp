@@ -1,12 +1,14 @@
 /** @fileoverview Tests the selector in recording-target mode: dragging an
  *  area answers with a rectangle and closes, a window pick answers with the
  *  window's rectangle, cancelling answers with nothing, and none of it
- *  writes an image, a shelved document, or an operation log. */
+ *  writes an image, a shelved document, or an operation log, and none of the
+ *  screenshot-only ways out of the selector are reachable. */
 #include "record-select-smoke.hpp"
 
 #include "capture.hpp"
 #include "editor.hpp"
 #include "record-target.hpp"
+#include "recent-snaps.hpp"
 
 #include <QApplication>
 #include <QDir>
@@ -41,12 +43,6 @@ bool check(bool condition, QString &error, const QString &message) {
   return false;
 }
 
-/// Files a normal capture would leave behind. A recording target must leave
-/// none of them.
-bool wroteAnything(const QDir &shelf) {
-  return !shelf.entryList(QDir::Files | QDir::NoDotAndDotDot).isEmpty();
-}
-
 } // namespace
 
 bool runRecordSelectSmoke(QApplication &application, QString &error) {
@@ -65,6 +61,32 @@ bool runRecordSelectSmoke(QApplication &application, QString &error) {
     else
       qputenv("OMASNAP_RECENT_DIR", previousShelf);
   });
+
+  // A shelf with something on it, so "the recents are not offered" is a
+  // claim about the selector and not about an empty directory.
+  {
+    QTemporaryDir working;
+    if (!working.isValid()) {
+      error = QStringLiteral("could not create a temporary working directory");
+      return false;
+    }
+    const QString source =
+        QDir(working.path()).filePath(QStringLiteral("snap.png"));
+    QImage image(200, 150, QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor(QStringLiteral("#804020")));
+    QString recordError;
+    if (!image.save(source, "PNG") ||
+        !recordRecentSnap(source, {}, image, recordError)) {
+      error = QStringLiteral("could not shelve a recent capture: %1")
+                  .arg(recordError);
+      return false;
+    }
+    if (listRecentSnaps(false).isEmpty()) {
+      error = QStringLiteral("the shelved capture did not appear on the "
+                             "shelf");
+      return false;
+    }
+  }
 
   // Dragging an area answers with that rectangle, in preview coordinates,
   // and closes without ever entering the annotation editor.
@@ -114,9 +136,6 @@ bool runRecordSelectSmoke(QApplication &application, QString &error) {
 
     editor.close();
     application.processEvents();
-    if (!check(!wroteAnything(QDir(shelf.path())), error,
-               QStringLiteral("picking a target shelved a document")))
-      return false;
     if (!check(editor.operationLog().isEmpty(), error,
                QStringLiteral("picking a target wrote an operation log")))
       return false;
@@ -165,6 +184,39 @@ bool runRecordSelectSmoke(QApplication &application, QString &error) {
     application.processEvents();
   }
 
+  // The screenshot-only routes out of the selector are closed. The recents
+  // shelf reopens an image, and S starts a scrolling stitch; either would
+  // leave the overlay unable to answer with a target at all.
+  {
+    CaptureEditor editor(sampleCapture());
+    editor.setRecordTargetMode(true);
+    editor.resize(800, 600);
+    editor.show();
+    application.processEvents();
+    static_cast<void>(editor.waitForRecents());
+    application.processEvents();
+    if (!check(editor.recentCardRectForTest(0).isNull(), error,
+               QStringLiteral("the recents shelf is offered while picking a "
+                              "recording target")))
+      return false;
+
+    QSignalSpy chosen(&editor, &CaptureEditor::recordTargetSelected);
+    QTest::keyClick(&editor, Qt::Key_S);
+    application.processEvents();
+    QTest::mousePress(&editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(200, 200));
+    QTest::mouseMove(&editor, QPoint(400, 350), 20);
+    QTest::mouseRelease(&editor, Qt::LeftButton, Qt::NoModifier,
+                        QPoint(400, 350));
+    application.processEvents();
+    if (!check(chosen.count() == 1, error,
+               QStringLiteral("S turned the selector into a scrolling "
+                              "capture")))
+      return false;
+    editor.close();
+    application.processEvents();
+  }
+
   // Escape answers with nothing, which is how the caller knows to record
   // nothing rather than to record the whole screen.
   {
@@ -183,8 +235,10 @@ bool runRecordSelectSmoke(QApplication &application, QString &error) {
     application.processEvents();
   }
 
-  if (!check(!wroteAnything(QDir(shelf.path())), error,
-             QStringLiteral("the recording selector left files behind")))
+  // One entry on the shelf, the one this test put there: the selector added
+  // nothing of its own.
+  if (!check(listRecentSnaps(false).size() == 1, error,
+             QStringLiteral("the recording selector shelved a document")))
     return false;
   return true;
 }

@@ -906,7 +906,11 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
   connect(&recentsWatcher_, &QFutureWatcher<QVector<RecentSnap>>::finished,
           this, [this] {
             recentsLoading_ = false;
-            recents_ = recentsWatcher_.result();
+            // The shelf reopens a screenshot, which is not a thing a
+            // recording target can be. The load is already in flight by the
+            // time the caller can say so, hence the check here too.
+            recents_ = recordTargetMode_ ? QVector<RecentSnap>()
+                                         : recentsWatcher_.result();
             if (phase_ == Phase::Select)
               update();
           });
@@ -2963,6 +2967,11 @@ void CaptureEditor::setRecordTargetMode(bool enabled) {
   if (!enabled)
     return;
   setSuppressSnapshots(true);
+  // Every screenshot-only route out of the selector is closed here rather
+  // than guarded at each use: taking one would leave the overlay without
+  // ever answering with a target.
+  setRecentsOpen(false);
+  recents_.clear();
   setStatus(captureMode_ == CaptureMode::Window
                 ? QStringLiteral("Window mode · click or Super+Arrows then "
                                  "Enter to record it")
@@ -3729,7 +3738,10 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
       return;
     }
     if (event->key() == Qt::Key_S && !event->modifiers()) {
-      setScrollMode(!scrollMode_);
+      // Stitching a scrolling page is a screenshot idea, the same reason the
+      // Scroll tab is inert while picking a recording target.
+      if (!recordTargetMode_)
+        setScrollMode(!scrollMode_);
       return;
     }
     if (event->key() == Qt::Key_Space) {
