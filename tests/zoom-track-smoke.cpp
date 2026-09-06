@@ -6,6 +6,7 @@
 #include "zoom-track.hpp"
 
 #include <QJsonObject>
+#include <QLineF>
 
 #include <cmath>
 
@@ -66,12 +67,11 @@ bool runZoomTrackSmoke(QString &error) {
   }
   if (!check(zoomViewAt(track, 1010).scale < 1.05 &&
                  zoomViewAt(track, 2990).scale < 1.05,
-             error,
-             QStringLiteral("the ramps do not start and end at rest")))
+             error, QStringLiteral("the ramps do not start and end at rest")))
     return false;
-  // Halfway through the ease-in, smoothstep is exactly halfway.
-  if (!check(std::abs(zoomViewAt(track, 1200).scale - 1.5) < 0.01, error,
-             QStringLiteral("the ease is not a smoothstep")))
+  // Halfway through the ramp, the viewport width is halfway from 1 to .5.
+  if (!check(std::abs(zoomViewAt(track, 1200).scale - 4.0 / 3) < 0.01, error,
+             QStringLiteral("viewport size does not ease continuously")))
     return false;
 
   // The window is the frame's shape, sized 1/scale, and inside the frame.
@@ -81,8 +81,7 @@ bool runZoomTrackSmoke(QString &error) {
              error, QStringLiteral("the zoom window is the wrong size")))
     return false;
   if (!check(window.left() >= -1e-9 && window.top() >= -1e-9 &&
-                 window.right() <= 1.0 + 1e-9 &&
-                 window.bottom() <= 1.0 + 1e-9,
+                 window.right() <= 1.0 + 1e-9 && window.bottom() <= 1.0 + 1e-9,
              error, QStringLiteral("the zoom window leaves the frame")))
     return false;
 
@@ -162,8 +161,8 @@ bool runZoomTrackSmoke(QString &error) {
   // argument the export has to exec with.
   ZoomTrack many;
   for (int index = 0; index < kMaxZoomCues + 10; ++index)
-    static_cast<void>(addZoomCue(many, index * 1000, {0.5, 0.5}, 2.0, 500,
-                                 1000000));
+    static_cast<void>(
+        addZoomCue(many, index * 1000, {0.5, 0.5}, 2.0, 500, 1000000));
   if (!check(many.cues.size() == kMaxZoomCues, error,
              QStringLiteral("the cue count is not capped at %1")
                  .arg(kMaxZoomCues)))
@@ -171,9 +170,13 @@ bool runZoomTrackSmoke(QString &error) {
   // A file may say anything, so the cap is applied on the way in too.
   ZoomTrack overfull;
   for (int index = 0; index < kMaxZoomCues + 25; ++index)
-    overfull.cues.push_back(
-        ZoomCue{static_cast<quint64>(index + 1), index * 1000,
-                index * 1000 + 500, 100, 100, {0.5, 0.5}, 2.0});
+    overfull.cues.push_back(ZoomCue{static_cast<quint64>(index + 1),
+                                    index * 1000,
+                                    index * 1000 + 500,
+                                    100,
+                                    100,
+                                    {0.5, 0.5},
+                                    2.0});
   ZoomTrack loaded;
   QString loadError;
   if (!check(readZoomTrack(writeZoomTrack(overfull), loaded, loadError) &&
@@ -189,8 +192,7 @@ bool runZoomTrackSmoke(QString &error) {
                     ZoomCue{2, 4000, 5000, 400, 400, {0.8, 0.8}, 2.0},
                     ZoomCue{3, 20000, 30000, 400, 400, {0.5, 0.5}, 2.0}};
   normalizeZoomTrack(contained, 12000);
-  if (!check(contained.cues.size() == 2 &&
-                 contained.cues.at(0).endMs == 4000 &&
+  if (!check(contained.cues.size() == 2 && contained.cues.at(0).endMs == 4000 &&
                  contained.cues.at(1).endMs == 5000,
              error,
              QStringLiteral("normalizing left the stored track disagreeing "
@@ -209,6 +211,24 @@ bool runZoomTrackSmoke(QString &error) {
                  resolved.at(1).startMs == 2000,
              error, QStringLiteral("overlapping cues were not made disjoint")))
     return false;
+
+  // Touching cues pan directly between their destinations, without a 1x
+  // flash at the boundary, and stay within the source all along the ramp.
+  const ZoomView beforeJoin = zoomViewAt(overlapping, 1999);
+  const ZoomView atJoin = zoomViewAt(overlapping, 2000);
+  if (!check(std::abs(beforeJoin.scale - atJoin.scale) < 0.001 &&
+                 atJoin.scale > 2.9 &&
+                 QLineF(beforeJoin.centre, atJoin.centre).length() < 0.001,
+             error,
+             QStringLiteral("adjacent zooms jump back to the full frame")))
+    return false;
+  for (qint64 time = 2000; time <= 2400; time += 5) {
+    const QRectF rect = zoomSourceRect(overlapping, time);
+    if (!check(rect.left() >= -1e-9 && rect.top() >= -1e-9 &&
+                   rect.right() <= 1 + 1e-9 && rect.bottom() <= 1 + 1e-9,
+               error, QStringLiteral("camera interpolation left the source")))
+      return false;
+  }
 
   // The track crosses a process boundary as part of the project.
   ZoomTrack parsed;

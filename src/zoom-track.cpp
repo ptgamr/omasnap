@@ -9,21 +9,10 @@
 
 namespace {
 
-/// Starts and ends at zero velocity, so a zoom does not jerk at either end.
+/// Zero velocity and acceleration at both ends, including joined cues.
 qreal smoothstep(qreal t) {
   const qreal x = qBound<qreal>(0.0, t, 1.0);
-  return x * x * (3.0 - 2.0 * x);
-}
-
-/// How far in a cue is at `timeMs`, 0 outside it and 1 while it holds.
-qreal cueWeight(const ZoomCue &cue, qint64 timeMs) {
-  if (timeMs <= cue.startMs || timeMs >= cue.endMs)
-    return 0.0;
-  const ZoomRamps ramps = zoomRamps(cue);
-  const auto into = static_cast<qreal>(timeMs - cue.startMs);
-  const auto left = static_cast<qreal>(cue.endMs - timeMs);
-  return qMin(smoothstep(into / ramps.easeInMs),
-              smoothstep(left / ramps.easeOutMs));
+  return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
 }
 
 /// The centre a view of `scale` may actually use: panning stops at the frame
@@ -36,19 +25,36 @@ QPointF clampCentre(const QPointF &target, qreal scale) {
           qBound(half, target.y(), 1.0 - half)};
 }
 
-QString number(qreal value) {
-  return QString::number(value, 'f', 6);
+QString number(qreal value) { return QString::number(value, 'f', 6); }
+
+struct CameraStops {
+  ZoomView from;
+  ZoomView target;
+  ZoomView after;
+};
+
+CameraStops cameraStops(const QVector<ZoomCue> &cues, qsizetype index) {
+  const ZoomCue &cue = cues.at(index);
+  CameraStops stops;
+  stops.target = {cue.scale, clampCentre(cue.target, cue.scale)};
+  if (index > 0 && cues.at(index - 1).endMs == cue.startMs) {
+    const ZoomCue &previous = cues.at(index - 1);
+    stops.from = {previous.scale, clampCentre(previous.target, previous.scale)};
+  }
+  if (index + 1 < cues.size() && cues.at(index + 1).startMs == cue.endMs)
+    stops.after = stops.target;
+  return stops;
 }
 
 } // namespace
 
 ZoomRamps zoomRamps(const ZoomCue &cue) {
-  const auto length = static_cast<qreal>(qMax<qint64>(1, cue.endMs - cue.startMs));
+  const auto length =
+      static_cast<qreal>(qMax<qint64>(1, cue.endMs - cue.startMs));
   // A floor on each ramp, so neither the preview's division nor the filter
   // expression's can ever be by zero, however a hand-edited cue is written.
-  ZoomRamps ramps{
-      static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeInMs)),
-      static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeOutMs))};
+  ZoomRamps ramps{static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeInMs)),
+                  static_cast<qreal>(qMax<qint64>(kMinEaseMs, cue.easeOutMs))};
   // Ramps never overlap: a cue shorter than its own ramps splits its length
   // between them. In floating point on both sides, because the two used to
   // round differently and disagreed around the midpoint of a short cue.
@@ -72,10 +78,9 @@ QVector<ZoomCue> sortedCues(const ZoomTrack &track) {
     usable.scale = qBound(kMinZoomScale, usable.scale, kMaxZoomScale);
     cues.push_back(usable);
   }
-  std::sort(cues.begin(), cues.end(),
-            [](const ZoomCue &a, const ZoomCue &b) {
-              return a.startMs < b.startMs;
-            });
+  std::sort(cues.begin(), cues.end(), [](const ZoomCue &a, const ZoomCue &b) {
+    return a.startMs < b.startMs;
+  });
   // Overlaps are resolved here, once, so everything downstream sees disjoint
   // cues. While two cues overlap, "the deepest cue" and "the cue that is
   // running" are different questions with different answers, and the preview
@@ -94,22 +99,32 @@ QVector<ZoomCue> sortedCues(const ZoomTrack &track) {
 }
 
 ZoomView zoomViewAt(const ZoomTrack &track, qint64 timeMs) {
-  ZoomView view;
-  qreal best = 0.0;
-  for (const ZoomCue &cue : sortedCues(track)) {
-    const qreal weight = cueWeight(cue, timeMs);
-    if (weight <= 0.0)
+  const QVector<ZoomCue> cues = sortedCues(track);
+  for (qsizetype index = 0; index < cues.size(); ++index) {
+    const ZoomCue &cue = cues.at(index);
+    if (timeMs < cue.startMs || timeMs >= cue.endMs)
       continue;
-    // Interpolating between the resting 1x and the cue is what makes the
-    // ramp: at weight 0 the camera is out, at 1 it is fully in.
-    const qreal scale = 1.0 + (cue.scale - 1.0) * weight;
-    if (scale <= best)
-      continue;
-    best = scale;
-    view.scale = scale;
-    view.centre = clampCentre(cue.target, scale);
+    const CameraStops stops = cameraStops(cues, index);
+    const ZoomRamps ramps = zoomRamps(cue);
+    const qreal into =
+        smoothstep(static_cast<qreal>(timeMs - cue.startMs) / ramps.easeInMs);
+    const qreal left =
+        smoothstep(static_cast<qreal>(cue.endMs - timeMs) / ramps.easeOutMs);
+    const auto blend = [into, left](qreal from, qreal target, qreal after) {
+      return target + (from - target) * (1 - into) +
+             (after - target) * (1 - left);
+    };
+    // Interpolate viewport size and centre together. Convex combinations of
+    // valid rectangles stay inside the source; there is no moving clamp to
+    // make the pan suddenly stop halfway through a zoom.
+    return {1.0 / blend(1.0 / stops.from.scale, 1.0 / stops.target.scale,
+                        1.0 / stops.after.scale),
+            {blend(stops.from.centre.x(), stops.target.centre.x(),
+                   stops.after.centre.x()),
+             blend(stops.from.centre.y(), stops.target.centre.y(),
+                   stops.after.centre.y())}};
   }
-  return view;
+  return {};
 }
 
 QRectF zoomSourceRect(const ZoomTrack &track, qint64 timeMs) {
@@ -159,20 +174,21 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fpsNumerator,
   // plus wherever this filter's first frame sits on the timeline, which is
   // the same clock zoomViewAt() is evaluated on. The rate is a ratio because
   // rounding 30000/1001 to 30 drifts the camera against the picture.
-  const QString elapsed = QStringLiteral("(on*%1/%2)")
-                              .arg(QString::number(fpsDenominator),
-                                   QString::number(fpsNumerator));
+  const QString elapsed =
+      QStringLiteral("(on*%1/%2)")
+          .arg(QString::number(fpsDenominator), QString::number(fpsNumerator));
   const QString time =
       startOffsetMs == 0
           ? elapsed
-          : QStringLiteral("(%1+%2)")
-                .arg(elapsed,
-                     number(static_cast<qreal>(startOffsetMs) / 1000.0));
+          : QStringLiteral("(%1+%2)").arg(
+                elapsed, number(static_cast<qreal>(startOffsetMs) / 1000.0));
   QString scale = QStringLiteral("1");
   QString centreX = QStringLiteral("0.5");
   QString centreY = QStringLiteral("0.5");
 
-  for (const ZoomCue &cue : cues) {
+  for (qsizetype index = 0; index < cues.size(); ++index) {
+    const ZoomCue &cue = cues.at(index);
+    const CameraStops stops = cameraStops(cues, index);
     const qreal start = static_cast<qreal>(cue.startMs) / 1000.0;
     const qreal end = static_cast<qreal>(cue.endMs) / 1000.0;
     // The same split the preview uses, from the same function.
@@ -186,23 +202,34 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fpsNumerator,
                              .arg(time, number(start), number(easeIn));
     const QString left = QStringLiteral("clip((%1-%2)/%3,0,1)")
                              .arg(number(end), time, number(easeOut));
-    const QString ramp =
-        QStringLiteral("(min(%1*%1*(3-2*%1),%2*%2*(3-2*%2)))").arg(into, left);
-    const QString weight = QStringLiteral("if(between(%1,%2,%3),%4,0)")
-                               .arg(time, number(start), number(end), ramp);
-    const QString cueScale =
-        QStringLiteral("(1+%1*%2)").arg(number(cue.scale - 1.0), weight);
-    const QPointF centre = clampCentre(cue.target, cue.scale);
-    // Cues are disjoint by the time they get here, so at most one is running
-    // at any instant and "whichever is active" is unambiguous.
-    scale = QStringLiteral("max(%1,%2)").arg(scale, cueScale);
-    const QString running =
-        QStringLiteral("between(%1,%2,%3)").arg(time, number(start),
-                                                number(end));
+    const auto smooth = [](const QString &t) {
+      return QStringLiteral("(%1*%1*%1*(%1*(%1*6-15)+10))").arg(t);
+    };
+    const auto blend = [&](qreal from, qreal target, qreal after) {
+      QString expression = number(target);
+      if (!qFuzzyCompare(from, target))
+        expression += QStringLiteral("+(%1)*(1-%2)")
+                          .arg(number(from - target), smooth(into));
+      if (!qFuzzyCompare(after, target))
+        expression += QStringLiteral("+(%1)*(1-%2)")
+                          .arg(number(after - target), smooth(left));
+      return QStringLiteral("(%1)").arg(expression);
+    };
+    const QString cueScale = QStringLiteral("(1/%1)").arg(blend(
+        1 / stops.from.scale, 1 / stops.target.scale, 1 / stops.after.scale));
+    const QString running = QStringLiteral("between(%1,%2,%3)")
+                                .arg(time, number(start), number(end));
     centreX = QStringLiteral("if(%1,%2,%3)")
-                  .arg(running, number(centre.x()), centreX);
+                  .arg(running,
+                       blend(stops.from.centre.x(), stops.target.centre.x(),
+                             stops.after.centre.x()),
+                       centreX);
     centreY = QStringLiteral("if(%1,%2,%3)")
-                  .arg(running, number(centre.y()), centreY);
+                  .arg(running,
+                       blend(stops.from.centre.y(), stops.target.centre.y(),
+                             stops.after.centre.y()),
+                       centreY);
+    scale = QStringLiteral("if(%1,%2,%3)").arg(running, cueScale, scale);
   }
 
   expressions.z = scale;
@@ -216,15 +243,14 @@ ZoomPanExpressions zoomPanExpressions(const ZoomTrack &track, int fpsNumerator,
 QJsonObject writeZoomTrack(const ZoomTrack &track) {
   QJsonArray cues;
   for (const ZoomCue &cue : track.cues) {
-    cues.append(QJsonObject{
-        {QStringLiteral("id"), static_cast<qint64>(cue.id)},
-        {QStringLiteral("startMs"), cue.startMs},
-        {QStringLiteral("endMs"), cue.endMs},
-        {QStringLiteral("easeInMs"), cue.easeInMs},
-        {QStringLiteral("easeOutMs"), cue.easeOutMs},
-        {QStringLiteral("targetX"), cue.target.x()},
-        {QStringLiteral("targetY"), cue.target.y()},
-        {QStringLiteral("scale"), cue.scale}});
+    cues.append(QJsonObject{{QStringLiteral("id"), static_cast<qint64>(cue.id)},
+                            {QStringLiteral("startMs"), cue.startMs},
+                            {QStringLiteral("endMs"), cue.endMs},
+                            {QStringLiteral("easeInMs"), cue.easeInMs},
+                            {QStringLiteral("easeOutMs"), cue.easeOutMs},
+                            {QStringLiteral("targetX"), cue.target.x()},
+                            {QStringLiteral("targetY"), cue.target.y()},
+                            {QStringLiteral("scale"), cue.scale}});
   }
   return {{QStringLiteral("schema"), ZoomTrack::kSchema},
           {QStringLiteral("cues"), cues}};
@@ -242,8 +268,8 @@ bool readZoomTrack(const QJsonObject &object, ZoomTrack &track,
        object.value(QStringLiteral("cues")).toArray()) {
     const QJsonObject entry = value.toObject();
     ZoomCue cue;
-    cue.id = static_cast<quint64>(
-        entry.value(QStringLiteral("id")).toInteger());
+    cue.id =
+        static_cast<quint64>(entry.value(QStringLiteral("id")).toInteger());
     cue.startMs = entry.value(QStringLiteral("startMs")).toInteger();
     cue.endMs = entry.value(QStringLiteral("endMs")).toInteger();
     cue.easeInMs = entry.value(QStringLiteral("easeInMs")).toInteger(400);

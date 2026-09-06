@@ -2,8 +2,11 @@
  *  drawn through the zoom model rather than straight to the screen. */
 #pragma once
 
+#include "studio-style.hpp"
+#include "studio-video.hpp"
 #include "zoom-track.hpp"
 
+#include <QFutureWatcher>
 #include <QImage>
 #include <QWidget>
 
@@ -12,11 +15,10 @@
 /**
  * Paints the part of the current frame the zoom model says is on camera.
  *
- * Not a QVideoWidget: that draws the whole frame and gives nowhere to apply
- * the zoom, and the point of this window is that what you see here is what
- * the export produces. It takes frames from the player's video sink and
- * draws `zoomSourceRect()` of them, which is the same rectangle the export's
- * ffmpeg expressions describe.
+ * Video frames are prepared on a worker with one in-flight and one newest
+ * pending frame, then uploaded as planes to a GPU surface. The shader applies
+ * color conversion, rotation, zoomSourceRect(), and canvas styling. Static
+ * images and the offscreen test platform use the matching QPainter path.
  *
  * Clicking picks a point on the *source*, not on the visible window, so
  * clicking while already zoomed in aims at the thing under the pointer
@@ -28,6 +30,10 @@ public:
   explicit StudioPreview(QWidget *parent = nullptr);
 
   void setFrame(const QImage &frame);
+  void setVideoFrame(const QVideoFrame &frame);
+  void invalidatePendingFrames();
+  void setCanvasInset(int inset);
+  void setStyle(const StudioStyle &style);
   /** Borrowed; the window owns the track and outlives this widget. */
   void setTrack(const ZoomTrack *track);
   void setPosition(qint64 milliseconds);
@@ -49,6 +55,7 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
 
 signals:
+  void previewFailed(const QString &error);
   /** A point on the source frame, normalized, that the user aimed at. */
   void targetPicked(const QPointF &target);
 
@@ -57,15 +64,29 @@ protected:
   void mouseMoveEvent(QMouseEvent *event) override;
   void leaveEvent(QEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
 
 private:
   /** Where the frame is drawn inside the widget, keeping its aspect. */
   [[nodiscard]] QRectF frameRect() const;
+  [[nodiscard]] QRectF canvasRect() const;
   /** Widget point to a normalized point on the source frame, or nothing
    *  when the click missed the frame. */
   [[nodiscard]] std::optional<QPointF> sourceAt(const QPointF &position) const;
+  void preparePendingFrame();
+  void refreshSurface();
+  void paintOverlay(QPainter &painter) const;
 
   QImage frame_;
+  QSize videoSize_;
+  StudioVideoSurface *surface_ = nullptr;
+  QFutureWatcher<StudioVideoFrame> frameWatcher_;
+  QVideoFrame pendingFrame_;
+  quint64 generation_ = 0;
+  quint64 preparingGeneration_ = 0;
+  bool preparing_ = false;
+  int canvasInset_ = 0;
+  StudioStyle style_;
   const ZoomTrack *track_ = nullptr;
   qint64 positionMs_ = 0;
   QPointF marker_;

@@ -61,13 +61,9 @@ inline constexpr qint64 kMinCueMs = 200;
 inline constexpr qint64 kMinEaseMs = 60;
 /// Most cues one clip may carry.
 ///
-/// The binding limit is not the length of the argument but ffmpeg's own
-/// expression complexity: measured against ffmpeg n9.0.1, this generator's
-/// filter is accepted at 88 cues and rejected at 89 with "Failed to
-/// configure output pad", long before the 131072-byte single-argument
-/// ceiling. The cap is set well under the measured cliff rather than at it,
-/// and the golden test proves the cap by handing a full track to ffmpeg
-/// rather than by counting characters.
+/// Keep the generated camera expressions within ffmpeg's parser limits.
+/// The golden test hands a complete track at this cap to ffmpeg; a count of
+/// characters alone cannot establish that its expression parser accepts it.
 inline constexpr int kMaxZoomCues = 40;
 
 /**
@@ -101,13 +97,10 @@ struct ZoomRamps {
 [[nodiscard]] ZoomRamps zoomRamps(const ZoomCue &cue);
 
 /**
- * The camera at `timeMs`. Between cues this is 1x centred; inside one it
- * eases with a smoothstep, which starts and ends at zero velocity so a zoom
- * does not visibly jerk at either end.
- *
- * Overlapping cues resolve to whichever is furthest in at that moment,
- * rather than being rejected: the UI prevents overlap, and a project edited
- * by hand should still render something sensible.
+ * The camera at `timeMs`. Viewport size and position ease together using a
+ * quintic smoothstep with zero endpoint velocity and acceleration. Touching
+ * cues transition directly between destinations. Gaps return to the full
+ * frame. Overlaps are resolved by sortedCues() before camera planning.
  */
 [[nodiscard]] ZoomView zoomViewAt(const ZoomTrack &track, qint64 timeMs);
 

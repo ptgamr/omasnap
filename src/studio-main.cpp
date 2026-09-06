@@ -1,6 +1,7 @@
 /** @fileoverview Entry point for omasnap-studio. Deliberately its own
  *  executable: `omasnap` sets layer-shell process-wide and links no media
  *  libraries, and neither should change because video exists. */
+#include "overlay-chrome.hpp"
 #include "studio.hpp"
 
 #include <QApplication>
@@ -18,6 +19,7 @@ int main(int argc, char **argv) {
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QGuiApplication::setDesktopFileName(QStringLiteral("omasnap-studio"));
   const QApplication application(argc, argv);
+  QApplication::setFont(chromeDefaultFont());
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral(
@@ -30,11 +32,11 @@ int main(int argc, char **argv) {
       "them and their\nedges to change how long they run. The slider sets how "
       "far in the selected\ncue goes.\n"
       "\n"
-      "Space plays and pauses, Left/Right seek five seconds, I and O set the "
-      "in\nand out points at the playhead, R clears the trim, and Ctrl+E "
-      "exports the\nkept range beside the original.\n"
+      "Space plays and pauses from any control. Left/Right step one frame; "
+      "Shift+Left/Right seek five seconds. I/O set trim points, Z adds a zoom, "
+      "Ctrl+Z undoes, and Ctrl+E exports. Press ? for all shortcuts.\n"
       "\n"
-      "Zoom cues are saved beside the recording as "
+      "Zoom cues, trim, and canvas styling are saved beside the recording as "
       "`<recording>.omasnap-zoom.json`,\nso the original file is never "
       "touched and reopening brings them back.\n"
       "\n"
@@ -56,8 +58,7 @@ int main(int argc, char **argv) {
   if (path.isEmpty())
     path = positional.first();
   if (!QFileInfo::exists(path)) {
-    qCritical().noquote()
-        << QStringLiteral("No such recording: %1").arg(path);
+    qCritical().noquote() << QStringLiteral("No such recording: %1").arg(path);
     return 1;
   }
 

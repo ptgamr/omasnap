@@ -1,18 +1,26 @@
 /** @fileoverview Exercises the Studio without a compositor: the export
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
-#include "studio.hpp"
 #include "studio-preview.hpp"
-#include "zoom-track.hpp"
+#include "studio.hpp"
 #include "zoom-track-smoke.hpp"
+#include "zoom-track.hpp"
 
 #include <QApplication>
+#include <QAudioOutput>
+#include <QComboBox>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QKeyEvent>
+#include <QMediaPlayer>
 #include <QProcess>
+#include <QPushButton>
 #include <QSignalSpy>
+#include <QSlider>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
@@ -27,6 +35,8 @@
 [[nodiscard]] bool runZoomExportGoldenChecks(QString &error);
 /** Checks the preview surface offscreen. Defined at the end. */
 [[nodiscard]] bool runPreviewChecks(QString &error);
+[[nodiscard]] bool runStudioInteractionChecks(QString &error);
+[[nodiscard]] bool runGpuPreviewChecks(QString &error);
 
 namespace {
 
@@ -47,8 +57,7 @@ QString valueAfter(const QStringList &arguments, const QString &flag) {
 bool runTimecodeChecks(QString &error) {
   return check(studioTimecode(0) == QStringLiteral("00:00:00.000") &&
                    studioTimecode(1500) == QStringLiteral("00:00:01.500") &&
-                   studioTimecode(3723456) ==
-                       QStringLiteral("01:02:03.456") &&
+                   studioTimecode(3723456) == QStringLiteral("01:02:03.456") &&
                    studioTimecode(-10) == QStringLiteral("00:00:00.000"),
                error, QStringLiteral("ffmpeg timecode is wrong")) &&
          check(studioClock(0) == QStringLiteral("0:00") &&
@@ -58,9 +67,9 @@ bool runTimecodeChecks(QString &error) {
 }
 
 bool runExportCommandChecks(QString &error) {
-  const QStringList arguments = studioExportArguments(
-      QStringLiteral("/tmp/rec.mkv"), QStringLiteral("/tmp/rec-trim.mp4"),
-      5000, 8500);
+  const QStringList arguments =
+      studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
+                            QStringLiteral("/tmp/rec-trim.mp4"), 5000, 8500);
   // -ss before -i so ffmpeg seeks instead of decoding the head, and a
   // duration rather than an end time so it cannot be read against the wrong
   // timeline.
@@ -100,18 +109,18 @@ bool runExportCommandChecks(QString &error) {
     }
   }
   // An empty or inverted range exports nothing rather than a broken file.
-  return check(studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
-                                     QStringLiteral("/tmp/out.mp4"), 900, 900)
-                       .isEmpty() &&
-                   studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
-                                         QStringLiteral("/tmp/out.mp4"), 900,
-                                         100)
-                       .isEmpty() &&
-                   studioExportArguments({}, QStringLiteral("/tmp/out.mp4"), 0,
-                                         100)
-                       .isEmpty(),
-               error, QStringLiteral("an unusable range still built a "
-                                     "command"));
+  return check(
+      studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
+                            QStringLiteral("/tmp/out.mp4"), 900, 900)
+              .isEmpty() &&
+          studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
+                                QStringLiteral("/tmp/out.mp4"), 900, 100)
+              .isEmpty() &&
+          studioExportArguments({}, QStringLiteral("/tmp/out.mp4"), 0, 100)
+              .isEmpty(),
+      error,
+      QStringLiteral("an unusable range still built a "
+                     "command"));
 }
 
 bool runExportPathChecks(QString &error) {
@@ -148,7 +157,7 @@ bool runTimelineChecks(QString &error) {
 
   // Before a duration is known there is nothing to drag and nothing to emit.
   QSignalSpy scrubbed(&timeline, &StudioTimeline::scrubbed);
-  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(200, 23));
+  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(224, 58));
   if (!check(scrubbed.isEmpty(), error,
              QStringLiteral("scrubbed an empty timeline")))
     return false;
@@ -160,9 +169,8 @@ bool runTimelineChecks(QString &error) {
                             "recording")))
     return false;
 
-  // The track is inset by half a handle at each end, so the midpoint of the
-  // widget is the midpoint of the recording.
-  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(200, 23));
+  // The label gutter is 64 px and the trailing inset 16 px.
+  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(224, 58));
   if (!check(scrubbed.count() == 1 &&
                  qAbs(scrubbed.at(0).at(0).toLongLong() - 30000) < 500,
              error, QStringLiteral("scrubbing landed at the wrong time")))
@@ -171,9 +179,9 @@ bool runTimelineChecks(QString &error) {
   // Dragging the in handle past the out handle would invert the range; it
   // stops short instead.
   QSignalSpy trimmed(&timeline, &StudioTimeline::trimChanged);
-  QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(8, 23));
-  QTest::mouseMove(&timeline, QPoint(600, 23));
-  QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(600, 23));
+  QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(64, 58));
+  QTest::mouseMove(&timeline, QPoint(600, 58));
+  QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(600, 58));
   if (!check(!trimmed.isEmpty(), error,
              QStringLiteral("dragging the in handle changed nothing")))
     return false;
@@ -186,11 +194,10 @@ bool runTimelineChecks(QString &error) {
 
   // Out is clamped the same way from the other side.
   timeline.setTrim(0, 60000);
-  QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(392, 23));
-  QTest::mouseMove(&timeline, QPoint(-200, 23));
-  QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(-200, 23));
-  if (!check(timeline.trimOut() > timeline.trimIn() &&
-                 timeline.trimIn() == 0,
+  QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(384, 58));
+  QTest::mouseMove(&timeline, QPoint(-200, 58));
+  QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(-200, 58));
+  if (!check(timeline.trimOut() > timeline.trimIn() && timeline.trimIn() == 0,
              error, QStringLiteral("dragging out crossed or moved in")))
     return false;
 
@@ -224,6 +231,8 @@ int main(int argc, char **argv) {
                 {"timeline", runTimelineChecks},
                 {"zoom track", runZoomTrackSmoke},
                 {"preview", runPreviewChecks},
+                {"keyboard and editing", runStudioInteractionChecks},
+                {"GPU video pixels", runGpuPreviewChecks},
                 {"zoom export agreement", runZoomExportGoldenChecks}};
   for (const auto &check : checks) {
     if (!check.run(error)) {
@@ -286,10 +295,10 @@ QImage renderThroughModel(const QImage &coded, const ZoomTrack &track,
   // container says, then take the model's window of it. Starting from the
   // coded frame rather than an autorotated one is what makes this cover the
   // preview's rotation and not just the export's.
-  const QImage source =
-      rotation == 0 ? coded
-                    : coded.transformed(QTransform().rotate(rotation),
-                                        Qt::SmoothTransformation);
+  const QImage source = rotation == 0
+                            ? coded
+                            : coded.transformed(QTransform().rotate(rotation),
+                                                Qt::SmoothTransformation);
   const QRectF window = zoomSourceRect(track, timeMs);
   const QRect pixels(qRound(window.x() * source.width()),
                      qRound(window.y() * source.height()),
@@ -324,7 +333,7 @@ namespace {
 /// export starts.
 struct GoldenCase {
   const char *name;
-  QString rate;          ///< ffmpeg rate spec for the generated source.
+  QString rate; ///< ffmpeg rate spec for the generated source.
   ZoomTrack track;
   qint64 inPointMs;
   /// Source frame numbers to compare at. Frames, not seconds, because the
@@ -358,16 +367,16 @@ double compareCase(const GoldenCase &scenario, const QString &ffmpeg,
       QDir(scratch).filePath(QStringLiteral("%1-src.mp4").arg(scenario.name));
   // Every frame a keyframe, so sampling a time lands on the frame the model
   // was asked about rather than the nearest keyframe before it.
-  if (!runTool(ffmpeg,
-               {QStringLiteral("-v"), QStringLiteral("error"),
-                QStringLiteral("-y"), QStringLiteral("-f"),
-                QStringLiteral("lavfi"), QStringLiteral("-i"),
-                QStringLiteral("testsrc2=size=640x360:rate=%1").arg(scenario.rate),
-                QStringLiteral("-t"), QStringLiteral("10"),
-                QStringLiteral("-c:v"), QStringLiteral("libx264"),
-                QStringLiteral("-g"), QStringLiteral("1"),
-                QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), source})) {
-    error = QStringLiteral("could not generate the %1 source").arg(scenario.name);
+  if (!runTool(
+          ffmpeg,
+          {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-y"),
+           QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+           QStringLiteral("testsrc2=size=640x360:rate=%1").arg(scenario.rate),
+           QStringLiteral("-t"), QStringLiteral("10"), QStringLiteral("-c:v"),
+           QStringLiteral("libx264"), QStringLiteral("-g"), QStringLiteral("1"),
+           QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"), source})) {
+    error =
+        QStringLiteral("could not generate the %1 source").arg(scenario.name);
     return -1.0;
   }
   if (scenario.displayRotation != 0) {
@@ -375,14 +384,14 @@ double compareCase(const GoldenCase &scenario, const QString &ffmpeg,
     // landscape and the container says which way up they go.
     const QString rotated =
         QDir(scratch).filePath(QStringLiteral("%1-rot.mp4").arg(scenario.name));
-    if (!runTool(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
-                          QStringLiteral("-y"),
-                          QStringLiteral("-display_rotation"),
-                          QString::number(scenario.displayRotation),
-                          QStringLiteral("-i"), source, QStringLiteral("-c"),
-                          QStringLiteral("copy"), rotated})) {
-      error = QStringLiteral("could not rotate the %1 source")
-                  .arg(scenario.name);
+    if (!runTool(ffmpeg,
+                 {QStringLiteral("-v"), QStringLiteral("error"),
+                  QStringLiteral("-y"), QStringLiteral("-display_rotation"),
+                  QString::number(scenario.displayRotation),
+                  QStringLiteral("-i"), source, QStringLiteral("-c"),
+                  QStringLiteral("copy"), rotated})) {
+      error =
+          QStringLiteral("could not rotate the %1 source").arg(scenario.name);
       return -1.0;
     }
     source = rotated;
@@ -394,21 +403,20 @@ double compareCase(const GoldenCase &scenario, const QString &ffmpeg,
   }
   const QString exported =
       QDir(scratch).filePath(QStringLiteral("%1-out.mp4").arg(scenario.name));
-  const QStringList arguments =
-      studioExportArguments(source, exported, scenario.inPointMs, 10000,
-                            scenario.track, media);
+  const QStringList arguments = studioExportArguments(
+      source, exported, scenario.inPointMs, 10000, scenario.track, media);
   if (arguments.isEmpty() || !runTool(ffmpeg, arguments)) {
     error = QStringLiteral("the %1 export failed").arg(scenario.name);
     return -1.0;
   }
 
   // One frame's duration, from the rate the file actually states.
-  const double frameSeconds = static_cast<double>(media.fpsDenominator) /
-                              media.fpsNumerator;
+  const double frameSeconds =
+      static_cast<double>(media.fpsDenominator) / media.fpsNumerator;
   // Which output frame the export's first one is, so a trimmed export's
   // frames can be addressed in source terms.
-  const int inPointFrames =
-      static_cast<int>(std::llround(scenario.inPointMs / 1000.0 / frameSeconds));
+  const int inPointFrames = static_cast<int>(
+      std::llround(scenario.inPointMs / 1000.0 / frameSeconds));
 
   double worst = 0.0;
   for (const int frame : scenario.frames) {
@@ -420,8 +428,8 @@ double compareCase(const GoldenCase &scenario, const QString &ffmpeg,
     const double sourceAt = qMax(0.0, (frame - 0.5) * frameSeconds);
     const double exportAt =
         qMax(0.0, (frame - inPointFrames - 0.5) * frameSeconds);
-    const auto timeMs = static_cast<qint64>(std::llround(frame * frameSeconds *
-                                                         1000.0));
+    const auto timeMs =
+        static_cast<qint64>(std::llround(frame * frameSeconds * 1000.0));
     const QImage sourceFrame =
         frameAt(ffmpeg, source, sourceAt, scratch, /*autorotate=*/false);
     const QImage exportFrame = frameAt(ffmpeg, exported, exportAt, scratch);
@@ -525,8 +533,8 @@ bool runZoomExportGoldenChecks(QString &error) {
   {
     ZoomTrack full;
     for (int index = 0; index < kMaxZoomCues + 5; ++index)
-      static_cast<void>(addZoomCue(full, index * 200, {0.4, 0.6}, 2.0, 150,
-                                   1000000));
+      static_cast<void>(
+          addZoomCue(full, index * 200, {0.4, 0.6}, 2.0, 150, 1000000));
     if (full.cues.size() != kMaxZoomCues) {
       error = QStringLiteral("expected a full track of %1 cues, got %2")
                   .arg(kMaxZoomCues)
@@ -544,7 +552,8 @@ bool runZoomExportGoldenChecks(QString &error) {
 
   double worst = 0.0;
   for (const GoldenCase &scenario : cases) {
-    const double difference = compareCase(scenario, ffmpeg, scratch.path(), error);
+    const double difference =
+        compareCase(scenario, ffmpeg, scratch.path(), error);
     if (difference < 0.0)
       return false;
     worst = qMax(worst, difference);
@@ -553,10 +562,12 @@ bool runZoomExportGoldenChecks(QString &error) {
   // The comparison has to be capable of failing: framing the same frame a
   // second off should score far worse than the agreement above.
   const GoldenCase &first = cases.first();
-  const QString source = QDir(scratch.path()).filePath(
-      QStringLiteral("%1-src.mp4").arg(first.name));
-  const QString exported = QDir(scratch.path()).filePath(
-      QStringLiteral("%1-out.mp4").arg(first.name));
+  const QString source =
+      QDir(scratch.path())
+          .filePath(QStringLiteral("%1-src.mp4").arg(first.name));
+  const QString exported =
+      QDir(scratch.path())
+          .filePath(QStringLiteral("%1-out.mp4").arg(first.name));
   const QImage sourceFrame =
       frameAt(ffmpeg, source, 2.0167, scratch.path(), /*autorotate=*/false);
   const QImage exportFrame = frameAt(ffmpeg, exported, 2.0167, scratch.path());
@@ -569,10 +580,10 @@ bool runZoomExportGoldenChecks(QString &error) {
                  .arg(worst, 0, 'f', 1)))
     return false;
   qInfo("studio smoke: preview and export agree within %.1f/255 across %lld "
-        "scenarios", worst, static_cast<long long>(cases.size()));
+        "scenarios",
+        worst, static_cast<long long>(cases.size()));
   return true;
 }
-
 
 // ---------------------------------------------------------------------------
 // The preview surface: what it shows, and what a click on it means.
@@ -585,10 +596,11 @@ namespace {
 QImage quadrantFrame() {
   QImage frame(640, 360, QImage::Format_RGB32);
   QPainter painter(&frame);
-  painter.fillRect(QRect(0, 0, 320, 180), QColor(220, 40, 40));    // top-left
-  painter.fillRect(QRect(320, 0, 320, 180), QColor(40, 200, 40));  // top-right
-  painter.fillRect(QRect(0, 180, 320, 180), QColor(40, 60, 220));  // bottom-left
-  painter.fillRect(QRect(320, 180, 320, 180), QColor(230, 200, 40)); // bottom-right
+  painter.fillRect(QRect(0, 0, 320, 180), QColor(220, 40, 40));   // top-left
+  painter.fillRect(QRect(320, 0, 320, 180), QColor(40, 200, 40)); // top-right
+  painter.fillRect(QRect(0, 180, 320, 180), QColor(40, 60, 220)); // bottom-left
+  painter.fillRect(QRect(320, 180, 320, 180),
+                   QColor(230, 200, 40)); // bottom-right
   return frame;
 }
 
@@ -614,6 +626,208 @@ QString nearestQuadrant(const QColor &sample) {
 }
 
 } // namespace
+
+bool runGpuPreviewChecks(QString &error) {
+  // The regular smoke stays headless. The same binary on Wayland verifies
+  // actual shader output; successful initialization or a high fps alone
+  // cannot establish that the correct pixels reached the framebuffer.
+  if (QGuiApplication::platformName() != QStringLiteral("wayland"))
+    return true;
+  StudioVideoSurface surface(nullptr);
+  surface.resize(640, 360);
+  QString gpuError;
+  surface.failed = [&gpuError](const QString &message) { gpuError = message; };
+  surface.show();
+  if (!check(
+          QTest::qWaitFor(
+              [&] { return surface.isValid() || !gpuError.isEmpty(); }, 5000) &&
+              gpuError.isEmpty(),
+          error,
+          QStringLiteral("GPU preview could not initialize: %1").arg(gpuError)))
+    return false;
+  surface.drawn = surface.rect();
+  surface.canvas = surface.rect();
+  for (const auto pixelFormat :
+       {QVideoFrameFormat::Format_YUV420P, QVideoFrameFormat::Format_NV12}) {
+    QVideoFrameFormat format(QSize(318, 180), pixelFormat);
+    format.setColorSpace(QVideoFrameFormat::ColorSpace_BT601);
+    format.setColorRange(QVideoFrameFormat::ColorRange_Video);
+    QVideoFrame frame(format);
+    if (!frame.map(QVideoFrame::WriteOnly))
+      return false;
+    for (int plane = 0; plane < frame.planeCount(); ++plane) {
+      for (int byte = 0; byte < frame.mappedBytes(plane); ++byte) {
+        frame.bits(plane)[byte] =
+            static_cast<uchar>(plane == 0 ? 81
+                               : pixelFormat == QVideoFrameFormat::Format_NV12
+                                   ? (byte % 2 ? 240 : 90)
+                               : plane == 1 ? 90
+                                            : 240);
+      }
+    }
+    frame.unmap();
+    surface.setFrame(prepareStudioVideoFrame(frame));
+    const QImage shot = surface.grabFramebuffer();
+    const QColor center = shot.pixelColor(shot.width() / 2, shot.height() / 2);
+    if (!check(center.red() > 245 && center.green() < 8 && center.blue() < 8,
+               error,
+               QStringLiteral("GPU YUV conversion did not produce red pixels")))
+      return false;
+  }
+  surface.setFrame(prepareStudioVideoFrame(QVideoFrame(quadrantFrame())));
+  surface.rotation = 90;
+  const QImage rotated = surface.grabFramebuffer();
+  if (!check(nearestQuadrant(rotated.pixelColor(rotated.width() / 4,
+                                                rotated.height() / 4)) ==
+                 QStringLiteral("bottom-left"),
+             error,
+             QStringLiteral(
+                 "GPU rotation differs from the source coordinate model")))
+    return false;
+  surface.rotation = 0;
+  surface.source = QRectF(0.5, 0, 0.5, 0.5);
+  const QImage crop = surface.grabFramebuffer();
+  return check(
+      nearestQuadrant(crop.pixelColor(crop.width() / 2, crop.height() / 2)) ==
+          QStringLiteral("top-right"),
+      error, QStringLiteral("GPU zoom sampled the wrong source quadrant"));
+}
+
+bool runStudioInteractionChecks(QString &error) {
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  if (ffmpeg.isEmpty())
+    return true;
+  QTemporaryDir scratch;
+  const QString source = scratch.filePath(QStringLiteral("keyboard.mp4"));
+  if (!runTool(ffmpeg, {QStringLiteral("-v"), QStringLiteral("error"),
+                        QStringLiteral("-f"), QStringLiteral("lavfi"),
+                        QStringLiteral("-i"),
+                        QStringLiteral("color=red:s=320x180:r=30:d=6"),
+                        QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                        QStringLiteral("-g"), QStringLiteral("1"), source})) {
+    error = QStringLiteral("could not generate keyboard fixture");
+    return false;
+  }
+  StudioWindow window(source);
+  window.show();
+  auto *player = window.findChild<QMediaPlayer *>();
+  auto *slider = window.findChild<QSlider *>(QStringLiteral("zoomScale"));
+  auto *padding = window.findChild<QSlider *>(QStringLiteral("canvasPadding"));
+  auto *exportButton =
+      window.findChild<QPushButton *>(QStringLiteral("primary"));
+  if (!check(
+          QTest::qWaitFor(
+              [&] {
+                return player->duration() == 6000 && exportButton->isEnabled();
+              },
+              10000),
+          error, QStringLiteral("Studio did not finish asynchronous loading")))
+    return false;
+  QTest::qWait(150);
+  QTest::keyClick(&window, Qt::Key_Z);
+  if (!check(slider->isEnabled(), error,
+             QStringLiteral("Z did not create a zoom")))
+    return false;
+  for (QWidget *focus :
+       {static_cast<QWidget *>(slider), static_cast<QWidget *>(exportButton),
+        static_cast<QWidget *>(padding)}) {
+    focus->setFocus();
+    const bool playing = player->playbackState() == QMediaPlayer::PlayingState;
+    QSignalSpy states(player, &QMediaPlayer::playbackStateChanged);
+    QTest::keyClick(focus, Qt::Key_Space);
+    if (!check((player->playbackState() == QMediaPlayer::PlayingState) !=
+                       playing &&
+                   states.size() == 1,
+               error,
+               QStringLiteral(
+                   "Space did not toggle exactly once from a child control")))
+      return false;
+    QKeyEvent repeat(QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier,
+                     QStringLiteral(" "), true);
+    QApplication::sendEvent(focus, &repeat);
+    if (!check(states.size() == 1, error,
+               QStringLiteral("held Space repeatedly toggled playback")))
+      return false;
+  }
+  player->pause();
+  QTest::keyClick(slider, Qt::Key_Home);
+  QTest::keyClick(slider, Qt::Key_Right);
+  if (!check(player->position() >= 30 && player->position() <= 35, error,
+             QStringLiteral("Right did not step one frame from a slider")))
+    return false;
+  QTest::keyClick(slider, Qt::Key_Right, Qt::ShiftModifier);
+  if (!check(player->position() >= 5030 && player->position() <= 5035, error,
+             QStringLiteral("Shift+Right did not seek five seconds")))
+    return false;
+  QTest::keyClick(slider, Qt::Key_Home);
+  // A whole drag is one undo operation, with redo restoring its final value.
+  const int scale = slider->value();
+  QMetaObject::invokeMethod(slider, "sliderPressed");
+  slider->setValue(scale + 1);
+  slider->setValue(scale + 2);
+  slider->setValue(scale + 3);
+  QMetaObject::invokeMethod(slider, "sliderReleased");
+  QTest::keyClick(slider, Qt::Key_Z, Qt::ControlModifier);
+  if (!check(slider->value() == scale, error,
+             QStringLiteral("Undo did not group a zoom drag")))
+    return false;
+  QTest::keyClick(slider, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!check(slider->value() == scale + 3, error,
+             QStringLiteral("Redo did not restore the zoom")))
+    return false;
+  padding->setValue(8);
+  QTest::keyClick(padding, Qt::Key_Z, Qt::ControlModifier);
+  if (!check(padding->value() == 0, error,
+             QStringLiteral("Canvas edit was not undoable")))
+    return false;
+  QTest::keyClick(padding, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+  QTest::keyClick(&window, Qt::Key_Right, Qt::ShiftModifier);
+  QTest::keyClick(&window, Qt::Key_O);
+  // Closing while a debounced write is pending waits asynchronously for the
+  // final edit to be committed. Reopening restores trim, zoom, and canvas.
+  window.close();
+  if (!check(QTest::qWaitFor([&] { return !window.isVisible(); }, 5000), error,
+             QStringLiteral("Studio did not finish saving before close")))
+    return false;
+  QFile saved(source + QStringLiteral(".omasnap-zoom.json"));
+  if (!check(saved.open(QIODevice::ReadOnly), error,
+             QStringLiteral("closing lost pending edits")))
+    return false;
+  const QJsonObject object = QJsonDocument::fromJson(saved.readAll()).object();
+  ZoomTrack track;
+  if (!check(readZoomTrack(object, track, error) && track.cues.size() == 1 &&
+                 object.value(QStringLiteral("canvas"))
+                         .toObject()
+                         .value(QStringLiteral("padding"))
+                         .toInt() == 8 &&
+                 object.value(QStringLiteral("trimOutMs")).toInteger() == 5000,
+             error,
+             QStringLiteral("saved edits do not match the last visible state")))
+    return false;
+  // Exercise the actual canvas filter, not just its argument spelling.
+  const QString output = scratch.filePath(QStringLiteral("canvas.mp4"));
+  const StudioStyle style{1, 10, 64};
+  if (!check(runTool(ffmpeg,
+                     studioExportArguments(source, output, 0, 500, {},
+                                           probeStudioSource(source), style)),
+             error, QStringLiteral("styled export failed")))
+    return false;
+  const QImage frame = frameAt(ffmpeg, output, 0.2, scratch.path());
+  if (!check(!frame.isNull() && frame.size() == QSize(320, 180), error,
+             QStringLiteral("styled export changed canvas dimensions")))
+    return false;
+  const QColor corner = frame.pixelColor(4, 4);
+  const QColor expected = style.color();
+  if (!check(std::abs(corner.red() - expected.red()) < 8 &&
+                 std::abs(corner.green() - expected.green()) < 8 &&
+                 std::abs(corner.blue() - expected.blue()) < 8 &&
+                 frame.pixelColor(160, 90).red() > 220,
+             error,
+             QStringLiteral("exported canvas or video colors are wrong")))
+    return false;
+  return true;
+}
 
 bool runPreviewChecks(QString &error) {
   StudioPreview preview;

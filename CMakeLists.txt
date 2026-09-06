@@ -13,7 +13,7 @@ option(OMASNAP_STUDIO "Build omasnap-studio (requires Qt Multimedia)" ON)
 if(OMASNAP_STUDIO)
   # Kept out of omasnap-core on purpose: the screenshot binary must not gain
   # a media stack, and omasnap-studio must not gain layer-shell.
-  find_package(Qt6 6.8 REQUIRED COMPONENTS Multimedia MultimediaWidgets)
+  find_package(Qt6 6.8 REQUIRED COMPONENTS Multimedia MultimediaWidgets OpenGLWidgets)
 endif()
 find_package(LayerShellQt REQUIRED)
 pkg_check_modules(WaylandClient REQUIRED IMPORTED_TARGET wayland-client)
@@ -210,6 +210,8 @@ if(OMASNAP_STUDIO)
 # Its own binary for the same reason the Studio is its own binary: the
 # screenshot smoke suite must not link a media stack to test a video window.
 qt_add_executable(omasnap-studio-smoke
+  src/studio-video.cpp
+  src/studio-video.hpp
   tests/studio-smoke.cpp
   tests/zoom-track-smoke.cpp
   tests/zoom-track-smoke.hpp
@@ -229,7 +231,7 @@ target_compile_features(omasnap-studio-smoke PRIVATE cxx_std_23)
 target_compile_options(omasnap-studio-smoke PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(omasnap-studio-smoke PRIVATE
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test
-  Qt6::Multimedia Qt6::MultimediaWidgets
+  Qt6::Multimedia Qt6::MultimediaWidgets Qt6::OpenGLWidgets Qt6::Concurrent
 )
 add_test(NAME omasnap-studio-smoke COMMAND omasnap-studio-smoke)
 set_tests_properties(omasnap-studio-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic")
@@ -242,6 +244,8 @@ if(OMASNAP_STUDIO)
 # Wayland protocols, and the process-wide layer-shell assumption, none of
 # which belong in a video window.
 qt_add_executable(omasnap-studio
+  src/studio-video.cpp
+  src/studio-video.hpp
   src/studio-main.cpp
   src/studio.cpp
   src/studio.hpp
@@ -264,6 +268,8 @@ target_link_libraries(omasnap-studio PRIVATE
   Qt6::Widgets
   Qt6::Multimedia
   Qt6::MultimediaWidgets
+  Qt6::OpenGLWidgets
+  Qt6::Concurrent
 )
 endif()
 

@@ -15,8 +15,12 @@ From `CMakeLists.txt`, this is the entire list:
 | **wayland-client** (pkg-config) | Raw protocol client code (`ext-image-copy-capture`, `zwlr_virtual_pointer_v1`) that LayerShellQt/QtWayland don't expose |
 | **wayland-scanner** + protocol XML | Generates the C bindings for the above at build time; not a runtime dependency |
 
-`omasnap-studio` adds **Qt6 Multimedia** and **Qt6 MultimediaWidgets**, and
-nothing else does. That separation is the whole reason the Studio is its own
+`omasnap-studio` adds **Qt6 Multimedia**, **Qt6 MultimediaWidgets**, and
+**Qt6 OpenGLWidgets**, and nothing else does. OpenGLWidgets (part of Arch's
+existing `qt6-base` package) renders video planes, zoom, and canvas styling
+without per-frame RGB conversion on the GUI thread. Studio also uses the
+existing Qt Concurrent worker pattern for frame preparation, probing,
+thumbnails, and edit persistence. That separation is the whole reason the Studio is its own
 executable: video review needs a media stack, and the screenshot binary must
 not load one. It is also why the Studio does not link `omasnap-core` — that
 library carries capture, the editor, Wayland protocols and the process-wide

@@ -2,8 +2,11 @@
  *  into. Playback, a scrubbable timeline, a trim range, and an export. */
 #pragma once
 
+#include "studio-style.hpp"
 #include "zoom-track.hpp"
 
+#include <QFutureWatcher>
+#include <QImage>
 #include <QSize>
 #include <QString>
 #include <QWidget>
@@ -57,6 +60,7 @@ public:
   void setSelectedCue(quint64 id);
   /** Whether cues can be moved or resized; off while an export runs. */
   void setCuesEditable(bool editable);
+  void setThumbnails(QVector<QImage> thumbnails);
   [[nodiscard]] quint64 selectedCue() const { return selected_; }
   [[nodiscard]] qint64 duration() const { return duration_; }
   [[nodiscard]] qint64 trimIn() const { return trimIn_; }
@@ -64,6 +68,8 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
 
 signals:
+  void editStarted();
+  void editFinished();
   void scrubbed(qint64 milliseconds);
   void trimChanged(qint64 inPoint, qint64 outPoint);
   /** A cue was clicked, or 0 when the click landed on empty lane. */
@@ -105,6 +111,7 @@ private:
   Grab grabbed_ = Grab::None;
   Grab hovered_ = Grab::None;
   bool cuesEditable_ = true;
+  QVector<QImage> thumbnails_;
 };
 
 /**
@@ -123,10 +130,26 @@ public:
   [[nodiscard]] bool hasMedia() const;
 
 protected:
+  bool eventFilter(QObject *object, QEvent *event) override;
+  void closeEvent(QCloseEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
   void keyPressEvent(QKeyEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
 
 private:
+  bool handleShortcut(QKeyEvent *event, bool activate);
+  void toggleInspector();
+  void showShortcuts();
+  void seekTo(qint64 milliseconds);
+  void stepFrame(int direction);
+  void beginEdit();
+  void endEdit();
+  void rememberEdit();
+  void undoEdit();
+  void redoEdit();
+  void restoreEdit();
+  void setSelectedZoomTiming(bool easeIn, int milliseconds);
+  void styleChanged();
   void togglePlayback();
   void seekBy(qint64 milliseconds);
   void setTrimIn();
@@ -140,12 +163,10 @@ private:
   void addZoomAtPlayhead();
   void removeSelectedZoom();
   void setSelectedZoomScale(qreal scale);
-  /** The cue the controls act on: the selection, else the one under the
-   *  playhead. */
+  /** The selected cue the inspector controls act on. */
   [[nodiscard]] const ZoomCue *activeCue() const;
   void zoomChanged();
   [[nodiscard]] QString zoomSidecarPath() const;
-  void loadZoom();
   void saveZoom();
 
   QString path_;
@@ -156,6 +177,7 @@ private:
   StudioTimeline *timeline_ = nullptr;
   QProcess *export_ = nullptr;
   ZoomTrack zoom_;
+  StudioStyle style_;
   StudioSource media_;
   class QLabel *statusLabel_ = nullptr;
   class QLabel *timeLabel_ = nullptr;
@@ -167,6 +189,54 @@ private:
   class QSlider *zoomSlider_ = nullptr;
   class QLabel *zoomLabel_ = nullptr;
   class QTimer *saveTimer_ = nullptr;
+  class QPushButton *undoButton_ = nullptr;
+  class QPushButton *redoButton_ = nullptr;
+  class QLabel *sourceLabel_ = nullptr;
+  class QLabel *fileLabel_ = nullptr;
+  class QLabel *shortcutLegend_ = nullptr;
+  class QLabel *cueLabel_ = nullptr;
+  class QSpinBox *easeIn_ = nullptr;
+  class QSpinBox *easeOut_ = nullptr;
+  class QWidget *inspector_ = nullptr;
+  bool inspectorWanted_ = true;
+  class QComboBox *background_ = nullptr;
+  class QSlider *padding_ = nullptr;
+  class QSlider *radius_ = nullptr;
+  class QTimer *scrubTimer_ = nullptr;
+  qint64 pendingSeek_ = -1;
+  struct EditState {
+    ZoomTrack zoom;
+    qint64 in = 0;
+    qint64 out = 0;
+    StudioStyle style;
+    quint64 selection = 0;
+    bool operator==(const EditState &other) const {
+      return zoom == other.zoom && in == other.in && out == other.out &&
+             style == other.style;
+    }
+  };
+  QVector<EditState> edits_;
+  qsizetype editIndex_ = -1;
+  bool editGesture_ = false;
+  bool restoring_ = false;
+  bool loaded_ = false;
+  bool closing_ = false;
+  qint64 initialTrimIn_ = 0;
+  qint64 initialTrimOut_ = -1;
+  struct LoadedSource {
+    StudioSource media;
+    ZoomTrack zoom;
+    QString error;
+    qint64 in = 0;
+    qint64 out = -1;
+    StudioStyle style;
+  };
+  QFutureWatcher<LoadedSource> loadWatcher_;
+  QFutureWatcher<QString> saveWatcher_;
+  QFutureWatcher<QVector<QImage>> thumbnailWatcher_;
+  bool thumbnailsStarted_ = false;
+  bool saving_ = false;
+  bool savePending_ = false;
   bool mediaFailed_ = false;
   /// Whether a first frame has been coaxed out of the player, so opening
   /// the window shows the recording rather than an empty rectangle.
@@ -191,10 +261,10 @@ private:
  */
 [[nodiscard]] QStringList studioExportArguments(const QString &source,
                                                 const QString &destination,
-                                                qint64 inPoint,
-                                                qint64 outPoint,
+                                                qint64 inPoint, qint64 outPoint,
                                                 const ZoomTrack &zoom = {},
-                                                const StudioSource &media = {});
+                                                const StudioSource &media = {},
+                                                const StudioStyle &style = {});
 /** Reads the size and frame rate the export needs. Blocking; bounded. */
 [[nodiscard]] StudioSource probeStudioSource(const QString &path);
 /** `<stem>-trim.mp4` beside the source, under a name nothing has taken. */

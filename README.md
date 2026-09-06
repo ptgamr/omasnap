@@ -274,8 +274,23 @@ omasnap-studio ~/Downloads/from-my-ipad.mov     # any file, not just ours
 cue that re-aims it; anywhere else it starts a new one at the playhead. Cues are
 the blocks on the lane under the trim bar — drag a body to move it, an edge to
 change how long it runs — and the slider sets how far in the selected one goes.
-Each zoom eases in and out on a smoothstep, so it starts and stops without a
-jerk, and panning stops at the frame edge rather than showing past it.
+The right-hand inspector adjusts magnification and ease-in/out duration.
+Viewport size and position ease together, with zero velocity and acceleration
+at the ends. Touching cues move directly between targets; leave a gap to return
+to the full frame. Panning stays within the source.
+
+**Workspace.** The preview sits above a thumbnail timeline and transport bar,
+with Canvas, Zoom, and Clip inspector tabs. The inspector collapses in narrow
+tiled windows and can be toggled with `Ctrl+\`. The header has undo/redo, export,
+and a keyboard shortcut reference.
+
+**Canvas.** Choose a background color, padding, and rounded corners in the
+Canvas tab. These are exported along with the zoom and trim. Reset canvas
+returns to the original edge-to-edge framing.
+
+**Playback.** Video planes are prepared on a worker and rendered with OpenGL;
+only the newest pending frame is retained. Scrub requests are coalesced.
+Source probing, thumbnail generation, and saving edits also run off the UI thread.
 
 What you see is what you get: the preview and the export are driven by the same
 model, and a golden test renders the same frames both ways across seven
@@ -290,10 +305,8 @@ lands on the same thing in both.
 
 Limits worth knowing, all of them measured rather than guessed:
 
-- **40 zooms per clip.** The ceiling is ffmpeg's expression complexity, not
-  anything of ours: this generator's filter is accepted at 88 cues and rejected
-  at 89. The cap sits well under that, and the test proves it by handing a full
-  track to ffmpeg rather than by counting characters.
+- **40 zooms per clip.** The cap bounds ffmpeg expression complexity. The
+  golden test verifies a complete track at the cap with ffmpeg itself.
 - **Constant frame rate only.** A rational rate like 30000/1001 is handled
   exactly. A genuinely variable-rate file — some phone recordings — will drift,
   because the export moves the camera per output frame while the preview follows
@@ -304,12 +317,31 @@ Limits worth knowing, all of them measured rather than guessed:
 - **Zooming past roughly 3× looks soft**, because the export scales up from the
   cropped region.
 
-**Trim.** `Space` plays and pauses, `Left`/`Right` seek five seconds, `I` and `O`
-set the in and out points at the playhead, `R` clears the trim, and `Ctrl`+`E`
-exports the kept range beside the original.
+**Keyboard.** Transport shortcuts work with buttons, sliders, and inspector
+controls focused. Holding Space does not repeatedly toggle playback. Text
+fields retain their editing shortcuts; Space still transports from numeric fields.
 
-Cues are saved next to the recording as `<recording>.omasnap-zoom.json`, so the
-original file is never touched and reopening brings your work back.
+| Shortcut | Action |
+|---|---|
+| `Space` | Play / pause |
+| `Left` / `Right` | Previous / next frame |
+| `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
+| `Home` / `End` | Go to trim start / end |
+| `I` / `O` / `R` | Set trim start / end / reset trim |
+| `Z` | Add zoom at playhead |
+| `Delete` / `Backspace` | Remove selected zoom |
+| `Ctrl+Z` | Undo |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
+| `M` | Mute / unmute preview |
+| `Ctrl+S` / `Ctrl+E` | Save edits / export MP4 |
+| `Ctrl+\` | Toggle inspector |
+| `Escape` / `Ctrl+W` | Clear selection / close Studio |
+| `?` / `F1` | Show keyboard shortcuts |
+
+Zoom cues, trim points, and canvas styling are saved next to the recording as
+`<recording>.omasnap-zoom.json`. The original file stays untouched. Edits are
+undoable within a session, and a slider or timeline drag is one undo step.
+Closing waits asynchronously for any pending save.
 
 Recording and screenshots are independent: they use separate locks, so taking a
 screenshot during a recording does not stop it, and starting a recording while an
@@ -338,8 +370,9 @@ recorder is already running — it never signals a recorder it did not start.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
-- **The Studio is a first increment**: one clip, trim, export. No multi-clip
-  timeline, zoom cues, captions, or masks; see
+- **The Studio edits one source**: playback, trim, manual zoom, canvas styling,
+  undo/redo, and MP4 export. Multi-clip editing, automatic pointer zoom, camera
+  overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **`omasnap-studio` is optional at build time.** Configure with
   `-DOMASNAP_STUDIO=OFF` for a screenshot-only build that needs no Qt Multimedia.
