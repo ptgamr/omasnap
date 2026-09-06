@@ -80,6 +80,7 @@ void StudioPreview::setVideoFrame(const QVideoFrame &frame) {
   secondary_ = -1;
   primaryOpacity_ = 1;
   secondaryOpacity_ = 0;
+  layers_ = {};
   auto &slot = preparations_[0];
   slot.pending = frame;
   slot.rotation = rotation_;
@@ -110,13 +111,19 @@ void StudioPreview::setVideoFrame(int index, const QVideoFrame &frame,
   preparePendingFrame(index);
 }
 
-void StudioPreview::setComposition(int primary, int secondary, double first,
-                                   double second, qint64 timelineMs) {
+void StudioPreview::setComposition(int primary, int secondary,
+                                   StudioTransitionKind kind, double progress,
+                                   qint64 timelineMs) {
   composition_ = true;
   primary_ = primary;
   secondary_ = secondary;
-  primaryOpacity_ = first;
-  secondaryOpacity_ = second;
+  layers_[primary] = secondary >= 0
+                         ? studioTransitionLayer(kind, progress, false)
+                         : StudioTransitionLayer{};
+  if (secondary >= 0)
+    layers_[secondary] = studioTransitionLayer(kind, progress, true);
+  primaryOpacity_ = layers_[primary].opacity;
+  secondaryOpacity_ = secondary >= 0 ? layers_[secondary].opacity : 0;
   positionMs_ = timelineMs;
   refreshSurface();
 }
@@ -208,6 +215,8 @@ void StudioPreview::refreshSurface() {
     surface_->source =
         track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
     for (int index = 0; index < 2; ++index) {
+      surface_->offsets[index] = layers_[index].offset;
+      surface_->clips[index] = layers_[index].clip;
       surface_->rotations[index] =
           composition_ ? preparations_[index].rotation : rotation_;
       QSizeF fitted = preparations_[index].size;
@@ -371,42 +380,43 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     painter.restore();
     return;
   }
-  const auto draw = [&](const QImage &image, double opacity) {
+  const auto draw = [&](const QImage &image,
+                        const StudioTransitionLayer &layer) {
     if (image.isNull())
       return;
-    painter.setOpacity(opacity);
+    painter.save();
+    painter.setOpacity(layer.opacity);
+    const auto projected = [&](const QRectF &canonical) {
+      return QRectF(drawn.left() + (canonical.x() - window.x()) /
+                                       window.width() * drawn.width(),
+                    drawn.top() + (canonical.y() - window.y()) /
+                                      window.height() * drawn.height(),
+                    canonical.width() / window.width() * drawn.width(),
+                    canonical.height() / window.height() * drawn.height());
+    };
+    painter.setClipRect(projected(layer.clip), Qt::IntersectClip);
+    QRectF fit(0, 0, 1, 1);
     if (canvasSize_.isValid()) {
       // Match export: source is fitted into a black canonical canvas before
       // the global camera is evaluated. No full-size intermediate allocation.
       QSizeF fitted = image.size();
       fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
-      const QRectF fit((canvasSize_.width() - fitted.width()) / 2,
-                       (canvasSize_.height() - fitted.height()) / 2,
-                       fitted.width(), fitted.height());
-      const QRectF target(
-          drawn.left() + (fit.x() / canvasSize_.width() - window.x()) /
-                             window.width() * drawn.width(),
-          drawn.top() + (fit.y() / canvasSize_.height() - window.y()) /
-                            window.height() * drawn.height(),
-          fit.width() / canvasSize_.width() / window.width() * drawn.width(),
-          fit.height() / canvasSize_.height() / window.height() *
-              drawn.height());
-      painter.drawImage(target, image);
-    } else {
-      const QRectF source(
-          window.x() * image.width(), window.y() * image.height(),
-          window.width() * image.width(), window.height() * image.height());
-      painter.drawImage(drawn, image, source);
+      fit = QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
+                   (1 - fitted.height() / canvasSize_.height()) / 2,
+                   fitted.width() / canvasSize_.width(),
+                   fitted.height() / canvasSize_.height());
     }
+    painter.drawImage(projected(fit.translated(layer.offset)), image);
+    painter.restore();
   };
   if (composition_) {
-    draw(preparations_[primary_].image, primaryOpacity_);
+    draw(preparations_[primary_].image, layers_[primary_]);
     if (secondary_ >= 0) {
       painter.setCompositionMode(QPainter::CompositionMode_Plus);
-      draw(preparations_[secondary_].image, secondaryOpacity_);
+      draw(preparations_[secondary_].image, layers_[secondary_]);
     }
   } else {
-    draw(frame_, 1);
+    draw(frame_, StudioTransitionLayer{});
   }
   painter.restore();
   paintOverlay(painter);

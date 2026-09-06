@@ -19,6 +19,37 @@ QString tempo(double speed) {
   filters << QStringLiteral("atempo=%1").arg(speed, 0, 'g', 12);
   return filters.join(QLatin1Char(','));
 }
+
+QString transitionFilter(StudioTransitionKind kind) {
+  // xfade's P counts down from one to zero. Wipes use pixel centres to
+  // match the GPU's half-open normalized clips without an extra seam column.
+  switch (kind) {
+  case StudioTransitionKind::Crossfade:
+    return QStringLiteral("transition=fade");
+  case StudioTransitionKind::FadeBlack:
+    return QStringLiteral(
+        "transition=custom:expr='A*max(2*P-1,0)+B*max(1-2*P,0)'");
+  case StudioTransitionKind::WipeLeft:
+    return QStringLiteral("transition=custom:expr='if(gte(X+0.5,W*P),B,A)'");
+  case StudioTransitionKind::WipeRight:
+    return QStringLiteral("transition=custom:expr='if(lt(X+0.5,W*(1-P)),B,A)'");
+  case StudioTransitionKind::WipeUp:
+    return QStringLiteral("transition=custom:expr='if(gte(Y+0.5,H*P),B,A)'");
+  case StudioTransitionKind::WipeDown:
+    return QStringLiteral("transition=custom:expr='if(lt(Y+0.5,H*(1-P)),B,A)'");
+  // Native slides move existing pixels, unlike wipes. Their direction names
+  // match Studio: Left brings the incoming scene from the right, and so on.
+  case StudioTransitionKind::SlideLeft:
+    return QStringLiteral("transition=slideleft");
+  case StudioTransitionKind::SlideRight:
+    return QStringLiteral("transition=slideright");
+  case StudioTransitionKind::SlideUp:
+    return QStringLiteral("transition=slideup");
+  case StudioTransitionKind::SlideDown:
+    return QStringLiteral("transition=slidedown");
+  }
+  return {};
+}
 } // namespace
 
 QStringList studioCompositionArguments(const StudioProject &project,
@@ -127,11 +158,7 @@ QStringList studioCompositionArguments(const StudioProject &project,
       if (transition) {
         // Blend in RGB, as the GPU does. FFmpeg's built-in fadeblack has an
         // asymmetric nonlinear curve, not a black midpoint. P runs 1 -> 0.
-        const QString effect =
-            transition->kind == StudioTransitionKind::Crossfade
-                ? QStringLiteral("transition=fade")
-                : QStringLiteral(
-                      "transition=custom:expr='A*max(2*P-1,0)+B*max(1-2*P,0)'");
+        const QString effect = transitionFilter(transition->kind);
         graph << QStringLiteral("[%1][v%2]xfade=%3:duration=%4:offset=%5[jv%2]")
                      .arg(currentVideo, index, effect,
                           seconds(transition->durationMs),

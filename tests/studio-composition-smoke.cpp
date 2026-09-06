@@ -422,6 +422,177 @@ bool runTransitionExportChecks(const QString &ffmpeg,
     return false;
   return true;
 }
+
+bool runDirectionalExportChecks(const QString &ffmpeg,
+                                const QTemporaryDir &scratch, QString &error) {
+  StudioProject project;
+  project.canvas = {320, 192};
+  QVector<QImage> originals;
+  const QStringList backgrounds{"red", "cyan"};
+  const QStringList topRight{"green", "magenta"};
+  const QStringList bottomLeft{"blue", "white"};
+  const QStringList bottomRight{"yellow", "gray"};
+  QByteArray bytes;
+  for (int i = 0; i < 2; ++i) {
+    const QString path =
+        scratch.filePath(QStringLiteral("direction-source-%1.mp4").arg(i));
+    if (!run(ffmpeg,
+             {"-v",
+              "error",
+              "-y",
+              "-f",
+              "lavfi",
+              "-i",
+              QStringLiteral("color=%1:s=320x192:r=30:d=2").arg(backgrounds[i]),
+              "-f",
+              "lavfi",
+              "-i",
+              QStringLiteral("sine=frequency=%1:sample_rate=48000:duration=2")
+                  .arg(i ? 660 : 880),
+              "-vf",
+              QStringLiteral("drawbox=x=160:y=0:w=160:h=96:c=%1:t=fill,"
+                             "drawbox=x=0:y=96:w=160:h=96:c=%2:t=fill,"
+                             "drawbox=x=160:y=96:w=160:h=96:c=%3:t=fill")
+                  .arg(topRight[i], bottomLeft[i], bottomRight[i]),
+              "-c:v",
+              "libx264",
+              "-g",
+              "1",
+              "-c:a",
+              "aac",
+              path},
+             bytes, error))
+      return false;
+    StudioSource media;
+    media.size = project.canvas;
+    media.fpsNumerator = 30;
+    media.durationMs = 2000;
+    media.audioStreams = 1;
+    project.assets.push_back({static_cast<quint64>(i + 1), path, media});
+    project.clips.push_back(
+        {static_cast<quint64>(i + 1), static_cast<quint64>(i + 1), 0, 2000, 1});
+    originals.push_back(sample(ffmpeg, path, 0.5, error));
+    if (originals.last().isNull())
+      return false;
+  }
+  const QList<StudioTransitionKind> kinds{
+      StudioTransitionKind::WipeLeft,  StudioTransitionKind::WipeRight,
+      StudioTransitionKind::WipeUp,    StudioTransitionKind::WipeDown,
+      StudioTransitionKind::SlideLeft, StudioTransitionKind::SlideRight,
+      StudioTransitionKind::SlideUp,   StudioTransitionKind::SlideDown};
+  const QString path = scratch.filePath("direction-output.mp4");
+  for (const auto kind : kinds) {
+    if (!studioSetTransition(project, 1, 2, kind, 800, error) ||
+        !exportProject(ffmpeg, project, path, error))
+      return false;
+    const auto spans = studioComposition(project);
+    const auto *transition = studioTransition(project, 1, 2);
+    for (int quarter = 0; quarter <= 4; ++quarter) {
+      const double u = quarter / 4.0;
+      const qint64 at = spans[1].startMs + transition->durationMs * quarter / 4;
+      const auto frame = sample(ffmpeg, path, at / 1000.0, error);
+      if (frame.isNull())
+        return false;
+      const auto outgoing = studioTransitionLayer(kind, u, false);
+      const auto incoming = studioTransitionLayer(kind, u, true);
+      // Distinct quadrants in BOTH inputs catch a slide accidentally rendered
+      // as a wipe, reversed travel, or sampling stationary source positions.
+      // These points avoid source pattern boundaries; native FFmpeg slides
+      // round offsets to pixels, unlike the GPU's subpixel sampling (<1 px).
+      for (int y = 12; y < 192; y += 24) {
+        for (int x = 10; x < 320; x += 40) {
+          const QPointF p((x + 0.5) / 320.0, (y + 0.5) / 192.0);
+          const auto visible = [p](const StudioTransitionLayer &layer) {
+            const QPointF source = p - layer.offset;
+            return p.x() >= layer.clip.left() && p.x() < layer.clip.right() &&
+                   p.y() >= layer.clip.top() && p.y() < layer.clip.bottom() &&
+                   source.x() >= 0 && source.x() < 1 && source.y() >= 0 &&
+                   source.y() < 1;
+          };
+          const bool fromIncoming = visible(incoming);
+          if (!fromIncoming && !visible(outgoing)) {
+            error =
+                QStringLiteral("Directional model left a gap in the canvas.");
+            return false;
+          }
+          const auto &layer = fromIncoming ? incoming : outgoing;
+          const auto &original = originals[fromIncoming ? 1 : 0];
+          const QPointF source = p - layer.offset;
+          const QColor expected = original.pixelColor(
+              qBound(0, qRound(source.x() * 320 - 0.5), 319),
+              qBound(0, qRound(source.y() * 192 - 0.5), 191));
+          const QColor actual = frame.pixelColor(x, y);
+          if (std::abs(expected.red() - actual.red()) > 12 ||
+              std::abs(expected.green() - actual.green()) > 12 ||
+              std::abs(expected.blue() - actual.blue()) > 12) {
+            error = QStringLiteral("%1 quarter %2 at %3,%4 did not "
+                                   "translate/mask source pixels correctly.")
+                        .arg(studioTransitionName(kind))
+                        .arg(quarter)
+                        .arg(x)
+                        .arg(y);
+            return false;
+          }
+        }
+      }
+    }
+    if (!run(ffmpeg,
+             {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000",
+              "-f", "s16le", "-"},
+             bytes, error))
+      return false;
+    if (std::abs(bytes.size() / 96000.0 - 3.2) > 0.04 ||
+        audioEnergy(bytes, 0.3) < 0.01 || audioEnergy(bytes, 1.55) < 0.01 ||
+        audioEnergy(bytes, 2.5) < 0.01) {
+      error = QStringLiteral(
+          "Directional transition changed audio timing or dropped its blend.");
+      return false;
+    }
+  }
+  // Camera and canvas styling apply AFTER directional composition. A zoom
+  // must therefore magnify translated content, not change the travel distance.
+  project.style = {2, 10, 24};
+  project.zoom.cues = {{1, 0, 3200, 60, 60, {0.5, 0.5}, 2}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::SlideLeft, 800,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto styled = sample(ffmpeg, path, 1.6, error);
+  if (styled.isNull())
+    return false;
+  const auto corner = styled.pixelColor(4, 4);
+  if (std::abs(corner.red() - project.style.color().red()) > 8 ||
+      std::abs(corner.green() - project.style.color().green()) > 8 ||
+      std::abs(corner.blue() - project.style.color().blue()) > 8) {
+    error = QStringLiteral(
+        "Directional transition replaced the styled outer canvas.");
+    return false;
+  }
+  const auto camera = zoomSourceRect(project.zoom, 1600);
+  for (const int y : {64, 128}) {
+    for (const int x : {64, 112, 208, 256}) {
+      const QPointF canonical(
+          camera.x() + ((x + 0.5 - 32) / 256.0) * camera.width(),
+          camera.y() + ((y + 0.5 - 19) / 154.0) * camera.height());
+      const bool incoming = canonical.x() >= 0.5;
+      const auto layer =
+          studioTransitionLayer(StudioTransitionKind::SlideLeft, 0.5, incoming);
+      const QPointF source = canonical - layer.offset;
+      const auto expected = originals[incoming ? 1 : 0].pixelColor(
+          qBound(0, qRound(source.x() * 320 - 0.5), 319),
+          qBound(0, qRound(source.y() * 192 - 0.5), 191));
+      const auto actual = styled.pixelColor(x, y);
+      if (std::abs(actual.red() - expected.red()) > 12 ||
+          std::abs(actual.green() - expected.green()) > 12 ||
+          std::abs(actual.blue() - expected.blue()) > 12) {
+        error = QStringLiteral(
+            "Slide camera/style ordering disagrees with canonical model.");
+        return false;
+      }
+    }
+  }
+  return true;
+}
 } // namespace
 
 bool runStudioCompositionChecks(QString &error) {
@@ -491,6 +662,8 @@ bool runStudioCompositionChecks(QString &error) {
   if (!runSceneExportChecks(ffmpeg, project.assets, scratch, error))
     return false;
   if (!runTransitionExportChecks(ffmpeg, project.assets, scratch, error))
+    return false;
+  if (!runDirectionalExportChecks(ffmpeg, scratch, error))
     return false;
   project.clips = {{1, 1, 500, 1500, 2},
                    {2, 2, 500, 1500, 1},

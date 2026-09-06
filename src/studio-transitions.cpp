@@ -18,9 +18,21 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
   transitionType_ = new StudioComboBox(this);
   transitionType_->setObjectName(QStringLiteral("transitionType"));
   transitionType_->setChrome(theme_->chrome());
-  transitionType_->addItems({QStringLiteral("Hard cut"),
-                             QStringLiteral("Crossfade"),
-                             QStringLiteral("Fade through black")});
+  transitionType_->addItem(QStringLiteral("Hard cut"), -1);
+  const std::pair<const char *, StudioTransitionKind> kinds[] = {
+      {"Crossfade", StudioTransitionKind::Crossfade},
+      {"Fade through black", StudioTransitionKind::FadeBlack},
+      {"Wipe left", StudioTransitionKind::WipeLeft},
+      {"Wipe right", StudioTransitionKind::WipeRight},
+      {"Wipe up", StudioTransitionKind::WipeUp},
+      {"Wipe down", StudioTransitionKind::WipeDown},
+      {"Slide left", StudioTransitionKind::SlideLeft},
+      {"Slide right", StudioTransitionKind::SlideRight},
+      {"Slide up", StudioTransitionKind::SlideUp},
+      {"Slide down", StudioTransitionKind::SlideDown}};
+  for (const auto &[label, kind] : kinds)
+    transitionType_->addItem(QString::fromLatin1(label),
+                             static_cast<int>(kind));
   transitionType_->setToolTip(QStringLiteral(
       "Transition from the selected scene to its next neighbor · T"));
   controls->addWidget(transitionType_);
@@ -70,9 +82,8 @@ void StudioWindow::refreshTransitionControls() {
   transitionType_->setEnabled(editable);
   transitionDuration_->setEnabled(editable && transition && maximum > 0);
   transitionType_->setCurrentIndex(
-      !transition                                           ? 0
-      : transition->kind == StudioTransitionKind::Crossfade ? 1
-                                                            : 2);
+      transition ? transitionType_->findData(static_cast<int>(transition->kind))
+                 : 0);
   transitionDuration_->setMaximum(static_cast<int>(qMax<qint64>(1, maximum)));
   transitionDuration_->setValue(static_cast<int>(
       transition ? transition->durationMs
@@ -115,19 +126,18 @@ void StudioWindow::changeTransition() {
       incoming = project_.clips[i + 1].id;
   if (!incoming)
     return;
-  const int requestedType = transitionType_->currentIndex();
+  const int requestedType = transitionType_->currentData().toInt();
   const int requestedDuration = transitionDuration_->value();
   captureCursor();
   const auto anchor = studioFrameAt(project_, player_->position());
   QString error;
   const bool changed =
-      requestedType == 0
+      requestedType == -1
           ? studioRemoveTransition(project_, outgoing, incoming, error)
-          : studioSetTransition(project_, outgoing, incoming,
-                                requestedType == 1
-                                    ? StudioTransitionKind::Crossfade
-                                    : StudioTransitionKind::FadeBlack,
-                                requestedDuration, error);
+          : studioSetTransition(
+                project_, outgoing, incoming,
+                static_cast<StudioTransitionKind>(requestedType),
+                requestedDuration, error);
   if (!changed) {
     if (!error.isEmpty())
       setStatus(error, true);

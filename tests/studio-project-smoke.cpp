@@ -526,6 +526,186 @@ bool transitionChecks(QString &error) {
     return false;
   return true;
 }
+bool directionalChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  struct Direction {
+    StudioTransitionKind kind;
+    const char *name;
+    QPointF outgoingOffset;
+    QPointF incomingOffset;
+    QRectF outgoingClip;
+    QRectF incomingClip;
+  };
+  const QVector<Direction> directions{{StudioTransitionKind::WipeLeft,
+                                       "wipe-left",
+                                       {},
+                                       {},
+                                       {0, 0, 0.75, 1},
+                                       {0.75, 0, 0.25, 1}},
+                                      {StudioTransitionKind::WipeRight,
+                                       "wipe-right",
+                                       {},
+                                       {},
+                                       {0.25, 0, 0.75, 1},
+                                       {0, 0, 0.25, 1}},
+                                      {StudioTransitionKind::WipeUp,
+                                       "wipe-up",
+                                       {},
+                                       {},
+                                       {0, 0, 1, 0.75},
+                                       {0, 0.75, 1, 0.25}},
+                                      {StudioTransitionKind::WipeDown,
+                                       "wipe-down",
+                                       {},
+                                       {},
+                                       {0, 0.25, 1, 0.75},
+                                       {0, 0, 1, 0.25}},
+                                      {StudioTransitionKind::SlideLeft,
+                                       "slide-left",
+                                       {-0.25, 0},
+                                       {0.75, 0},
+                                       {0, 0, 0.75, 1},
+                                       {0.75, 0, 0.25, 1}},
+                                      {StudioTransitionKind::SlideRight,
+                                       "slide-right",
+                                       {0.25, 0},
+                                       {-0.75, 0},
+                                       {0.25, 0, 0.75, 1},
+                                       {0, 0, 0.25, 1}},
+                                      {StudioTransitionKind::SlideUp,
+                                       "slide-up",
+                                       {0, -0.25},
+                                       {0, 0.75},
+                                       {0, 0, 1, 0.75},
+                                       {0, 0.75, 1, 0.25}},
+                                      {StudioTransitionKind::SlideDown,
+                                       "slide-down",
+                                       {0, 0.25},
+                                       {0, -0.75},
+                                       {0, 0.25, 1, 0.75},
+                                       {0, 0, 1, 0.25}}};
+  const auto contains = [](const QRectF &clip, const QPointF &point) {
+    return point.x() >= clip.x() && point.x() < clip.x() + clip.width() &&
+           point.y() >= clip.y() && point.y() < clip.y() + clip.height();
+  };
+  StudioProject project;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 6000;
+  project.assets = {{1, QStringLiteral("directional-source.mp4"), source}};
+  project.clips = {{11, 1, 0, 3000, 1}, {12, 1, 3000, 6000, 1}};
+  for (const auto &direction : directions) {
+    const auto outgoing = studioTransitionLayer(direction.kind, 0.25, false);
+    const auto incoming = studioTransitionLayer(direction.kind, 0.25, true);
+    if (!check(studioTransitionName(direction.kind) ==
+                       QLatin1StringView(direction.name) &&
+                   outgoing.opacity == 1 && incoming.opacity == 1 &&
+                   outgoing.offset == direction.outgoingOffset &&
+                   incoming.offset == direction.incomingOffset &&
+                   outgoing.clip == direction.outgoingClip &&
+                   incoming.clip == direction.incomingClip,
+               QStringLiteral(
+                   "Directional quarter-progress geometry differs for %1")
+                   .arg(QLatin1StringView(direction.name))))
+      return false;
+    for (const double progress : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+      const auto first = studioTransitionLayer(direction.kind, progress, false);
+      const auto second = studioTransitionLayer(direction.kind, progress, true);
+      if (!check(first.clip.width() * first.clip.height() == 1 - progress &&
+                     second.clip.width() * second.clip.height() == progress,
+                 QStringLiteral(
+                     "Directional clipping area does not conserve the canvas")))
+        return false;
+      for (int row = 0; row < 8; ++row)
+        for (int column = 0; column < 8; ++column) {
+          const QPointF point((column + 0.5) / 8, (row + 0.5) / 8);
+          const bool a = contains(first.clip, point),
+                     b = contains(second.clip, point);
+          if (!check(a != b, QStringLiteral("Directional layers leave a gap or "
+                                            "paint over one another")))
+            return false;
+          const auto sample = point - (a ? first.offset : second.offset);
+          if (!check(contains(QRectF(0, 0, 1, 1), sample),
+                     QStringLiteral("Slide samples outside its source canvas")))
+            return false;
+        }
+      // The seam belongs to exactly one side, including exact midpoint pixels.
+      if (!check(contains(first.clip, {0.5, 0.5}) !=
+                     contains(second.clip, {0.5, 0.5}),
+                 QStringLiteral("Directional seam is not half-open")))
+        return false;
+    }
+    QString operationError;
+    if (!check(studioSetTransition(project, 11, 12, direction.kind, 600,
+                                   operationError) &&
+                   validateStudioProject(project).isEmpty() &&
+                   studioDuration(project) == 5400,
+               QStringLiteral("Directional transition was rejected: %1")
+                   .arg(operationError)))
+      return false;
+    const auto blend = studioBlendAt(project, 2550);
+    if (!check(
+            blend && blend->progress == 0.25 && blend->outgoingOpacity == 1 &&
+                blend->incomingOpacity == 1 &&
+                blend->outgoingAudioGain == 0.75 &&
+                blend->incomingAudioGain == 0.25 &&
+                blend->outgoing.sourceMs == 2550 &&
+                blend->incoming.sourceMs == 3150,
+            QStringLiteral(
+                "Directional transition changed shared source/audio timing")))
+      return false;
+    StudioProject decoded;
+    const auto bytes = encodeStudioProject(project);
+    if (!check(bytes.contains(direction.name) &&
+                   decodeStudioProject(bytes, decoded).isEmpty() &&
+                   decoded == project,
+               QStringLiteral(
+                   "Directional transition name or state did not round-trip")))
+      return false;
+  }
+  const auto cross =
+      studioTransitionLayer(StudioTransitionKind::Crossfade, 0.25, true);
+  const auto black =
+      studioTransitionLayer(StudioTransitionKind::FadeBlack, 0.5, false);
+  if (!check(cross.opacity == 0.25 && black.opacity == 0 &&
+                 cross.offset.isNull() && black.offset.isNull() &&
+                 cross.clip == QRectF(0, 0, 1, 1) &&
+                 black.clip == QRectF(0, 0, 1, 1),
+             QStringLiteral("Shared layer helper changed the existing fades")))
+    return false;
+  const auto invalidKind = static_cast<StudioTransitionKind>(999);
+  const auto invalidLayer = studioTransitionLayer(invalidKind, 0.5, true);
+  if (!check(
+          studioTransitionName(invalidKind).isEmpty() &&
+              invalidLayer.opacity == 0 && invalidLayer.clip.isEmpty(),
+          QStringLiteral("Invalid transition kind produced a visible layer")))
+    return false;
+  const auto nanLayer =
+      studioTransitionLayer(StudioTransitionKind::SlideLeft,
+                            std::numeric_limits<double>::quiet_NaN(), false);
+  if (!check(nanLayer.offset.isNull() && nanLayer.clip == QRectF(0, 0, 1, 1),
+             QStringLiteral(
+                 "Non-finite transition progress leaked into layer geometry")))
+    return false;
+  auto json = QJsonDocument::fromJson(encodeStudioProject(project)).object();
+  auto transitions = json["transitions"].toArray();
+  auto entry = transitions[0].toObject();
+  entry["kind"] = QStringLiteral("wipe-diagonal");
+  transitions[0] = entry;
+  json["transitions"] = transitions;
+  const auto before = project;
+  if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), project)
+                     .isEmpty() &&
+                 project == before,
+             QStringLiteral("Unknown directional kind was silently accepted")))
+    return false;
+  return true;
+}
 } // namespace
 
 bool runStudioProjectChecks(QString &error) {
@@ -693,5 +873,6 @@ bool runStudioProjectChecks(QString &error) {
                  loadStudioProject(file).project == empty,
              QStringLiteral("Saving empty project failed")))
     return false;
-  return cutChecks(error) && sceneChecks(error) && transitionChecks(error);
+  return cutChecks(error) && sceneChecks(error) && transitionChecks(error) &&
+         directionalChecks(error);
 }

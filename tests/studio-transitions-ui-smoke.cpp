@@ -1,6 +1,7 @@
 #include "studio-transitions-ui-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio.hpp"
+#include <QAbstractItemView>
 #include <QFile>
 #include <QPushButton>
 #include <QSpinBox>
@@ -24,7 +25,7 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   auto *type = window.findChild<QComboBox *>("transitionType");
   auto *duration = window.findChild<QSpinBox *>("transitionDuration");
   if (!require(
-          type && duration &&
+          timeline && player && type && duration &&
               QTest::qWaitFor([&] { return player->duration() == 6000; }, 6000),
           "Transition controls or media unavailable"))
     return false;
@@ -32,8 +33,14 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   QTest::keyClick(&window, Qt::Key_S);
   timeline->setSelectedClip(1);
   QTest::keyClick(&window, Qt::Key_T);
-  if (!require(type->isEnabled() && type->hasFocus(),
-               "T did not focus the scene boundary editor"))
+  // QTest sends to this window explicitly. A live compositor may keep another
+  // application active; check the intended focus route without requiring the
+  // test to steal desktop focus.
+  if (!require(
+          QTest::qWaitFor(
+              [&] { return type->isEnabled() && window.focusWidget() == type; },
+              2000),
+          "T did not focus the scene boundary editor"))
     return false;
   timeline->scrubbed(500);
   type->setCurrentIndex(1);
@@ -52,6 +59,32 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   type->setCurrentIndex(2);
   if (!require(player->duration() == 5400 && duration->value() == 600,
                "Fade through black changed overlap duration"))
+    return false;
+  for (int index = 3; index <= 10; ++index) {
+    const int previous = type->currentIndex();
+    type->setCurrentIndex(index);
+    if (!require(type->currentIndex() == index && player->duration() == 5400 &&
+                     duration->value() == 600,
+                 "Directional transition changed timing or inspector identity"))
+      return false;
+    QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+    if (!require(type->currentIndex() == previous && player->duration() == 5400,
+                 "Undo did not restore directional transition kind"))
+      return false;
+    QTest::keyClick(&window, Qt::Key_Z,
+                    Qt::ControlModifier | Qt::ShiftModifier);
+    if (!require(type->currentIndex() == index,
+                 "Redo did not restore directional transition kind"))
+      return false;
+  }
+  type->setCurrentIndex(2);
+  type->showPopup();
+  QTest::qWait(100);
+  const auto popup = type->view()->window()->grab().toImage();
+  const auto popupBackground = popup.pixelColor(popup.width() / 2, 3);
+  type->hidePopup();
+  if (!require(popupBackground == StudioChrome{}.background,
+               "Transition popup leaked platform-theme chrome"))
     return false;
   QTest::keyClick(duration, Qt::Key_Space);
   if (!require(player->playbackState() == QMediaPlayer::PlayingState,
@@ -74,7 +107,7 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
     return QPoint(64 + qRound((timeline->width() - 80) * ms / 5400.0), y);
   };
   QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(2700, 75));
-  if (!require(timeline->selectedClip() == 1 && type->hasFocus(),
+  if (!require(timeline->selectedClip() == 1 && window.focusWidget() == type,
                "Transition badge did not select its exact outgoing scene"))
     return false;
   QPushButton *later = nullptr;

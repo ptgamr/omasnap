@@ -36,6 +36,8 @@ public:
   int secondary = -1;
   double primaryOpacity = 1;
   double secondaryOpacity = 0;
+  std::array<QPointF, 2> offsets{};
+  std::array<QRectF, 2> clips{QRectF(0, 0, 1, 1), QRectF(0, 0, 1, 1)};
   std::array<QRectF, 2> fits{QRectF(0, 0, 1, 1), QRectF(0, 0, 1, 1)};
   std::array<int, 2> rotations{};
   QRectF drawn;

@@ -3,13 +3,13 @@
  *  and drag behaviour. */
 #include "studio-composition-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
-#include "studio-scenes-ui-smoke.hpp"
-#include "studio-transitions-ui-smoke.hpp"
 #include "studio-playback-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio-preview.hpp"
 #include "studio-project-smoke.hpp"
+#include "studio-scenes-ui-smoke.hpp"
 #include "studio-theme-smoke.hpp"
+#include "studio-transitions-ui-smoke.hpp"
 #include "studio.hpp"
 #include "zoom-track-smoke.hpp"
 #include "zoom-track.hpp"
@@ -46,6 +46,7 @@
 [[nodiscard]] bool runPreviewChecks(QString &error);
 [[nodiscard]] bool runStudioInteractionChecks(QString &error);
 [[nodiscard]] bool runGpuPreviewChecks(QString &error);
+[[nodiscard]] bool runDirectionalPreviewChecks(QString &error);
 
 namespace {
 
@@ -245,6 +246,7 @@ int main(int argc, char **argv) {
                 {"preview", runPreviewChecks},
                 {"keyboard and editing", runStudioInteractionChecks},
                 {"GPU video pixels", runGpuPreviewChecks},
+                {"directional preview pixels", runDirectionalPreviewChecks},
                 {"zoom export agreement", runZoomExportGoldenChecks}};
   for (const auto &check : checks) {
     if (!check.run(error)) {
@@ -703,6 +705,118 @@ bool runGpuPreviewChecks(QString &error) {
       nearestQuadrant(crop.pixelColor(crop.width() / 2, crop.height() / 2)) ==
           QStringLiteral("top-right"),
       error, QStringLiteral("GPU zoom sampled the wrong source quadrant"));
+}
+
+bool runDirectionalPreviewChecks(QString &error) {
+  StudioPreview preview;
+  preview.setFixedSize(320, 320);
+  preview.setCanvasSize({320, 320});
+  StudioStyle style;
+  style.padding = 10;
+  style.radius = 24;
+  preview.setStyle(style);
+  preview.setPickable(false);
+  preview.show();
+  QImage outgoing(320, 320, QImage::Format_RGBA8888);
+  QImage incoming(160, 320, QImage::Format_RGBA8888);
+  for (int y = 0; y < 320; ++y)
+    for (int x = 0; x < 320; ++x)
+      outgoing.setPixelColor(x, y, QColor(60 + x / 3, 20 + y / 3, 10));
+  for (int y = 0; y < incoming.height(); ++y)
+    for (int x = 0; x < incoming.width(); ++x)
+      incoming.setPixelColor(x, y, QColor(10, 60 + x / 3, 100 + y / 3));
+  preview.setVideoFrame(0, QVideoFrame(outgoing), 0);
+  preview.setVideoFrame(1, QVideoFrame(incoming), 90);
+  incoming = incoming.transformed(QTransform().rotate(90));
+  if (!check(QTest::qWaitFor(
+                 [&] {
+                   return preview.videoSlotReady(0) &&
+                          preview.videoSlotReady(1);
+                 },
+                 5000),
+             error, QStringLiteral("Directional preview frames unavailable")))
+    return false;
+  ZoomTrack track;
+  preview.setTrack(&track);
+  const StudioTransitionKind kinds[] = {
+      StudioTransitionKind::WipeLeft,  StudioTransitionKind::WipeRight,
+      StudioTransitionKind::WipeUp,    StudioTransitionKind::WipeDown,
+      StudioTransitionKind::SlideLeft, StudioTransitionKind::SlideRight,
+      StudioTransitionKind::SlideUp,   StudioTransitionKind::SlideDown};
+  for (bool zoomed : {false, true}) {
+    if (zoomed) {
+      ZoomCue cue;
+      cue.id = 1;
+      cue.startMs = 0;
+      cue.endMs = 4000;
+      cue.easeInMs = cue.easeOutMs = 100;
+      cue.target = {0.5, 0.5};
+      cue.scale = 2;
+      track.cues = {cue};
+    }
+    for (int kind = 0; kind < 8; ++kind)
+      for (double progress : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        preview.setComposition(0, 1, kinds[kind], progress, 2000);
+        const QImage shot = preview.grab().toImage();
+        const qreal dpr = shot.devicePixelRatio();
+        const auto at = [&](double x, double y) {
+          return shot.pixelColor(qFloor(x * dpr), qFloor(y * dpr));
+        };
+        if (!check(
+                at(16, 160) == style.color(), error,
+                QStringLiteral("Directional preview modified canvas padding")))
+          return false;
+        for (double x : {0.12, 0.37, 0.62, 0.87})
+          for (double y : {0.12, 0.37, 0.62, 0.87}) {
+            const int px = qFloor(32 + x * 256), py = qFloor(32 + y * 256);
+            QPointF source((px + 0.5 - 32) / 256, (py + 0.5 - 32) / 256);
+            if (zoomed)
+              source = QPointF(0.25, 0.25) + source * 0.5;
+            const bool vertical = kind % 4 >= 2;
+            const bool negative = kind % 2 == 0;
+            const double axis = vertical ? source.y() : source.x();
+            const bool isIncoming =
+                negative ? axis >= 1 - progress : axis < progress;
+            if (kind >= 4) {
+              const double offset =
+                  (negative ? -1 : 1) * (isIncoming ? progress - 1 : progress);
+              if (vertical)
+                source.ry() -= offset;
+              else
+                source.rx() -= offset;
+            }
+            const QImage &image = isIncoming ? incoming : outgoing;
+            // Fit the rotated portrait into the square canonical canvas
+            // before movement and global zoom: its letterbox remains black.
+            if (isIncoming)
+              source.setY((source.y() - 0.25) * 2);
+            const QColor expected =
+                source.y() < 0 || source.y() >= 1
+                    ? QColor(Qt::black)
+                    : image.pixelColor(
+                          qBound(0, qFloor(source.x() * image.width()),
+                                 image.width() - 1),
+                          qBound(0, qFloor(source.y() * image.height()),
+                                 image.height() - 1));
+            const QColor actual = at(px, py);
+            if (!check(qAbs(actual.red() - expected.red()) <= 3 &&
+                           qAbs(actual.green() - expected.green()) <= 3 &&
+                           qAbs(actual.blue() - expected.blue()) <= 3,
+                       error,
+                       QStringLiteral("%1 preview at %2,%3 progress %4 zoom "
+                                      "%5: got %6 expected %7")
+                           .arg(studioTransitionName(kinds[kind]))
+                           .arg(px)
+                           .arg(py)
+                           .arg(progress)
+                           .arg(zoomed)
+                           .arg(actual.name())
+                           .arg(expected.name())))
+              return false;
+          }
+      }
+  }
+  return true;
 }
 
 bool runStudioInteractionChecks(QString &error) {

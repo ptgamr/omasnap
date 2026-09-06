@@ -2,6 +2,7 @@
  */
 #include "studio-theme.hpp"
 
+#include <QAbstractItemView>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -180,6 +181,7 @@ QSpinBox:disabled, QComboBox:disabled { color: @muted; border-color: @selected; 
 QSpinBox QLineEdit { background: transparent; border: 0; padding: 0; }
 QComboBox::drop-down { width: 18px; border: 0; }
 QComboBox::down-arrow { image: none; width: 0; height: 0; border: 0; }
+QWidget#studioComboPopup { background: @background; border: 1px solid @border; }
 QAbstractItemView { background: @background; color: @text; border: 1px solid @border; selection-background-color: @selected; selection-color: @text; outline: 0; }
 QTabWidget::pane { border: 0; }
 QTabBar { border: 1px solid transparent; }
@@ -224,6 +226,26 @@ QSplitter::handle { background: @border; width: 1px; }
   for (const QString &key : keys)
     sheet.replace(QLatin1Char('@') + key, values.value(key));
   return sheet;
+}
+
+void StudioComboBox::stylePopup() {
+  auto *popup = view()->window();
+  // The popup is a separate top-level surface. Styling just the item view
+  // leaves its outer margins to the platform theme.
+  popup->setObjectName(QStringLiteral("studioComboPopup"));
+  popup->setStyleSheet(chrome_.styleSheet());
+}
+
+void StudioComboBox::setChrome(const StudioChrome &chrome) {
+  chrome_ = chrome;
+  if (view()->isVisible())
+    stylePopup();
+  update();
+}
+
+void StudioComboBox::showPopup() {
+  stylePopup();
+  QComboBox::showPopup();
 }
 
 void StudioComboBox::paintEvent(QPaintEvent *event) {

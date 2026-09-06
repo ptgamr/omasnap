@@ -1,6 +1,6 @@
 # Studio parity implementation plan
 
-Status: 01–03 delivered in separate validated commits; 04 core transitions delivered, directional variants pending. Later milestones remain planned.
+Status: 01–04 delivered in validated commits. Next: 05 timeline usability and keyboard polish. Later milestones remain planned.
 Created: 2026-09-06.  
 Omasnap baseline: `21ab6ec` (`feat/record`).
 
@@ -29,7 +29,8 @@ Bettershot website claims ------------->  [DONE] Crossfade / fade through black
 
 Omascreen website + screenshots -------->  [TODO] Moments / Follow / Raw / Paced,
                                                  click ripples, titles, grain,
-                                                 vignettes, wipes / design tray
+                                                 vignettes, design tray
+                                          [DONE] Directional wipes / slides
 
 Your workflow requirements ------------>  [DONE] Drag-select -> Delete -> Undo
                                           [DONE] Import and reorder scene files
@@ -38,7 +39,7 @@ Omasnap native implementation --------->  [DONE] GPU playback, basic keyboard
                                                  transport, single-source trim,
                                                  edit undo/save, MP4 export
 
-NEXT: Finish 04 directional wipes/slides; 05 timeline polish follows
+NEXT: 05 Timeline usability and keyboard polish
 ```
 
 "Comes from" identifies the behavioral/design reference, **not copied code or
@@ -52,7 +53,7 @@ comes from its site/screenshots, not a verified source repository.
   current branch. This does not mean installed, released, or full product parity.
 - **PART**: a usable subset is implemented; missing scope and uncommitted work
   are stated explicitly.
-- **TODO**: planned but not implemented. **NEXT** marks the first TODO to tackle.
+- **TODO**: planned but not implemented. **NEXT** marks the next remaining scope.
 - **DOING** / **BLOCKED**: use only when work actually starts or a named blocker
   prevents it. Milestones 01–04 are authorized in order; later work is not started.
 - **B**: Bettershot source/demos inspected; **B-web**: website-only claim.
@@ -82,7 +83,7 @@ exists. The larger parity targets remain in the matrix below.
 | 01 | Project/composition model | B + U + N | DONE | `b2b87b8`; assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full/live checks pass |
 | 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | DONE | `db6f776`; range tool/handles, clip/zoom selection, split/delete and exact history; decoded audio/video and UI checks pass |
 | 03 | Import, combine, duplicate, reorder scenes | U | DONE | `c4319f3`; atomic multi-file import/drop, markers, reorder/duplicate/source trims, source-anchored zooms, undo/reopen; full/live checks pass |
-| 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | PART | Pair-bound core transitions, inspector/T/badges, GPU/audio blends, undo/schema-2 persistence and matching export pass checks. Directional wipes/slides pending; 4K60 cadence not guaranteed |
+| 04 | Crossfade, fade through black, directional wipes/slides | B-web + O-web + U | DONE | `07bee78` core fades plus four-direction wipe/slide follow-up; shared overlap/audio, GPU/export geometry, inspector/T/badges, undo/reopen and Quattro popup validated. 4K60 cadence hardening remains in 16 |
 | 05 | Full timeline and keyboard workflow | B + U + N | PART | Transport, range tools, scene shortcuts, thumbnails landed; snapping, timeline zoom, waveforms still needed |
 | 06 | Background/layout inspector parity | B | PART | Colors/padding/corners landed; gradients, wallpaper, aspect, crop, shadows, presets pending |
 | 07 | Timed blur/pixelate/hide masks | B; U + N privacy requirements | TODO | Video masks and mask lane pending; screenshot redaction is not Studio implementation |
@@ -144,7 +145,7 @@ conventions. Establish that foundation before adding editing features.
 - Space transport, frame stepping, five-second seeking, trim/zoom commands,
   save/export commands, and shortcut help.
 
-**Not supported yet:** directional wipes/slides, timed text/effects, editable
+**Not supported yet:** timed text/effects, editable
 pointer metadata/automatic zoom, and music mixing. These remain explicit tasks
 below; recording a cursor does not generate automatic tracking or zoom cues.
 
@@ -332,21 +333,31 @@ the explicit Quattro palette, with a rendered-background regression check.
   clips, and make timeline duration match export exactly.
 - [x] Undo adding/removing/changing a transition. Reordering clips must not
   silently attach a transition to the wrong pair.
-- [ ] Add directional Wipe/Slide variants only after the first two pass parity tests.
+- [x] Add directional Wipe/Slide variants only after the first two pass parity tests.
 
 Acceptance: scrub both ways through every transition, pause mid-transition,
 frame-step, and export sample frames/audio. No blank frames, audio bursts, or
 boundary stalls. Hard cuts need only one active scene; blends use a bounded pair,
 not one resident decoder per project clip.
 
-Core delivery: `feat(studio): blend scene transitions in preview and export`.
+Core delivery: `07bee78` (`feat(studio): blend scene transitions in preview and export`).
 Validated with `make check`, live Wayland GPU/keyboard checks, decoded RGB/audio
 quarter-points for both fade types, mixed hard-cut/fade boundaries, VFR/retiming,
 fractional FPS, exact undo/reopen, incoming decoder failure and source-EOF handoff.
 Real 4K recordings were inspected at 1280×820 and 980×680. The timeline clock
 remains real-time, but the measured preview coalesces frames and does not sustain
-locked 4K60; cadence optimization remains in 16. Directional variants remain
-unchecked, so 04 is PART, not full transition parity.
+locked 4K60; cadence optimization remains in 16.
+
+Directional delivery: `feat(studio): add directional wipe and slide transitions`.
+All eight variants pass patterned decoded-export and live GPU pixel tests at
+endpoints/quarter-points, including rotation, mixed aspect ratios, zoom, padding,
+forward/reverse seeks, decoder handoff, audio timing, serialization and kind undo.
+Native FFmpeg slide shifts are integer-pixel; GPU sampling may interpolate
+subpixels, with a one-pixel sampling tolerance. The expanded menu and preview
+were inspected using real 4K scenes at 1280×820 and 980×680. Popup surfaces now
+inherit explicit Quattro colors, with a rendered regression test, and transition
+indicators refresh with palette changes. Full `make check` and live Wayland
+Studio suites pass; no installation or release is implied.
 
 Overlap uses only kept tail/head footage: no hidden handles reveal deleted
 material. Cuts/splits intersecting an active blend are refused with instructions

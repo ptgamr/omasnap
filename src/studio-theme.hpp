@@ -43,15 +43,14 @@ struct StudioChrome {
 class StudioComboBox final : public QComboBox {
 public:
   explicit StudioComboBox(QWidget *parent = nullptr) : QComboBox(parent) {}
-  void setChrome(const StudioChrome &chrome) {
-    chrome_ = chrome;
-    update();
-  }
+  void setChrome(const StudioChrome &chrome);
+  void showPopup() override;
 
 protected:
   void paintEvent(QPaintEvent *event) override;
 
 private:
+  void stylePopup();
   StudioChrome chrome_;
 };
 

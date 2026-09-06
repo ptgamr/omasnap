@@ -312,10 +312,13 @@ Zooms follow scene content, and duplicates have independent edits. Structural
 scene edits reset the project export range to include the whole composition.
 `I`/`O`/`R` still set/reset that project-wide range, not individual scene trims.
 
-**Transitions.** Click a timeline boundary badge (`+`, `F`, or `B`), or select
-a scene and press `T`. Choose Hard cut, Crossfade, or Fade through black in the
-Clip inspector and edit the overlap duration. Both preview and export blend
-the kept source frames and linearly fade their primary audio. Short clips clamp
+**Transitions.** Click a timeline boundary badge (`+`, `F`, `B`, `W`, or `S`), or
+select a scene and press `T`. Choose Hard cut, Crossfade, Fade through black,
+or a Wipe/Slide in any of four directions in the Clip inspector, then edit the
+overlap duration. Left means the incoming scene enters from the right; Up means
+it enters from below. Wipes reveal a stationary scene; slides move both scenes.
+Both preview and export combine the kept source frames and linearly fade their
+primary audio. Short clips clamp
 the frame-snapped overlap; no discarded footage is used as hidden handles.
 Undo restores transition pairs and timing. Scene arrangement reports any
 transitions it removes or shortens. Remove a transition before range-cutting
@@ -426,9 +429,9 @@ recorder is already running — it never signals a recorder it did not start.
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
 - **Studio parity remains incomplete**: multi-source import and arrangement,
-  range cuts/splits, crossfade/fade-through-black transitions, playback, trim,
-  manual zoom, canvas styling, undo/redo, and MP4 export exist. Directional
-  wipes/slides, automatic pointer zoom, camera
+  range cuts/splits, fades, directional wipes/slides, playback, trim,
+  manual zoom, canvas styling, undo/redo, and MP4 export exist. Automatic
+  pointer zoom, camera
   overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **4K preview cadence still needs work.** Real-time timeline progression does

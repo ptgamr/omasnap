@@ -807,7 +807,12 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
                        !transition ? QStringLiteral("+")
                        : transition->kind == StudioTransitionKind::Crossfade
                            ? QStringLiteral("F")
-                           : QStringLiteral("B"));
+                       : transition->kind == StudioTransitionKind::FadeBlack
+                           ? QStringLiteral("B")
+                       : studioTransitionName(transition->kind)
+                               .startsWith(QStringLiteral("wipe-"))
+                           ? QStringLiteral("W")
+                           : QStringLiteral("S"));
     }
   }
 
@@ -2296,6 +2301,8 @@ void StudioWindow::applyChrome() {
   timeline_->setChrome(chrome);
   if (background_)
     background_->setChrome(chrome);
+  if (transitionType_)
+    transitionType_->setChrome(chrome);
   if (statusLabel_)
     setStatus(statusLabel_->text(),
               statusLabel_->property("studioError").toBool());

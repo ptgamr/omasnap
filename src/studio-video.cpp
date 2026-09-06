@@ -122,9 +122,12 @@ void StudioVideoSurface::initializeGL() {
     attribute vec2 position;
     attribute vec2 texcoord;
     attribute vec2 corner;
+    attribute vec2 canonical;
     varying vec2 uv;
     varying vec2 local;
-    void main() { uv = texcoord; local = corner; gl_Position = vec4(position, 0.0, 1.0); }
+    varying vec2 composition;
+    void main() { uv = texcoord; local = corner; composition = canonical;
+      gl_Position = vec4(position, 0.0, 1.0); }
   )");
   const bool fragmentOk =
       program_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
@@ -133,6 +136,7 @@ void StudioVideoSurface::initializeGL() {
     #endif
     varying vec2 uv;
     varying vec2 local;
+    varying vec2 composition;
     uniform vec2 cardSize;
     uniform float radius;
     uniform sampler2D plane0;
@@ -143,15 +147,20 @@ void StudioVideoSurface::initializeGL() {
     uniform vec4 range;
     uniform int videoLayout;
     uniform float gain;
+    uniform vec4 clipRect;
     void main() {
       vec4 first = texture2D(plane0, vec2(uv.x * widths.x, uv.y));
       vec2 q = abs(local - 0.5) * cardSize - (cardSize * 0.5 - radius);
       float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
       float alpha = clamp(0.5 - d, 0.0, 1.0);
+      float mask = step(clipRect.x, composition.x) *
+                   (1.0 - step(clipRect.z, composition.x)) *
+                   step(clipRect.y, composition.y) *
+                   (1.0 - step(clipRect.w, composition.y));
       if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, alpha); return;
       }
-      if (videoLayout == 0) { gl_FragColor = vec4(first.rgb * gain, first.a * alpha); return; }
+      if (videoLayout == 0) { gl_FragColor = vec4(first.rgb * gain * mask, first.a * alpha); return; }
       vec4 second = texture2D(plane1, vec2(uv.x * widths.y, uv.y));
       float y = (first.r - range.x) * range.y;
       float u = (second.r - range.z) * range.w;
@@ -159,7 +168,7 @@ void StudioVideoSurface::initializeGL() {
         texture2D(plane2, vec2(uv.x * widths.z, uv.y)).r) - range.z) * range.w;
       gl_FragColor = vec4(clamp(vec3(y + coefficients.x * v,
         y - coefficients.z * u - coefficients.w * v,
-        y + coefficients.y * u), 0.0, 1.0) * gain, alpha);
+        y + coefficients.y * u), 0.0, 1.0) * gain * mask, alpha);
     }
   )");
   if (!vertexOk || !fragmentOk || !program_.link()) {
@@ -258,8 +267,13 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
                 chromaWidth /
                     static_cast<float>(qMax(1, frame_.textures[2].width()))));
   const QRectF fit = multiFrame_ ? fits[slot] : this->fit;
+  const QPointF offset = multiFrame_ ? offsets[slot] : QPointF();
+  const QRectF clip = multiFrame_ ? clips[slot] : QRectF(0, 0, 1, 1);
+  program_.setUniformValue("clipRect", QVector4D(clip.left(), clip.top(),
+                                                 clip.right(), clip.bottom()));
   const int rotation = multiFrame_ ? rotations[slot] : this->rotation;
-  const auto uv = [fit, rotation](QPointF p) {
+  const auto uv = [fit, rotation, offset](QPointF p) {
+    p -= offset;
     p = {(p.x() - fit.x()) / fit.width(), (p.y() - fit.y()) / fit.height()};
     if (rotation == 90)
       return QPointF(p.y(), 1 - p.x());
@@ -271,23 +285,28 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
   };
   const std::array<QPointF, 4> points{drawn.topLeft(), drawn.bottomLeft(),
                                       drawn.topRight(), drawn.bottomRight()};
-  const std::array<QPointF, 4> coords{
-      uv(source.topLeft()), uv(source.bottomLeft()), uv(source.topRight()),
-      uv(source.bottomRight())};
-  std::array<GLfloat, 8> positions{}, coordinates{};
+  const std::array<QPointF, 4> canonical{source.topLeft(), source.bottomLeft(),
+                                         source.topRight(),
+                                         source.bottomRight()};
+  std::array<GLfloat, 8> positions{}, coordinates{}, composition{};
   for (size_t i = 0; i < points.size(); ++i) {
     positions[i * 2] = static_cast<float>(points[i].x() / width() * 2 - 1);
     positions[i * 2 + 1] = static_cast<float>(1 - points[i].y() / height() * 2);
-    coordinates[i * 2] = static_cast<float>(coords[i].x());
-    coordinates[i * 2 + 1] = static_cast<float>(coords[i].y());
+    const auto sample = uv(canonical[i]);
+    coordinates[i * 2] = static_cast<float>(sample.x());
+    coordinates[i * 2 + 1] = static_cast<float>(sample.y());
+    composition[i * 2] = static_cast<float>(canonical[i].x());
+    composition[i * 2 + 1] = static_cast<float>(canonical[i].y());
   }
   program_.enableAttributeArray("position");
   program_.enableAttributeArray("texcoord");
   const std::array<GLfloat, 8> corners{0, 0, 0, 1, 1, 0, 1, 1};
   program_.enableAttributeArray("corner");
+  program_.enableAttributeArray("canonical");
   program_.setAttributeArray("position", GL_FLOAT, positions.data(), 2);
   program_.setAttributeArray("texcoord", GL_FLOAT, coordinates.data(), 2);
   program_.setAttributeArray("corner", GL_FLOAT, corners.data(), 2);
+  program_.setAttributeArray("canonical", GL_FLOAT, composition.data(), 2);
   glEnable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -295,4 +314,5 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
   program_.disableAttributeArray("position");
   program_.disableAttributeArray("texcoord");
   program_.disableAttributeArray("corner");
+  program_.disableAttributeArray("canonical");
 }

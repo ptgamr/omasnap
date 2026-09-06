@@ -2,6 +2,7 @@
  *  drawn through the zoom model rather than straight to the screen. */
 #pragma once
 
+#include "studio-project.hpp"
 #include "studio-style.hpp"
 #include "studio-theme.hpp"
 #include "studio-video.hpp"
@@ -38,8 +39,8 @@ public:
   void setVideoFrame(int slot, const QVideoFrame &frame, int rotation);
   void clearVideoSlot(int slot);
   [[nodiscard]] bool videoSlotReady(int slot) const;
-  void setComposition(int primary, int secondary, double primaryOpacity,
-                      double secondaryOpacity, qint64 timelineMs);
+  void setComposition(int primary, int secondary, StudioTransitionKind kind,
+                      double progress, qint64 timelineMs);
   void setCanvasSize(const QSize &size);
   void clearFrame();
   void invalidatePendingFrames();
@@ -111,6 +112,7 @@ private:
   int secondary_ = -1;
   double primaryOpacity_ = 1;
   double secondaryOpacity_ = 0;
+  std::array<StudioTransitionLayer, 2> layers_;
   bool composition_ = false;
   int canvasInset_ = 0;
   StudioStyle style_;

@@ -503,6 +503,40 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
   if (!require(failures.isEmpty(), "Unexpected transition decoder error"))
     return false;
 
+  StudioProject directional = mixed;
+  directional.clips = {{1, 1, 0, 600, 1}, {3, 3, 0, 600, 1}};
+  for (const auto kind :
+       {StudioTransitionKind::WipeLeft, StudioTransitionKind::WipeRight,
+        StudioTransitionKind::WipeUp, StudioTransitionKind::WipeDown,
+        StudioTransitionKind::SlideLeft, StudioTransitionKind::SlideRight,
+        StudioTransitionKind::SlideUp, StudioTransitionKind::SlideDown}) {
+    if (!require(
+            studioSetTransition(directional, 1, 3, kind, 100, transitionError),
+            "Could not configure directional transport"))
+      return false;
+    playback.setProject(directional, 525);
+    if (!require(QTest::qWaitFor([&] { return colorNear(Qt::red); }, 4000),
+                 "Directional transport lost outgoing quarter frame"))
+      return false;
+    playback.setPosition(575);
+    if (!require(QTest::qWaitFor([&] { return colorNear(Qt::blue); }, 4000),
+                 "Directional transport lost incoming quarter frame"))
+      return false;
+    playback.setPosition(525);
+    if (!require(QTest::qWaitFor([&] { return colorNear(Qt::red); }, 4000),
+                 "Reverse directional seek retained incoming frame"))
+      return false;
+  }
+  playback.setPosition(450);
+  playback.play();
+  if (!require(
+          QTest::qWaitFor(
+              [&] { return playback.position() >= 700 && colorNear(Qt::blue); },
+              4000),
+          "Directional playback failed incoming decoder handoff"))
+    return false;
+  playback.pause();
+
   // Full source ranges exercise the decoder's EOF callback, rather than only
   // the composition timer's earlier trimmed-out boundary.
   StudioProject eof = mixed;

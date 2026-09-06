@@ -37,7 +37,30 @@ struct StudioClip {
   double speed = 1.0;
   bool operator==(const StudioClip &) const = default;
 };
-enum class StudioTransitionKind { Crossfade, FadeBlack };
+enum class StudioTransitionKind {
+  Crossfade,
+  FadeBlack,
+  WipeLeft,
+  WipeRight,
+  WipeUp,
+  WipeDown,
+  SlideLeft,
+  SlideRight,
+  SlideUp,
+  SlideDown
+};
+/** One scene's presentation in normalized canonical-canvas coordinates.
+ * clip is half-open [x,x+width) × [y,y+height), after applying offset. */
+struct StudioTransitionLayer {
+  double opacity = 1;
+  QPointF offset;
+  QRectF clip{0, 0, 1, 1};
+};
+[[nodiscard]] StudioTransitionLayer
+studioTransitionLayer(StudioTransitionKind kind, double progress,
+                      bool incoming);
+/** Stable serialized name; empty for an invalid enum value. */
+[[nodiscard]] QString studioTransitionName(StudioTransitionKind kind);
 struct StudioTransition {
   quint64 outgoingClipId = 0;
   quint64 incomingClipId = 0;

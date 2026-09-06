@@ -12,7 +12,7 @@
  * error for invalid input. */
 // Transitions overlap existing trimmed source ranges; RGB picture weights
 // and linear audio gains match studioBlendAt. Global zoom/style apply
-// afterward.
+// afterward. Wipes preserve source position; slides translate both scenes.
 [[nodiscard]] QStringList
 studioCompositionArguments(const StudioProject &project,
                            const QString &destination, QString &error);

@@ -95,7 +95,7 @@ project FPS. Audio remains primary-stream-only, with silence for silent scenes.
 
 Project schema 2 stores each transition against the ordered outgoing/incoming
 clip IDs. There is no schema-1 migration. Hard cuts have no transition record.
-Crossfade and Fade through black overlap the existing kept tail/head; they
+Fades and directional wipes/slides overlap the existing kept tail/head; they
 never extend source handles or expose excluded footage. Incoming scene start
 is outgoing end minus the overlap, so total duration subtracts every overlap.
 
@@ -109,11 +109,21 @@ it does not advance the composition clock through an unavailable picture.
 Both pictures fit/rotate into the canonical canvas, then blend before the
 project-wide zoom and canvas styling. Crossfade weights are `1-u` and `u`.
 Fade through black uses `max(1-2u,0)` and `max(2u-1,0)`, giving an actual black
-midpoint. Both modes linearly crossfade primary audio with `1-u` and `u`;
+midpoint. Every mode linearly crossfades primary audio with `1-u` and `u`;
 silent scenes contribute zero. Export uses a custom RGB expression for the
 symmetric black fade, not FFmpeg's differently phased built-in `fadeblack`.
 Final encoded timestamps remain on the chosen CFR grid (sub-frame project
 endpoints round to an output frame, as for hard-cut export).
+
+Wipe and Slide each support Left, Right, Up, and Down, named for movement of the
+incoming picture. At progress `u`, Wipe Left reveals the incoming scene in
+`x >= 1-u`; Right reveals `x < u` (Up/Down use the analogous y coordinate).
+Slides translate the outgoing and incoming canonical canvases together: Left
+uses offsets `-u` and `1-u`, Right uses `u` and `u-1`. Clipping is half-open,
+so exactly one source owns a seam. Fit/rotation precedes these transforms;
+global zoom and canvas styling follow them. Wipe export uses pixel-center
+predicates. Native FFmpeg slides use integer pixel shifts, while GPU sampling
+can interpolate subpixels; comparisons allow a one-pixel sampling tolerance.
 
 Reorder/insert/duplicate removes transitions whose exact pair is no longer
 adjacent; it never transfers an effect to another pair. Scene trim clamps an
@@ -130,12 +140,12 @@ ordering semantics. Cuts outside blends preserve/retarget surviving pairs and
 refuse edits leaving insufficient transition room. Nothing silently discards
 the selected transition or loses zoom data to make a cut succeed.
 
-Click the timeline's `+`/`F`/`B` boundary badge, or select a scene and press `T`,
-to edit its transition to the next scene. The Clip inspector shows the actual
+Click the timeline's `+`/`F`/`B`/`W`/`S` boundary badge, or select a scene and
+press `T`, to edit its transition to the next scene. The Clip inspector shows the actual
 frame-snapped overlap and maximum. Selecting Hard cut removes the overlap.
 Space and project undo/redo work from these controls.
 
-Directional wipes/slides are not implemented. Real 4K60 recording tests preserve
-real-time project clock progression but still coalesce preview frames; neither
+Real 4K60 recording tests preserve real-time project clock progression but still
+coalesce preview frames; neither
 the bounded decoder/preparation design nor these tests guarantee sustained
 4K60 presentation. Further cadence/proxy work remains tracked in PLAN item 16.

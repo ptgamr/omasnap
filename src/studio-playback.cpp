@@ -350,8 +350,9 @@ bool StudioPlayback::contributing(int index) const {
 void StudioPlayback::refreshComposition() {
   const auto blend = studioBlendAt(project_, position_);
   preview_->setComposition(active_, blend ? 1 - active_ : -1,
-                           blend ? blend->outgoingOpacity : 1,
-                           blend ? blend->incomingOpacity : 0, position_);
+                           blend ? blend->kind
+                                 : StudioTransitionKind::Crossfade,
+                           blend ? blend->progress : 0, position_);
   updateAudio();
 }
 

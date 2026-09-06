@@ -10,12 +10,27 @@
 #include <QSet>
 #include <QtMath>
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace {
 constexpr qint64 maxBytes = 4 * 1024 * 1024LL;
 constexpr qint64 maxDuration = 7 * 24 * 60 * 60 * 1000LL;
 constexpr qsizetype maxItems = 1000;
+constexpr std::array<const char *, 10> transitionNames{
+    "crossfade", "fade-black", "wipe-left",   "wipe-right", "wipe-up",
+    "wipe-down", "slide-left", "slide-right", "slide-up",   "slide-down"};
+bool validTransitionKind(StudioTransitionKind kind) {
+  const int value = static_cast<int>(kind);
+  return value >= 0 && value < static_cast<int>(transitionNames.size());
+}
+std::optional<StudioTransitionKind>
+transitionKindFromName(const QString &name) {
+  for (std::size_t i = 0; i < transitionNames.size(); ++i)
+    if (name == QLatin1StringView(transitionNames[i]))
+      return static_cast<StudioTransitionKind>(i);
+  return std::nullopt;
+}
 bool finishSceneChange(StudioProject &, StudioProject, QString &,
                        quint64 originalId = 0, quint64 duplicateId = 0);
 qint64 frameSnapped(const StudioProject &p, qint64 requested, bool floor) {
@@ -157,6 +172,55 @@ QJsonObject sourceJson(const StudioSource &s) {
 }
 } // namespace
 
+QString studioTransitionName(StudioTransitionKind kind) {
+  return validTransitionKind(kind)
+             ? QString::fromLatin1(
+                   transitionNames[static_cast<std::size_t>(kind)])
+             : QString{};
+}
+StudioTransitionLayer studioTransitionLayer(StudioTransitionKind kind,
+                                            double progress, bool incoming) {
+  if (!validTransitionKind(kind))
+    return {0, {}, {}};
+  const double u = std::isfinite(progress) ? qBound(0.0, progress, 1.0) : 0;
+  StudioTransitionLayer layer;
+  switch (kind) {
+  case StudioTransitionKind::Crossfade:
+    layer.opacity = incoming ? u : 1 - u;
+    return layer;
+  case StudioTransitionKind::FadeBlack:
+    layer.opacity = qMax(0.0, incoming ? 2 * u - 1 : 1 - 2 * u);
+    return layer;
+  case StudioTransitionKind::WipeLeft:
+    layer.clip = incoming ? QRectF(1 - u, 0, u, 1) : QRectF(0, 0, 1 - u, 1);
+    return layer;
+  case StudioTransitionKind::WipeRight:
+    layer.clip = incoming ? QRectF(0, 0, u, 1) : QRectF(u, 0, 1 - u, 1);
+    return layer;
+  case StudioTransitionKind::WipeUp:
+    layer.clip = incoming ? QRectF(0, 1 - u, 1, u) : QRectF(0, 0, 1, 1 - u);
+    return layer;
+  case StudioTransitionKind::WipeDown:
+    layer.clip = incoming ? QRectF(0, 0, 1, u) : QRectF(0, u, 1, 1 - u);
+    return layer;
+  case StudioTransitionKind::SlideLeft:
+    layer.offset = {incoming ? 1 - u : -u, 0};
+    break;
+  case StudioTransitionKind::SlideRight:
+    layer.offset = {incoming ? u - 1 : u, 0};
+    break;
+  case StudioTransitionKind::SlideUp:
+    layer.offset = {0, incoming ? 1 - u : -u};
+    break;
+  case StudioTransitionKind::SlideDown:
+    layer.offset = {0, incoming ? u - 1 : u};
+    break;
+  }
+  const QRectF canvas(0, 0, 1, 1);
+  layer.clip = canvas.intersected(canvas.translated(layer.offset));
+  return layer;
+}
+
 const StudioAsset *studioAsset(const StudioProject &p, quint64 id) {
   for (const auto &asset : p.assets)
     if (asset.id == id)
@@ -228,15 +292,14 @@ std::optional<StudioBlend> studioBlendAt(const StudioProject &p, qint64 time) {
     };
     const double progress = static_cast<double>(time - incoming.startMs) /
                             static_cast<double>(transition->durationMs);
-    const bool black = transition->kind == StudioTransitionKind::FadeBlack;
-    return StudioBlend{frame(outgoing),
-                       frame(incoming),
-                       transition->kind,
-                       progress,
-                       black ? qMax(0.0, 1 - 2 * progress) : 1 - progress,
-                       black ? qMax(0.0, 2 * progress - 1) : progress,
-                       1 - progress,
-                       progress};
+    const auto outgoingLayer =
+        studioTransitionLayer(transition->kind, progress, false);
+    const auto incomingLayer =
+        studioTransitionLayer(transition->kind, progress, true);
+    return StudioBlend{frame(outgoing),       frame(incoming),
+                       transition->kind,      progress,
+                       outgoingLayer.opacity, incomingLayer.opacity,
+                       1 - progress,          progress};
   }
   return std::nullopt;
 }
@@ -310,9 +373,7 @@ QString validateStudioProject(const StudioProject &p) {
   QSet<quint64> boundaries;
   for (const auto &t : p.transitions) {
     if (!t.outgoingClipId || !t.incomingClipId ||
-        boundaries.contains(t.outgoingClipId) ||
-        (t.kind != StudioTransitionKind::Crossfade &&
-         t.kind != StudioTransitionKind::FadeBlack) ||
+        boundaries.contains(t.outgoingClipId) || !validTransitionKind(t.kind) ||
         t.durationMs <= 0 ||
         t.durationMs >
             studioTransitionMaximum(p, t.outgoingClipId, t.incomingClipId) ||
@@ -361,12 +422,11 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                              {"outMs", c.outMs},
                              {"speed", c.speed}});
   for (const auto &t : p.transitions)
-    transitions.append(QJsonObject{
-        {"outgoingClipId", QString::number(t.outgoingClipId)},
-        {"incomingClipId", QString::number(t.incomingClipId)},
-        {"kind", t.kind == StudioTransitionKind::Crossfade ? "crossfade"
-                                                           : "fade-black"},
-        {"durationMs", t.durationMs}});
+    transitions.append(
+        QJsonObject{{"outgoingClipId", QString::number(t.outgoingClipId)},
+                    {"incomingClipId", QString::number(t.incomingClipId)},
+                    {"kind", studioTransitionName(t.kind)},
+                    {"durationMs", t.durationMs}});
   return QJsonDocument(
              QJsonObject{
                  {"schema", StudioProject::kSchema},
@@ -455,16 +515,12 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
   }
   for (const auto &value : root["transitions"].toArray()) {
     const auto t = value.toObject();
-    const auto kind = t["kind"].toString();
-    if (!value.isObject() || !integer(t["durationMs"], 1, maxDuration) ||
-        (kind != QStringLiteral("crossfade") &&
-         kind != QStringLiteral("fade-black")))
+    const auto kind = transitionKindFromName(t["kind"].toString());
+    if (!value.isObject() || !integer(t["durationMs"], 1, maxDuration) || !kind)
       return malformed;
-    p.transitions.push_back(
-        {idFrom(t["outgoingClipId"]), idFrom(t["incomingClipId"]),
-         kind == QStringLiteral("crossfade") ? StudioTransitionKind::Crossfade
-                                             : StudioTransitionKind::FadeBlack,
-         t["durationMs"].toInteger()});
+    p.transitions.push_back({idFrom(t["outgoingClipId"]),
+                             idFrom(t["incomingClipId"]), *kind,
+                             t["durationMs"].toInteger()});
   }
   const auto zoom = root["zoom"].toObject();
   if (!zoom["cues"].isArray() || zoom["cues"].toArray().size() > kMaxZoomCues)
@@ -922,9 +978,7 @@ bool studioSetTransition(StudioProject &p, quint64 outgoing, quint64 incoming,
   if (!error.isEmpty())
     return false;
   const auto maximum = studioTransitionMaximum(p, outgoing, incoming);
-  if (maximum <= 0 || requested <= 0 ||
-      (kind != StudioTransitionKind::Crossfade &&
-       kind != StudioTransitionKind::FadeBlack)) {
+  if (maximum <= 0 || requested <= 0 || !validTransitionKind(kind)) {
     error = QStringLiteral("These scenes are too short for a transition; leave "
                            "250 ms between blends.");
     return false;
