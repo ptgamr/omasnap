@@ -326,6 +326,206 @@ bool sceneChecks(QString &error) {
     return false;
   return true;
 }
+bool transitionChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject p;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 10000;
+  source.audioStreams = 1;
+  p.assets = {{1, QStringLiteral("transition-source.mp4"), source}};
+  p.clips = {{11, 1, 0, 2000, 1}, {12, 1, 0, 2000, 1}, {13, 1, 0, 2000, 1}};
+  QString operationError;
+  if (!check(
+          studioSetTransition(p, 11, 12, StudioTransitionKind::Crossfade, 400,
+                              operationError) &&
+              studioSetTransition(p, 12, 13, StudioTransitionKind::Crossfade,
+                                  400, operationError) &&
+              studioDuration(p) == 5200 && p.transitions.size() == 2,
+          QStringLiteral("Transition duration did not shorten composition: %1")
+              .arg(operationError)))
+    return false;
+  const auto spans = studioComposition(p);
+  if (!check(
+          spans[0].startMs == 0 && spans[0].endMs == 2000 &&
+              spans[1].startMs == 1600 && spans[1].endMs == 3600 &&
+              spans[2].startMs == 3200 && spans[2].endMs == 5200 &&
+              !studioBlendAt(p, 1599) && !studioBlendAt(p, 2000),
+          QStringLiteral("Transition half-open composition boundaries differ")))
+    return false;
+  const auto half = studioBlendAt(p, 1800);
+  if (!check(half && half->outgoing.span.clipId == 11 &&
+                 half->incoming.span.clipId == 12 &&
+                 half->outgoing.sourceMs == 1800 &&
+                 half->incoming.sourceMs == 200 && half->progress == 0.5 &&
+                 half->outgoingOpacity == 0.5 && half->incomingOpacity == 0.5 &&
+                 half->outgoingAudioGain == 0.5 &&
+                 half->incomingAudioGain == 0.5 &&
+                 studioFrameAt(p, 1800)->span.clipId == 11 &&
+                 studioTimelineTime(p, 12, 200) == 1800,
+             QStringLiteral(
+                 "Shared blend source phases or video/audio gains differ")))
+    return false;
+  if (!check(studioSetTransition(p, 11, 12, StudioTransitionKind::FadeBlack,
+                                 400, operationError),
+             QStringLiteral("Could not restyle transition")))
+    return false;
+  const auto black = studioBlendAt(p, 1800), quarter = studioBlendAt(p, 1700);
+  if (!check(
+          black && black->outgoingOpacity == 0 && black->incomingOpacity == 0 &&
+              black->incomingAudioGain == 0.5 && quarter &&
+              quarter->outgoingOpacity == 0.5 && quarter->incomingOpacity == 0,
+          QStringLiteral("Fade-through-black does not cross black or retains "
+                         "wrong audio")))
+    return false;
+  const auto original = p;
+  if (!check(!studioSplitClip(p, 1800, 99, &operationError) &&
+                 operationError.contains(QStringLiteral("transition")) &&
+                 p == original,
+             QStringLiteral("Split through blend was not atomically refused")))
+    return false;
+  const auto blockedCut = studioDeleteRange(p, 1700, 1900, 99);
+  if (!check(
+          !blockedCut.changed &&
+              blockedCut.error.contains(QStringLiteral("transition")) &&
+              p == original,
+          QStringLiteral("Range cut through blend was not atomically refused")))
+    return false;
+  if (!check(studioSplitClip(p, 500, 99, &operationError) &&
+                 studioDuration(p) == 5200 && studioTransition(p, 99, 12) &&
+                 !studioTransition(p, 11, 12) && studioTransition(p, 12, 13),
+             QStringLiteral(
+                 "Split outside blend lost or misattached outer transition")))
+    return false;
+  auto cutProject = original;
+  const auto cut = studioDeleteRange(cutProject, 100, 200, 99);
+  if (!check(cut.changed && cut.removedMs == 100 &&
+                 studioDuration(cutProject) == 5100 &&
+                 studioTransition(cutProject, 99, 12) &&
+                 studioTransition(cutProject, 12, 13),
+             QStringLiteral(
+                 "Cut outside blend did not preserve timeline/outer pairs: %1")
+                 .arg(cut.error)))
+    return false;
+  auto afterBlend = original;
+  const auto tailCut = studioDeleteRange(afterBlend, 4300, 4500, 99);
+  if (!check(
+          tailCut.changed && tailCut.fromMs == 4300 && tailCut.toMs == 4500 &&
+              studioDuration(afterBlend) == 5000 &&
+              studioTransition(afterBlend, 12, 13),
+          QStringLiteral(
+              "Cut after overlaps mixed serial/source and project clocks: %1")
+              .arg(tailCut.error)))
+    return false;
+  auto deletion = original;
+  deletion.zoom.cues = {{71, 3800, 4300, 150, 150, {0.5, 0.5}, 2}};
+  const auto beforeDelete = deletion;
+  const auto removed = studioDeleteClip(deletion, 12);
+  if (!check(removed.changed && removed.removedMs == 1200 &&
+                 studioDuration(deletion) == 4000 &&
+                 deletion.transitions.isEmpty() &&
+                 deletion.zoom.cues.size() == 1 &&
+                 deletion.zoom.cues[0].id == 71 &&
+                 deletion.zoom.cues[0].startMs == 2600,
+             QStringLiteral(
+                 "Whole-scene delete failed source-aware zoom/pair removal: %1")
+                 .arg(removed.error)))
+    return false;
+  StudioHistory history;
+  StudioEditState before, after;
+  before.project = beforeDelete;
+  before.selectedClip = 12;
+  before.positionMs = 3000;
+  after.project = deletion;
+  history.reset(before);
+  history.push(after);
+  if (!check(history.undo() && history.current() == before && history.redo() &&
+                 history.current() == after,
+             QStringLiteral("Transition scene deletion did not undo exactly")))
+    return false;
+  auto reordered = original;
+  if (!check(studioMoveClip(reordered, 13, 11, operationError) &&
+                 reordered.transitions.size() == 1 &&
+                 studioTransition(reordered, 11, 12) &&
+                 !studioTransition(reordered, 12, 13),
+             QStringLiteral("Reorder attached transition to a different pair")))
+    return false;
+  auto duplicated = original;
+  if (!check(studioDuplicateClip(duplicated, 12, 99, operationError) &&
+                 studioTransition(duplicated, 11, 12) &&
+                 !studioTransition(duplicated, 12, 13) &&
+                 !studioTransition(duplicated, 99, 13),
+             QStringLiteral(
+                 "Duplicate inherited a transition belonging to another pair")))
+    return false;
+  auto shortClip = original;
+  if (!check(
+          studioTrimClip(shortClip, 12, 0, 1000, operationError) &&
+              studioTransition(shortClip, 11, 12)->durationMs == 367 &&
+              studioTransition(shortClip, 12, 13)->durationMs == 367,
+          QStringLiteral("Short scene did not frame-clamp incident overlaps")))
+    return false;
+  const auto shortSpans = studioComposition(shortClip);
+  if (!check(shortSpans[2].startMs - shortSpans[0].endMs >= 250,
+             QStringLiteral(
+                 "Adjacent transitions consumed decoder preload headroom")))
+    return false;
+  if (!check(studioTrimClip(shortClip, 12, 0, 200, operationError) &&
+                 shortClip.transitions.isEmpty(),
+             QStringLiteral("Very short scene retained impossible overlap")))
+    return false;
+  StudioProject cross = original;
+  cross.transitions.clear();
+  cross.zoom.cues = {{80, 1500, 2500, 200, 200, {0.5, 0.5}, 2}};
+  if (!check(studioSetTransition(cross, 11, 12, StudioTransitionKind::Crossfade,
+                                 400, operationError) &&
+                 cross.zoom.cues.size() == 1 && cross.zoom.cues[0].id == 80 &&
+                 cross.zoom.cues[0].startMs == 1500 &&
+                 cross.zoom.cues[0].endMs == 2100 &&
+                 studioRemoveTransition(cross, 11, 12, operationError) &&
+                 cross.zoom.cues.size() == 1 &&
+                 cross.zoom.cues[0].endMs == 2500,
+             QStringLiteral("Continuous cross-scene camera did not merge "
+                            "across overlap add/remove: %1")
+                 .arg(operationError)))
+    return false;
+  auto collision = cross;
+  collision.zoom.cues = {{81, 1500, 1900, 100, 100, {0.3, 0.5}, 2},
+                         {82, 2000, 2500, 100, 100, {0.7, 0.5}, 3}};
+  const auto collisionBefore = collision;
+  if (!check(!studioSetTransition(collision, 11, 12,
+                                  StudioTransitionKind::Crossfade, 400,
+                                  operationError) &&
+                 operationError.contains(QStringLiteral("Move zoom cues")) &&
+                 collision == collisionBefore,
+             QStringLiteral(
+                 "Transition silently truncated colliding camera cues")))
+    return false;
+  StudioProject decoded;
+  if (!check(decodeStudioProject(encodeStudioProject(original), decoded)
+                     .isEmpty() &&
+                 decoded == original,
+             QStringLiteral("Transitions did not persist exactly")))
+    return false;
+  auto json = QJsonDocument::fromJson(encodeStudioProject(original)).object();
+  json["schema"] = 1;
+  if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                     .isEmpty() &&
+                 decoded == original,
+             QStringLiteral("Old schema was silently migrated")))
+    return false;
+  auto invalid = original;
+  invalid.transitions[0].incomingClipId = 11;
+  if (!check(!validateStudioProject(invalid).isEmpty(),
+             QStringLiteral("Non-adjacent transition pair accepted")))
+    return false;
+  return true;
+}
 } // namespace
 
 bool runStudioProjectChecks(QString &error) {
@@ -493,5 +693,5 @@ bool runStudioProjectChecks(QString &error) {
                  loadStudioProject(file).project == empty,
              QStringLiteral("Saving empty project failed")))
     return false;
-  return cutChecks(error) && sceneChecks(error);
+  return cutChecks(error) && sceneChecks(error) && transitionChecks(error);
 }

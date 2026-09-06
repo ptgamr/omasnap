@@ -10,6 +10,9 @@
  * like the GPU preview. The primary audio stream becomes stereo, matching
  * playback; missing audio is silence. Returns no arguments and an actionable
  * error for invalid input. */
+// Transitions overlap existing trimmed source ranges; RGB picture weights
+// and linear audio gains match studioBlendAt. Global zoom/style apply
+// afterward.
 [[nodiscard]] QStringList
 studioCompositionArguments(const StudioProject &project,
                            const QString &destination, QString &error);

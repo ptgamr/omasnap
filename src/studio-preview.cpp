@@ -19,40 +19,55 @@ StudioPreview::StudioPreview(QWidget *parent) : QWidget(parent) {
   setMouseTracking(true);
   setCursor(Qt::CrossCursor);
   setMinimumSize(320, 180);
-  connect(
-      &frameWatcher_, &QFutureWatcher<StudioVideoFrame>::finished, this,
-      [this] {
-        StudioVideoFrame frame = frameWatcher_.result();
-        preparing_ = false;
-        if (preparingGeneration_ == generation_ && !frame.size.isEmpty()) {
-          videoSize_ = rotation_ % 180 ? frame.size.transposed() : frame.size;
-          positionMs_ = frame.positionMs;
-          if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
-            const QImage image(
-                reinterpret_cast<const uchar *>(frame.planes[0].constData()),
-                frame.size.width(), frame.size.height(),
-                static_cast<qsizetype>(frame.textures[0].width()) * 4,
-                QImage::Format_RGBA8888);
-            setFrame(image.copy());
-            preparePendingFrame();
-            return;
+  for (int index = 0; index < 2; ++index)
+    connect(
+        &preparations_[index].watcher,
+        &QFutureWatcher<StudioVideoFrame>::finished, this, [this, index] {
+          auto &slot = preparations_[index];
+          StudioVideoFrame frame = slot.watcher.result();
+          slot.preparing = false;
+          if (slot.preparingGeneration == slot.generation &&
+              !frame.size.isEmpty()) {
+            slot.size =
+                slot.rotation % 180 ? frame.size.transposed() : frame.size;
+            slot.ready = true;
+            if (!composition_) {
+              videoSize_ = slot.size;
+              positionMs_ = frame.positionMs;
+            }
+            if (QGuiApplication::platformName() ==
+                QStringLiteral("offscreen")) {
+              const QImage image(
+                  reinterpret_cast<const uchar *>(frame.planes[0].constData()),
+                  frame.size.width(), frame.size.height(),
+                  static_cast<qsizetype>(frame.textures[0].width()) * 4,
+                  QImage::Format_RGBA8888);
+              slot.image =
+                  slot.rotation == 0
+                      ? image.copy()
+                      : image.transformed(QTransform().rotate(slot.rotation),
+                                          Qt::SmoothTransformation);
+              if (!composition_)
+                frame_ = slot.image;
+            } else {
+              if (!surface_) {
+                surface_ = new StudioVideoSurface(this);
+                surface_->setGeometry(rect());
+                surface_->overlay = [this](QPainter &painter) {
+                  paintOverlay(painter);
+                };
+                surface_->failed = [this](const QString &error) {
+                  emit previewFailed(error);
+                };
+                surface_->show();
+              }
+              surface_->setFrame(index, std::move(frame));
+            }
+            refreshSurface();
+            emit videoFrameReady(index);
           }
-          if (!surface_) {
-            surface_ = new StudioVideoSurface(this);
-            surface_->setGeometry(rect());
-            surface_->overlay = [this](QPainter &painter) {
-              paintOverlay(painter);
-            };
-            surface_->failed = [this](const QString &error) {
-              emit previewFailed(error);
-            };
-            surface_->show();
-          }
-          surface_->setFrame(std::move(frame));
-          refreshSurface();
-        }
-        preparePendingFrame();
-      });
+          preparePendingFrame(index);
+        });
 }
 
 QSize StudioPreview::sizeHint() const { return {960, 540}; }
@@ -60,17 +75,67 @@ QSize StudioPreview::sizeHint() const { return {960, 540}; }
 void StudioPreview::setVideoFrame(const QVideoFrame &frame) {
   if (!frame.isValid())
     return;
-  pendingFrame_ = frame;
-  pendingPosition_.reset();
-  preparePendingFrame();
+  composition_ = false;
+  primary_ = 0;
+  secondary_ = -1;
+  primaryOpacity_ = 1;
+  secondaryOpacity_ = 0;
+  auto &slot = preparations_[0];
+  slot.pending = frame;
+  slot.rotation = rotation_;
+  slot.pendingPosition.reset();
+  preparePendingFrame(0);
 }
 
 void StudioPreview::setVideoFrame(const QVideoFrame &frame, qint64 timelineMs) {
   if (!frame.isValid())
     return;
-  pendingFrame_ = frame;
-  pendingPosition_ = timelineMs;
-  preparePendingFrame();
+  setVideoFrame(frame);
+  // Store the explicit clock with the submitted frame, even when preparation
+  // was started synchronously by the legacy overload.
+  positionMs_ = timelineMs;
+  composition_ = true;
+  refreshSurface();
+}
+
+void StudioPreview::setVideoFrame(int index, const QVideoFrame &frame,
+                                  int rotation) {
+  if (!frame.isValid())
+    return;
+  composition_ = true;
+  auto &slot = preparations_[index];
+  slot.pending = frame;
+  slot.pendingPosition.reset();
+  slot.rotation = rotation;
+  preparePendingFrame(index);
+}
+
+void StudioPreview::setComposition(int primary, int secondary, double first,
+                                   double second, qint64 timelineMs) {
+  composition_ = true;
+  primary_ = primary;
+  secondary_ = secondary;
+  primaryOpacity_ = first;
+  secondaryOpacity_ = second;
+  positionMs_ = timelineMs;
+  refreshSurface();
+}
+
+bool StudioPreview::videoSlotReady(int index) const {
+  return preparations_[index].ready;
+}
+
+void StudioPreview::clearVideoSlot(int index) {
+  auto &slot = preparations_[index];
+  ++slot.generation;
+  slot.pending = {};
+  slot.pendingPosition.reset();
+  slot.ready = false;
+  slot.image = {};
+  slot.size = {};
+  if (surface_)
+    surface_->setFrame(index, {});
+  refreshSurface();
 }
 
 void StudioPreview::setCanvasSize(const QSize &size) {
@@ -79,30 +144,32 @@ void StudioPreview::setCanvasSize(const QSize &size) {
 }
 
 void StudioPreview::clearFrame() {
-  invalidatePendingFrames();
+  for (int index = 0; index < 2; ++index)
+    clearVideoSlot(index);
   frame_ = {};
   videoSize_ = {};
-  if (surface_)
-    surface_->setFrame({});
   refreshSurface();
 }
 
 void StudioPreview::invalidatePendingFrames() {
-  ++generation_;
-  pendingFrame_ = {};
-  pendingPosition_.reset();
+  for (auto &slot : preparations_) {
+    ++slot.generation;
+    slot.pending = {};
+    slot.pendingPosition.reset();
+  }
 }
 
-void StudioPreview::preparePendingFrame() {
-  if (preparing_ || !pendingFrame_.isValid())
+void StudioPreview::preparePendingFrame(int index) {
+  auto &slot = preparations_[index];
+  if (slot.preparing || !slot.pending.isValid())
     return;
-  QVideoFrame frame = std::exchange(pendingFrame_, {});
-  const auto position = std::exchange(pendingPosition_, {});
-  preparingGeneration_ = generation_;
-  preparing_ = true;
+  QVideoFrame frame = std::exchange(slot.pending, {});
+  const auto position = std::exchange(slot.pendingPosition, {});
+  slot.preparingGeneration = slot.generation;
+  slot.preparing = true;
   const bool offscreen =
       QGuiApplication::platformName() == QStringLiteral("offscreen");
-  frameWatcher_.setFuture(QtConcurrent::run([frame, offscreen, position] {
+  slot.watcher.setFuture(QtConcurrent::run([frame, offscreen, position] {
     auto prepared = prepareStudioVideoFrame(frame, offscreen);
     if (position)
       prepared.positionMs = *position;
@@ -126,7 +193,13 @@ void StudioPreview::setChrome(const StudioChrome &chrome) {
 }
 
 void StudioPreview::refreshSurface() {
+  if (composition_)
+    videoSize_ = preparations_[primary_].size;
   if (surface_) {
+    surface_->primary = primary_;
+    surface_->secondary = secondary_;
+    surface_->primaryOpacity = primaryOpacity_;
+    surface_->secondaryOpacity = secondaryOpacity_;
     surface_->drawn = frameRect();
     surface_->canvas = canvasRect();
     surface_->background = style_.color();
@@ -134,17 +207,20 @@ void StudioPreview::refreshSurface() {
     surface_->radius = style_.radius * canvasRect().height() / 1080.0;
     surface_->source =
         track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
-    surface_->rotation = rotation_;
-    QSizeF fitted = videoSize_;
-    if (canvasSize_.isValid() && !fitted.isEmpty())
-      fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
-    surface_->fit =
-        canvasSize_.isValid() && !fitted.isEmpty()
-            ? QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
-                     (1 - fitted.height() / canvasSize_.height()) / 2,
-                     fitted.width() / canvasSize_.width(),
-                     fitted.height() / canvasSize_.height())
-            : QRectF(0, 0, 1, 1);
+    for (int index = 0; index < 2; ++index) {
+      surface_->rotations[index] =
+          composition_ ? preparations_[index].rotation : rotation_;
+      QSizeF fitted = preparations_[index].size;
+      if (canvasSize_.isValid() && !fitted.isEmpty())
+        fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
+      surface_->fits[index] =
+          canvasSize_.isValid() && !fitted.isEmpty()
+              ? QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
+                       (1 - fitted.height() / canvasSize_.height()) / 2,
+                       fitted.width() / canvasSize_.width(),
+                       fitted.height() / canvasSize_.height())
+              : QRectF(0, 0, 1, 1);
+    }
     surface_->update();
   }
   update();
@@ -158,6 +234,7 @@ void StudioPreview::resizeEvent(QResizeEvent *event) {
 }
 
 void StudioPreview::setFrame(const QImage &frame) {
+  composition_ = false;
   // QVideoFrame::toImage() hands back the coded picture and drops the
   // display rotation, while ffmpeg applies it before the zoom filter. Undo
   // that difference here, or a portrait phone recording previews sideways
@@ -277,9 +354,6 @@ void StudioPreview::paintEvent(QPaintEvent *) {
 
   const QRectF window =
       track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
-  const QRectF source(window.x() * frame_.width(), window.y() * frame_.height(),
-                      window.width() * frame_.width(),
-                      window.height() * frame_.height());
   painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
   painter.fillRect(canvasRect(), style_.color());
   painter.save();
@@ -289,26 +363,50 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     clip.addRoundedRect(drawn, radius, radius);
     painter.setClipPath(clip);
   }
-  if (canvasSize_.isValid()) {
-    // Match export: source is fitted into a black canonical canvas before
-    // the global camera is evaluated. No full-size intermediate allocation.
-    painter.setClipRect(drawn, Qt::IntersectClip);
-    painter.fillRect(drawn, Qt::black);
-    QSizeF fitted = frame_.size();
-    fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
-    const QRectF fit((canvasSize_.width() - fitted.width()) / 2,
-                     (canvasSize_.height() - fitted.height()) / 2,
-                     fitted.width(), fitted.height());
-    const QRectF target(
-        drawn.left() + (fit.x() / canvasSize_.width() - window.x()) /
-                           window.width() * drawn.width(),
-        drawn.top() + (fit.y() / canvasSize_.height() - window.y()) /
-                          window.height() * drawn.height(),
-        fit.width() / canvasSize_.width() / window.width() * drawn.width(),
-        fit.height() / canvasSize_.height() / window.height() * drawn.height());
-    painter.drawImage(target, frame_);
+  painter.setClipRect(drawn, Qt::IntersectClip);
+  painter.fillRect(drawn, Qt::black);
+  if (composition_ &&
+      (!videoSlotReady(primary_) || (secondary_ >= 0 && secondaryOpacity_ > 0 &&
+                                     !videoSlotReady(secondary_)))) {
+    painter.restore();
+    return;
+  }
+  const auto draw = [&](const QImage &image, double opacity) {
+    if (image.isNull())
+      return;
+    painter.setOpacity(opacity);
+    if (canvasSize_.isValid()) {
+      // Match export: source is fitted into a black canonical canvas before
+      // the global camera is evaluated. No full-size intermediate allocation.
+      QSizeF fitted = image.size();
+      fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
+      const QRectF fit((canvasSize_.width() - fitted.width()) / 2,
+                       (canvasSize_.height() - fitted.height()) / 2,
+                       fitted.width(), fitted.height());
+      const QRectF target(
+          drawn.left() + (fit.x() / canvasSize_.width() - window.x()) /
+                             window.width() * drawn.width(),
+          drawn.top() + (fit.y() / canvasSize_.height() - window.y()) /
+                            window.height() * drawn.height(),
+          fit.width() / canvasSize_.width() / window.width() * drawn.width(),
+          fit.height() / canvasSize_.height() / window.height() *
+              drawn.height());
+      painter.drawImage(target, image);
+    } else {
+      const QRectF source(
+          window.x() * image.width(), window.y() * image.height(),
+          window.width() * image.width(), window.height() * image.height());
+      painter.drawImage(drawn, image, source);
+    }
+  };
+  if (composition_) {
+    draw(preparations_[primary_].image, primaryOpacity_);
+    if (secondary_ >= 0) {
+      painter.setCompositionMode(QPainter::CompositionMode_Plus);
+      draw(preparations_[secondary_].image, secondaryOpacity_);
+    }
   } else {
-    painter.drawImage(drawn, frame_, source);
+    draw(frame_, 1);
   }
   painter.restore();
   paintOverlay(painter);

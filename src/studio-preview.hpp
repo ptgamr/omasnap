@@ -16,10 +16,10 @@
 /**
  * Paints the part of the current frame the zoom model says is on camera.
  *
- * Video frames are prepared on a worker with one in-flight and one newest
- * pending frame, then uploaded as planes to a GPU surface. The shader applies
- * color conversion, rotation, zoomSourceRect(), and canvas styling. Static
- * images and the offscreen test platform use the matching QPainter path.
+ * Each of two decoder slots prepares frames with one in-flight worker and one
+ * newest pending frame, then uploads planes to a GPU surface. The shader
+ * applies color conversion, rotation, zoomSourceRect(), and canvas styling.
+ * Static images and the offscreen test platform use the matching QPainter path.
  *
  * Clicking picks a point on the *source*, not on the visible window, so
  * clicking while already zoomed in aims at the thing under the pointer
@@ -34,6 +34,12 @@ public:
   void setVideoFrame(const QVideoFrame &frame);
   /** Timestamp is composition time, independent of source-file PTS. */
   void setVideoFrame(const QVideoFrame &frame, qint64 timelineMs);
+  /** Physical decoder slots retain independently prepared frames. */
+  void setVideoFrame(int slot, const QVideoFrame &frame, int rotation);
+  void clearVideoSlot(int slot);
+  [[nodiscard]] bool videoSlotReady(int slot) const;
+  void setComposition(int primary, int secondary, double primaryOpacity,
+                      double secondaryOpacity, qint64 timelineMs);
   void setCanvasSize(const QSize &size);
   void clearFrame();
   void invalidatePendingFrames();
@@ -61,6 +67,7 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
 
 signals:
+  void videoFrameReady(int slot);
   void previewFailed(const QString &error);
   /** A point on the source frame, normalized, that the user aimed at. */
   void targetPicked(const QPointF &target);
@@ -79,20 +86,32 @@ private:
   /** Widget point to a normalized point on the source frame, or nothing
    *  when the click missed the frame. */
   [[nodiscard]] std::optional<QPointF> sourceAt(const QPointF &position) const;
-  void preparePendingFrame();
+  void preparePendingFrame(int slot);
   void refreshSurface();
   void paintOverlay(QPainter &painter) const;
 
   QImage frame_;
   QSize videoSize_;
   StudioVideoSurface *surface_ = nullptr;
-  QFutureWatcher<StudioVideoFrame> frameWatcher_;
-  QVideoFrame pendingFrame_;
-  std::optional<qint64> pendingPosition_;
+  struct Preparation {
+    QFutureWatcher<StudioVideoFrame> watcher;
+    QVideoFrame pending;
+    std::optional<qint64> pendingPosition;
+    QSize size;
+    QImage image;
+    int rotation = 0;
+    quint64 generation = 0;
+    quint64 preparingGeneration = 0;
+    bool preparing = false;
+    bool ready = false;
+  };
+  std::array<Preparation, 2> preparations_;
   QSize canvasSize_;
-  quint64 generation_ = 0;
-  quint64 preparingGeneration_ = 0;
-  bool preparing_ = false;
+  int primary_ = 0;
+  int secondary_ = -1;
+  double primaryOpacity_ = 1;
+  double secondaryOpacity_ = 0;
+  bool composition_ = false;
   int canvasInset_ = 0;
   StudioStyle style_;
   StudioChrome chrome_;

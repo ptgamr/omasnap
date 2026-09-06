@@ -37,14 +37,14 @@ StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
                          index == active_ &&
                          state_ == QMediaPlayer::PlayingState) {
                 if (const auto *span = spanFor(current.clipId))
-                  setPosition(span->endMs);
+                  finishSpan(*span);
               }
             });
     connect(slot.player, &QMediaPlayer::errorOccurred, this,
             [this, index](QMediaPlayer::Error, const QString &error) {
               slots_[index].error = error;
               slots_[index].loaded = false;
-              if (index == active_) {
+              if (contributing(index)) {
                 pause();
                 emit errorOccurred(error);
               }
@@ -53,6 +53,8 @@ StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
   connect(audio_, &QAudioOutput::volumeChanged, this,
           [this] { updateAudio(); });
   connect(audio_, &QAudioOutput::mutedChanged, this, [this] { updateAudio(); });
+  connect(preview_, &StudioPreview::videoFrameReady, this,
+          [this](int) { synchronize(); });
   timer_.setInterval(10);
   timer_.setTimerType(Qt::PreciseTimer);
   connect(&timer_, &QTimer::timeout, this, &StudioPlayback::tick);
@@ -77,8 +79,9 @@ void StudioPlayback::setProject(const StudioProject &project,
     emit errorOccurred(error);
     return;
   }
-  const bool mediaChanged =
-      project_.clips != project.clips || project_.assets != project.assets;
+  const bool mediaChanged = project_.clips != project.clips ||
+                            project_.assets != project.assets ||
+                            project_.transitions != project.transitions;
   project_ = project;
   spans_ = studioComposition(project_);
   preview_->setTrack(&project_.zoom);
@@ -126,6 +129,8 @@ void StudioPlayback::loadSlot(int index, const StudioFrame &frame) {
   slot.error.clear();
   slot.clipId = frame.span.clipId;
   slot.frame = {};
+  slot.priming = false;
+  preview_->clearVideoSlot(index);
   slot.seekMs = frame.sourceMs;
   slot.awaitingSeek = true;
   slot.player->setPlaybackRate(frame.span.speed * rate_);
@@ -147,6 +152,7 @@ void StudioPlayback::seekSlot(int index, qint64 sourceMs) {
   slot.seekMs = sourceMs;
   slot.awaitingSeek = true;
   slot.frame = {};
+  preview_->clearVideoSlot(index);
   if (slot.loaded) {
     slot.player->setPosition(sourceMs);
     slot.priming = true;
@@ -157,6 +163,7 @@ void StudioPlayback::seekSlot(int index, qint64 sourceMs) {
 
 void StudioPlayback::setPosition(qint64 milliseconds) {
   frameClock_.invalidate();
+  waiting_ = state_ == QMediaPlayer::PlayingState;
   position_ = qBound<qint64>(0, milliseconds, duration());
   if (position_ == duration() && state_ == QMediaPlayer::PlayingState)
     pause();
@@ -184,7 +191,15 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
   } else {
     seekSlot(active_, frame->sourceMs);
   }
-  preview_->setPosition(position_);
+  const auto blend = studioBlendAt(project_, qMin(position_, duration() - 1));
+  if (blend) {
+    const int other = 1 - active_;
+    if (slots_[other].clipId != blend->incoming.span.clipId)
+      loadSlot(other, blend->incoming);
+    else
+      seekSlot(other, blend->incoming.sourceMs);
+  }
+  refreshComposition();
   if (!slots_[active_].error.isEmpty()) {
     pause();
     emit errorOccurred(slots_[active_].error);
@@ -192,20 +207,26 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
   updateAudio();
   if (slots_[active_].frame.isValid())
     present(active_, slots_[active_].frame, true);
-  if (state_ == QMediaPlayer::PlayingState && slots_[active_].loaded)
-    slots_[active_].player->play();
   emit positionChanged(position_);
   preload();
+  synchronize();
+}
+
+const StudioSpan *StudioPlayback::nextSpan() const {
+  for (qsizetype i = 0; i + 1 < spans_.size(); ++i)
+    if (spans_[i].clipId == slots_[active_].clipId)
+      return &spans_[i + 1];
+  return nullptr;
 }
 
 void StudioPlayback::preload() {
   const auto *span = spanFor(slots_[active_].clipId);
   if (!span)
     return;
-  const auto next = studioFrameAt(project_, span->endMs);
+  const auto *next = nextSpan();
   const int other = 1 - active_;
-  if (next && slots_[other].clipId != next->span.clipId)
-    loadSlot(other, *next);
+  if (next && slots_[other].clipId != next->clipId)
+    loadSlot(other, StudioFrame{*next, next->inMs});
   updateAudio();
 }
 
@@ -219,7 +240,8 @@ void StudioPlayback::present(int index, const QVideoFrame &frame, bool cached) {
   // the first requested frame, not a later buffered frame, for paused seeks
   // and incoming preloads; otherwise a cut can skip its opening frames.
   if (!cached && !slot.awaitingSeek && slot.frame.isValid() &&
-      (index != active_ || state_ != QMediaPlayer::PlayingState))
+      (!contributing(index) || state_ != QMediaPlayer::PlayingState ||
+       waiting_))
     return;
   const auto *span = spanFor(slot.clipId);
   if (!span)
@@ -237,39 +259,137 @@ void StudioPlayback::present(int index, const QVideoFrame &frame, bool cached) {
   slot.frame = frame;
   if (slot.priming) {
     slot.priming = false;
-    if (index != active_ || state_ != QMediaPlayer::PlayingState)
+    if (!contributing(index) || state_ != QMediaPlayer::PlayingState ||
+        waiting_)
       slot.player->pause();
   }
+  const auto *asset = studioAsset(project_, span->assetId);
+  preview_->setVideoFrame(index, frame, asset ? asset->source.rotation : 0);
   if (index != active_)
     return;
   const qint64 timeline =
       span->startMs +
       qRound64(static_cast<double>(qMax(span->inMs, sourceMs) - span->inMs) /
                span->speed);
-  preview_->setVideoFrame(frame, timeline);
-  if (state_ == QMediaPlayer::PlayingState) {
-    position_ = qBound(span->startMs, timeline, span->endMs - 1);
+  if (state_ == QMediaPlayer::PlayingState && !waiting_) {
+    qint64 target = qBound(span->startMs, timeline, span->endMs - 1);
+    if (const auto *next = nextSpan(); next && position_ < next->startMs)
+      target = qMin(target, next->startMs);
+    position_ = qMax(position_, target);
     frameClockPosition_ = position_;
     frameClock_.start();
     emit positionChanged(position_);
   }
+  refreshComposition();
 }
 
 void StudioPlayback::tick() {
   if (state_ != QMediaPlayer::PlayingState)
     return;
+  if (waiting_) {
+    synchronize();
+    return;
+  }
   const auto &slot = slots_[active_];
   const auto *span = spanFor(slot.clipId);
   // QMediaPlayer positionChanged is deliberately coarse. A decoded frame's
   // presentation clock owns the cut, so audio cannot run a notification
   // interval beyond a removed passage before the next slot takes over.
-  if (span && slot.loaded && !slot.awaitingSeek &&
-      ((frameClock_.isValid() &&
-        frameClockPosition_ +
-                qRound64(static_cast<double>(frameClock_.elapsed()) * rate_) >=
-            span->endMs) ||
-       slot.player->position() >= span->outMs))
-    setPosition(span->endMs);
+  if (!span || !slot.loaded || slot.awaitingSeek || !frameClock_.isValid())
+    return;
+  qint64 target = frameClockPosition_ +
+                  qRound64(static_cast<double>(frameClock_.elapsed()) * rate_);
+  const auto *next = nextSpan();
+  if (next && position_ < next->startMs && target >= next->startMs &&
+      next->startMs < span->endMs) {
+    position_ = next->startMs;
+    frameClock_.invalidate();
+    refreshComposition();
+    synchronize();
+    emit positionChanged(position_);
+    return;
+  }
+  if (target >= span->endMs) {
+    finishSpan(*span);
+    return;
+  }
+  position_ = qMax(position_, target);
+  refreshComposition();
+  synchronize();
+  emit positionChanged(position_);
+}
+
+void StudioPlayback::finishSpan(const StudioSpan &span) {
+  const auto *next = nextSpan();
+  if (next && next->startMs < span.endMs &&
+      slots_[1 - active_].clipId == next->clipId &&
+      preview_->videoSlotReady(1 - active_)) {
+    const qint64 boundary = span.endMs;
+    slots_[active_].player->pause();
+    active_ = 1 - active_;
+    position_ = boundary;
+    frameClockPosition_ = position_;
+    frameClock_.restart();
+    emit activeClipChanged(slots_[active_].clipId);
+    refreshComposition();
+    preload();
+    synchronize();
+    emit positionChanged(position_);
+  } else {
+    setPosition(span.endMs);
+  }
+}
+
+bool StudioPlayback::contributing(int index) const {
+  if (index == active_)
+    return true;
+  const auto blend = studioBlendAt(project_, position_);
+  return blend && slots_[index].clipId == blend->incoming.span.clipId;
+}
+
+void StudioPlayback::refreshComposition() {
+  const auto blend = studioBlendAt(project_, position_);
+  preview_->setComposition(active_, blend ? 1 - active_ : -1,
+                           blend ? blend->outgoingOpacity : 1,
+                           blend ? blend->incomingOpacity : 0, position_);
+  updateAudio();
+}
+
+void StudioPlayback::synchronize() {
+  if (state_ != QMediaPlayer::PlayingState)
+    return;
+  for (int i = 0; i < 2; ++i) {
+    if (contributing(i) && !slots_[i].error.isEmpty()) {
+      const QString error = slots_[i].error;
+      pause();
+      emit errorOccurred(error);
+      return;
+    }
+  }
+  const bool wasWaiting = waiting_;
+  waiting_ = false;
+  for (int i = 0; i < 2; ++i)
+    if (contributing(i) &&
+        (slots_[i].awaitingSeek || !preview_->videoSlotReady(i)))
+      waiting_ = true;
+  if (waiting_)
+    frameClock_.invalidate();
+  else if (wasWaiting || !frameClock_.isValid()) {
+    frameClockPosition_ = position_;
+    frameClock_.restart();
+  }
+  updateAudio();
+  for (int i = 0; i < 2; ++i) {
+    auto &slot = slots_[i];
+    if (!slot.loaded || slot.priming)
+      continue;
+    if (!waiting_ && contributing(i)) {
+      if (slot.player->playbackState() != QMediaPlayer::PlayingState)
+        slot.player->play();
+    } else if (slot.player->playbackState() == QMediaPlayer::PlayingState) {
+      slot.player->pause();
+    }
+  }
 }
 
 void StudioPlayback::setState(QMediaPlayer::PlaybackState state) {
@@ -290,8 +410,7 @@ void StudioPlayback::play() {
   if (position_ >= duration())
     setPosition(0);
   setState(QMediaPlayer::PlayingState);
-  if (slots_[active_].loaded)
-    slots_[active_].player->play();
+  synchronize();
 }
 
 void StudioPlayback::pause() {
@@ -319,9 +438,13 @@ void StudioPlayback::setPlaybackRate(double rate) {
 }
 
 void StudioPlayback::updateAudio() {
+  const auto blend = studioBlendAt(project_, position_);
   for (int i = 0; i < 2; ++i) {
-    slots_[i].audio->setVolume(audio_->volume());
-    slots_[i].audio->setMuted(audio_->isMuted() || i != active_ ||
-                              state_ != QMediaPlayer::PlayingState);
+    const double gain = blend ? (i == active_ ? blend->outgoingAudioGain
+                                              : blend->incomingAudioGain)
+                              : (i == active_ ? 1 : 0);
+    slots_[i].audio->setVolume(audio_->volume() * static_cast<float>(gain));
+    slots_[i].audio->setMuted(audio_->isMuted() || !contributing(i) ||
+                              waiting_ || state_ != QMediaPlayer::PlayingState);
   }
 }

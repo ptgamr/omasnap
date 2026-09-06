@@ -4,6 +4,7 @@
 #include "studio-composition-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
 #include "studio-scenes-ui-smoke.hpp"
+#include "studio-transitions-ui-smoke.hpp"
 #include "studio-playback-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio-preview.hpp"
@@ -726,6 +727,8 @@ bool runStudioInteractionChecks(QString &error) {
   if (!runStudioCutsUiChecks(source, error))
     return false;
   if (!runStudioScenesUiChecks(source, error))
+    return false;
+  if (!runStudioTransitionsUiChecks(source, error))
     return false;
   StudioWindow window(source, nullptr, palettePath);
   window.show();

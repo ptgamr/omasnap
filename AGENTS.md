@@ -108,6 +108,7 @@ change that touches the principle, not just this summary.
 | `src/record.cpp/.hpp` | The recorder process: lock, encoder, indicator, promotion, notification |
 | `src/studio.cpp/.hpp`, `src/studio-main.cpp` | `omasnap-studio`: playback, trim timeline, ffmpeg export. Built without `omasnap-core` on purpose |
 | `src/studio-scenes.cpp` | Studio scene import, drop handling, arrangement, and per-scene inspector controls |
+| `src/studio-transitions.cpp` | Scene-pair transition inspector and duration editing |
 | `src/studio-project.cpp/.hpp` | Non-destructive assets/clip instances, shared composition time map, bounded atomic project persistence, session history |
 | `src/studio-playback.cpp/.hpp`, `src/studio-composition.cpp/.hpp` | Bounded source decoders and timestamp-aware FFmpeg composition export; see `docs/studio-project.md` |
 | `src/icons.cpp/.hpp` | Vector icon renderer for toolbar and pin controls |

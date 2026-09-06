@@ -65,7 +65,8 @@ double audioEnergy(const QByteArray &pcm, double at) {
 // Inspect every output frame and audio sample, not just two representative
 // timestamps: a removed frame or brief audio burst at a cut is still a leak.
 bool removedPassageIsAbsent(const QString &ffmpeg, const QString &path,
-                            int expectedFrames, QString &error) {
+                            int expectedFrames, QString &error,
+                            bool blends = false) {
   QByteArray bytes;
   if (!run(ffmpeg,
            {"-v", "error", "-i", path, "-an", "-vf", "scale=1:1", "-pix_fmt",
@@ -82,7 +83,8 @@ bool removedPassageIsAbsent(const QString &ffmpeg, const QString &path,
     const auto r = static_cast<unsigned char>(bytes[frame * 3]);
     const auto g = static_cast<unsigned char>(bytes[frame * 3 + 1]);
     const auto b = static_cast<unsigned char>(bytes[frame * 3 + 2]);
-    if (g > 20 || (frame < expectedFrames / 2 ? r < 200 : b < 200)) {
+    if (g > 20 ||
+        (!blends && (frame < expectedFrames / 2 ? r < 200 : b < 200))) {
       error =
           QStringLiteral("Deleted picture or wrong scene at output frame %1.")
               .arg(frame);
@@ -165,6 +167,16 @@ bool runCutExportChecks(const QString &ffmpeg, const QTemporaryDir &scratch,
   if (!exportProject(ffmpeg, project, outputPath, error) ||
       !removedPassageIsAbsent(ffmpeg, outputPath, 60, error))
     return false;
+  // Transition handles are strictly inside surviving trimmed ranges. Even
+  // their overlap must never bring back the excluded green picture/tone.
+  StudioProject blendedCut = project;
+  for (const auto kind :
+       {StudioTransitionKind::Crossfade, StudioTransitionKind::FadeBlack}) {
+    if (!studioSetTransition(blendedCut, 1, 99, kind, 300, error) ||
+        !exportProject(ffmpeg, blendedCut, outputPath, error) ||
+        !removedPassageIsAbsent(ffmpeg, outputPath, 51, error, true))
+      return false;
+  }
   if (!history.undo() || history.current() != before ||
       !exportProject(ffmpeg, history.current().project, outputPath, error)) {
     if (error.isEmpty())
@@ -292,6 +304,124 @@ bool runSceneExportChecks(const QString &ffmpeg,
           audioEnergy(audio, 2.5) < 0.0001 && audioEnergy(audio, 3.25) > 0.01,
       "reopened scene audio order or duration differed");
 }
+
+bool runTransitionExportChecks(const QString &ffmpeg,
+                               const QVector<StudioAsset> &assets,
+                               const QTemporaryDir &scratch, QString &error) {
+  const auto checked = [&error](bool ok, const char *message) {
+    if (!ok && error.isEmpty())
+      error = QString::fromLatin1(message);
+    return ok;
+  };
+  StudioProject project;
+  project.canvas = {320, 180};
+  project.assets = assets;
+  project.clips = {{1, 1, 0, 2000, 1}, {2, 2, 0, 2000, 1}};
+  const QString path = scratch.filePath("transition.mp4");
+  for (const auto kind :
+       {StudioTransitionKind::Crossfade, StudioTransitionKind::FadeBlack}) {
+    if (!checked(studioSetTransition(project, 1, 2, kind, 800, error),
+                 "transition setup failed") ||
+        !exportProject(ffmpeg, project, path, error))
+      return false;
+    const auto spans = studioComposition(project);
+    const auto *transition = studioTransition(project, 1, 2);
+    for (int quarter = 0; quarter <= 4; ++quarter) {
+      const qint64 at = spans[1].startMs + transition->durationMs * quarter / 4;
+      const auto blend = studioBlendAt(project, at);
+      const double outgoing = blend ? blend->outgoingOpacity : 0;
+      const double incoming = blend ? blend->incomingOpacity : 1;
+      const auto frame = sample(ffmpeg, path, at / 1000.0, error);
+      if (!checked(!frame.isNull(), "transition frame was not decoded"))
+        return false;
+      const auto seen = frame.pixelColor(160, 90);
+      if (std::abs(seen.red() - qRound(254 * outgoing)) > 10 ||
+          std::abs(seen.blue() - qRound(254 * incoming)) > 10 ||
+          seen.green() > 10) {
+        error = QStringLiteral("Transition %1 quarter %2 differs from model: "
+                               "RGB %3,%4,%5 vs weights %6,%7")
+                    .arg(static_cast<int>(kind))
+                    .arg(quarter)
+                    .arg(seen.red())
+                    .arg(seen.green())
+                    .arg(seen.blue())
+                    .arg(outgoing)
+                    .arg(incoming);
+        return false;
+      }
+    }
+    QByteArray audio;
+    if (!run(ffmpeg,
+             {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000",
+              "-f", "s16le", "-"},
+             audio, error))
+      return false;
+    const double baseline = audioEnergy(audio, 0.3);
+    for (int quarter = 1; quarter <= 3; ++quarter) {
+      const double at =
+          (spans[1].startMs + transition->durationMs * quarter / 4) / 1000.0;
+      const double ratio = audioEnergy(audio, at - 0.05) / baseline;
+      if (!checked(std::abs(ratio - (1 - quarter / 4.0)) < 0.05,
+                   "transition audio gain does not match linear model"))
+        return false;
+    }
+    if (!checked(std::abs(audio.size() / 96000.0 -
+                          studioDuration(project) / 1000.0) < 0.04 &&
+                     audioEnergy(audio, 2.5) < 0.0001,
+                 "transition audio length or silent incoming clip differed"))
+      return false;
+  }
+  // Alternate transitions and hard cuts, with deliberately non-frame-aligned
+  // source durations and rational output FPS. Absolute endpoints own joins.
+  project.transitions.clear();
+  project.fpsNumerator = 30000;
+  project.fpsDenominator = 1001;
+  project.clips = {{1, 1, 0, 1333, 1},
+                   {2, 2, 0, 1777, 1},
+                   {3, 3, 0, 1555, 1},
+                   {4, 1, 0, 1111, 1}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::Crossfade, 400,
+                           error) ||
+      !studioSetTransition(project, 3, 4, StudioTransitionKind::FadeBlack, 400,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto spans = studioComposition(project);
+  // The hard cut between blue and green must not inherit the previous
+  // overlap's frame-rounding error, or the third color arrives late.
+  const auto before =
+      sample(ffmpeg, path, (spans[2].startMs - 80) / 1000.0, error);
+  const auto after =
+      sample(ffmpeg, path, (spans[2].startMs + 80) / 1000.0, error);
+  if (!checked(!before.isNull() && !after.isNull() &&
+                   before.pixelColor(160, 90).blue() > 200 &&
+                   after.pixelColor(160, 90).green() > 90,
+               "hard cut amid transitions shifted to the wrong time"))
+    return false;
+  QByteArray audio;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           audio, error) ||
+      !checked(std::abs(audio.size() / 96000.0 -
+                        studioDuration(project) / 1000.0) < 0.04,
+               "mixed transition/cut composition duration drifted"))
+    return false;
+  QByteArray frames;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-an", "-vf", "scale=1:1", "-pix_fmt",
+            "rgb24", "-f", "rawvideo", "-"},
+           frames, error))
+    return false;
+  const qint64 expected = qCeil(studioDuration(project) / 1000.0 *
+                                project.fpsNumerator / project.fpsDenominator);
+  if (!checked(std::abs(frames.size() / 3 - expected) <= 1 &&
+                   frames.size() >= 3 &&
+                   static_cast<unsigned char>(frames[frames.size() - 3]) > 200,
+               "mixed transition video frame count or ending picture differed"))
+    return false;
+  return true;
+}
 } // namespace
 
 bool runStudioCompositionChecks(QString &error) {
@@ -359,6 +489,8 @@ bool runStudioCompositionChecks(QString &error) {
     project.assets.push_back({static_cast<quint64>(i + 1), path, source});
   }
   if (!runSceneExportChecks(ffmpeg, project.assets, scratch, error))
+    return false;
+  if (!runTransitionExportChecks(ffmpeg, project.assets, scratch, error))
     return false;
   project.clips = {{1, 1, 500, 1500, 2},
                    {2, 2, 500, 1500, 1},
@@ -480,6 +612,26 @@ bool runStudioCompositionChecks(QString &error) {
                    vfrGreen.pixelColor(160, 90).green() > 90,
                "VFR timestamp normalization or speed mapping differed"))
     return false;
+  project.clips = {{1, 1, 0, 2000, 1}, {2, 1, 0, 2000, 2}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::Crossfade, 333,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto spans = studioComposition(project);
+  const auto *transition = studioTransition(project, 1, 2);
+  const qint64 midpoint = spans[1].startMs + transition->durationMs / 2;
+  const auto weights = studioBlendAt(project, midpoint);
+  const auto blended = sample(ffmpeg, path, midpoint / 1000.0, error);
+  if (!require(
+          weights && !blended.isNull() &&
+              std::abs(blended.pixelColor(160, 90).red() -
+                       qRound(254 * weights->incomingOpacity)) < 12 &&
+              std::abs(blended.pixelColor(160, 90).green() -
+                       qRound(128 * weights->outgoingOpacity)) < 12,
+          "retimed VFR transition did not sample both sources at project time"))
+    return false;
+  project.transitions.clear();
+  project.clips = {{1, 1, 0, 2000, 2}};
   for (quint64 id = 2; id <= 65; ++id)
     project.clips.push_back({id, 1, 0, 2000, 1});
   if (!require(studioCompositionArguments(project, path, error).isEmpty() &&

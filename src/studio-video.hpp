@@ -31,6 +31,13 @@ public:
   explicit StudioVideoSurface(QWidget *parent);
   ~StudioVideoSurface() override;
   void setFrame(StudioVideoFrame frame);
+  void setFrame(int slot, StudioVideoFrame frame);
+  int primary = 0;
+  int secondary = -1;
+  double primaryOpacity = 1;
+  double secondaryOpacity = 0;
+  std::array<QRectF, 2> fits{QRectF(0, 0, 1, 1), QRectF(0, 0, 1, 1)};
+  std::array<int, 2> rotations{};
   QRectF drawn;
   QRectF canvas;
   QColor background;
@@ -49,10 +56,15 @@ protected:
 
 private:
   void releaseResources();
-  StudioVideoFrame frame_;
+  void drawFrame(int slot, double opacity, bool additive);
+  struct TextureBank {
+    StudioVideoFrame frame;
+    std::array<GLuint, 3> textures{};
+    std::array<QSize, 3> allocated{};
+    int allocatedLayout = -1;
+    bool dirty = false;
+  };
+  std::array<TextureBank, 2> banks_;
+  bool multiFrame_ = false;
   QOpenGLShaderProgram program_;
-  std::array<GLuint, 3> textures_{};
-  std::array<QSize, 3> allocated_{};
-  int allocatedLayout_ = -1;
-  bool dirty_ = false;
 };

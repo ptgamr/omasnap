@@ -44,7 +44,11 @@ StudioVideoFrame prepareStudioVideoFrame(QVideoFrame frame, bool forceRgba) {
   frame.unmap();
   float kr = 0.2126F;
   float kb = 0.0722F;
-  if (format.colorSpace() == QVideoFrameFormat::ColorSpace_BT601) {
+  // Match FFmpeg's unspecified-YUV conversion. Treating untagged SD media as
+  // BT.709 dulls green substantially and makes preview blends disagree with
+  // export. Explicit BT.709 recordings retain their declared coefficients.
+  if (format.colorSpace() == QVideoFrameFormat::ColorSpace_BT601 ||
+      format.colorSpace() == QVideoFrameFormat::ColorSpace_Undefined) {
     kr = 0.299F;
     kb = 0.114F;
   } else if (format.colorSpace() == QVideoFrameFormat::ColorSpace_BT2020) {
@@ -81,17 +85,29 @@ void StudioVideoSurface::releaseResources() {
   disconnect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
              &StudioVideoSurface::releaseResources);
   makeCurrent();
-  glDeleteTextures(3, textures_.data());
-  textures_ = {};
-  allocated_ = {};
-  allocatedLayout_ = -1;
+  for (auto &bank : banks_) {
+    glDeleteTextures(3, bank.textures.data());
+    bank.textures = {};
+    bank.allocated = {};
+    bank.allocatedLayout = -1;
+    bank.dirty = true;
+  }
   program_.removeAllShaders();
   doneCurrent();
 }
 
 void StudioVideoSurface::setFrame(StudioVideoFrame frame) {
-  frame_ = std::move(frame);
-  dirty_ = true;
+  primary = 0;
+  secondary = -1;
+  primaryOpacity = 1;
+  setFrame(0, std::move(frame));
+  multiFrame_ = false;
+}
+
+void StudioVideoSurface::setFrame(int slot, StudioVideoFrame frame) {
+  multiFrame_ = true;
+  banks_[slot].frame = std::move(frame);
+  banks_[slot].dirty = true;
   update();
 }
 
@@ -99,7 +115,8 @@ void StudioVideoSurface::initializeGL() {
   initializeOpenGLFunctions();
   connect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
           &StudioVideoSurface::releaseResources, Qt::DirectConnection);
-  glGenTextures(3, textures_.data());
+  for (auto &bank : banks_)
+    glGenTextures(3, bank.textures.data());
   const bool vertexOk =
       program_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
     attribute vec2 position;
@@ -125,6 +142,7 @@ void StudioVideoSurface::initializeGL() {
     uniform vec4 coefficients;
     uniform vec4 range;
     uniform int videoLayout;
+    uniform float gain;
     void main() {
       vec4 first = texture2D(plane0, vec2(uv.x * widths.x, uv.y));
       vec2 q = abs(local - 0.5) * cardSize - (cardSize * 0.5 - radius);
@@ -133,15 +151,15 @@ void StudioVideoSurface::initializeGL() {
       if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
         gl_FragColor = vec4(0.0, 0.0, 0.0, alpha); return;
       }
-      if (videoLayout == 0) { gl_FragColor = vec4(first.rgb, first.a * alpha); return; }
+      if (videoLayout == 0) { gl_FragColor = vec4(first.rgb * gain, first.a * alpha); return; }
       vec4 second = texture2D(plane1, vec2(uv.x * widths.y, uv.y));
       float y = (first.r - range.x) * range.y;
       float u = (second.r - range.z) * range.w;
       float v = ((videoLayout == 2 ? second.a :
         texture2D(plane2, vec2(uv.x * widths.z, uv.y)).r) - range.z) * range.w;
-      gl_FragColor = vec4(y + coefficients.x * v,
+      gl_FragColor = vec4(clamp(vec3(y + coefficients.x * v,
         y - coefficients.z * u - coefficients.w * v,
-        y + coefficients.y * u, alpha);
+        y + coefficients.y * u), 0.0, 1.0) * gain, alpha);
     }
   )");
   if (!vertexOk || !fragmentOk || !program_.link()) {
@@ -150,7 +168,8 @@ void StudioVideoSurface::initializeGL() {
                  .arg(program_.log()));
     return;
   }
-  dirty_ = true;
+  for (auto &bank : banks_)
+    bank.dirty = true;
 }
 
 void StudioVideoSurface::paintGL() {
@@ -164,26 +183,47 @@ void StudioVideoSurface::paintGL() {
   glClearColor(background.redF(), background.greenF(), background.blueF(), 1);
   glClear(GL_COLOR_BUFFER_BIT);
   glDisable(GL_SCISSOR_TEST);
-  if (frame_.size.isEmpty() || drawn.isEmpty() || !program_.isLinked() ||
-      !program_.bind())
+  if (banks_[primary].frame.size.isEmpty() ||
+      (secondary >= 0 && secondaryOpacity > 0 &&
+       banks_[secondary].frame.size.isEmpty()) ||
+      drawn.isEmpty() || !program_.isLinked() || !program_.bind())
     return;
+  // Each source is fitted/rotated in canonical coordinates before RGB is
+  // weighted. The first pass establishes the black rounded card; additive
+  // RGB on the second leaves its style background and alpha edge unchanged.
+  drawFrame(primary, primaryOpacity, false);
+  if (secondary >= 0 && !banks_[secondary].frame.size.isEmpty())
+    drawFrame(secondary, secondaryOpacity, true);
+  program_.release();
+  glActiveTexture(GL_TEXTURE0);
+  if (overlay) {
+    QPainter painter(this);
+    overlay(painter);
+  }
+}
+
+void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
+  auto &bank = banks_[slot];
+  const auto &frame_ = bank.frame;
+  const qreal dpr = devicePixelRatioF();
   const int planes = frame_.layout == 0 ? 1 : frame_.layout == 1 ? 3 : 2;
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
   for (int plane = 0; plane < planes; ++plane) {
     glActiveTexture(GL_TEXTURE0 + plane);
-    glBindTexture(GL_TEXTURE_2D, textures_[plane]);
-    if (!dirty_)
+    glBindTexture(GL_TEXTURE_2D, bank.textures[plane]);
+    if (!bank.dirty)
       continue;
     const GLenum format = frame_.layout == 0 ? GL_RGBA
                           : frame_.layout == 2 && plane == 1
                               ? GL_LUMINANCE_ALPHA
                               : GL_LUMINANCE;
     const QSize size = frame_.textures[plane];
-    if (allocated_[plane] != size || allocatedLayout_ != frame_.layout) {
+    if (bank.allocated[plane] != size ||
+        bank.allocatedLayout != frame_.layout) {
       glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(format), size.width(),
                    size.height(), 0, format, GL_UNSIGNED_BYTE,
                    frame_.planes[plane].constData());
-      allocated_[plane] = size;
+      bank.allocated[plane] = size;
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -194,8 +234,9 @@ void StudioVideoSurface::paintGL() {
                       frame_.planes[plane].constData());
     }
   }
-  dirty_ = false;
-  allocatedLayout_ = frame_.layout;
+  bank.dirty = false;
+  bank.allocatedLayout = frame_.layout;
+  program_.setUniformValue("gain", static_cast<float>(opacity));
   program_.setUniformValue("plane0", 0);
   program_.setUniformValue("plane1", 1);
   program_.setUniformValue("plane2", 2);
@@ -216,7 +257,9 @@ void StudioVideoSurface::paintGL() {
                     static_cast<float>(qMax(1, frame_.textures[1].width())),
                 chromaWidth /
                     static_cast<float>(qMax(1, frame_.textures[2].width()))));
-  const auto uv = [this](QPointF p) {
+  const QRectF fit = multiFrame_ ? fits[slot] : this->fit;
+  const int rotation = multiFrame_ ? rotations[slot] : this->rotation;
+  const auto uv = [fit, rotation](QPointF p) {
     p = {(p.x() - fit.x()) / fit.width(), (p.y() - fit.y()) / fit.height()};
     if (rotation == 90)
       return QPointF(p.y(), 1 - p.x());
@@ -246,16 +289,10 @@ void StudioVideoSurface::paintGL() {
   program_.setAttributeArray("texcoord", GL_FLOAT, coordinates.data(), 2);
   program_.setAttributeArray("corner", GL_FLOAT, corners.data(), 2);
   glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glBlendFunc(GL_SRC_ALPHA, additive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   glDisable(GL_BLEND);
   program_.disableAttributeArray("position");
   program_.disableAttributeArray("texcoord");
   program_.disableAttributeArray("corner");
-  program_.release();
-  glActiveTexture(GL_TEXTURE0);
-  if (overlay) {
-    QPainter painter(this);
-    overlay(painter);
-  }
 }

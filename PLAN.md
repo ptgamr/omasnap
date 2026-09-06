@@ -1,6 +1,6 @@
 # Studio parity implementation plan
 
-Status: Quattro foundation approved; implementing 01–04 sequentially with separate validated commits. Later milestones remain planned.
+Status: 01–03 delivered in separate validated commits; 04 core transitions delivered, directional variants pending. Later milestones remain planned.
 Created: 2026-09-06.  
 Omasnap baseline: `21ab6ec` (`feat/record`).
 
@@ -23,8 +23,8 @@ Bettershot code + demos ---------------->  [PART] Workspace, styling, manual zoo
                                                  speed/audio, camera, captions,
                                                  keystroke overlays
 
-Bettershot website claims ------------->  [TODO] Crossfade / fade through black,
-                                                 grading / perspective tilt
+Bettershot website claims ------------->  [DONE] Crossfade / fade through black
+                                          [TODO] Grading / perspective tilt
                                           Not verified in inspected source
 
 Omascreen website + screenshots -------->  [TODO] Moments / Follow / Raw / Paced,
@@ -38,7 +38,7 @@ Omasnap native implementation --------->  [DONE] GPU playback, basic keyboard
                                                  transport, single-source trim,
                                                  edit undo/save, MP4 export
 
-NEXT: 04 Transitions
+NEXT: Finish 04 directional wipes/slides; 05 timeline polish follows
 ```
 
 "Comes from" identifies the behavioral/design reference, **not copied code or
@@ -79,10 +79,10 @@ exists. The larger parity targets remain in the matrix below.
 | Milestone | Target feature | Reference | Status | Landed subset / remaining work |
 |---|---|---|---|---|
 | **00** | **Quattro design foundation** | **Q + U** | **DONE** | `57e3700`; inherited palette/reload/fallback, square mono controls; approved to continue |
-| 01 | Project/composition model | B + U + N | DONE | Assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full and live checks pass |
-| 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | DONE | Explicit range tool, handles, clip/zoom selection, split, delete, exact history; decoded audio/video and UI checks pass |
-| 03 | Import, combine, duplicate, reorder scenes | U | DONE | Atomic multi-file import/drop, markers, reorder/duplicate/source trims, source-anchored zooms, undo and reopen; full/live checks pass |
-| 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | TODO | No scene transitions in current Studio |
+| 01 | Project/composition model | B + U + N | DONE | `b2b87b8`; assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full/live checks pass |
+| 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | DONE | `db6f776`; range tool/handles, clip/zoom selection, split/delete and exact history; decoded audio/video and UI checks pass |
+| 03 | Import, combine, duplicate, reorder scenes | U | DONE | `c4319f3`; atomic multi-file import/drop, markers, reorder/duplicate/source trims, source-anchored zooms, undo/reopen; full/live checks pass |
+| 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | PART | Pair-bound core transitions, inspector/T/badges, GPU/audio blends, undo/schema-2 persistence and matching export pass checks. Directional wipes/slides pending; 4K60 cadence not guaranteed |
 | 05 | Full timeline and keyboard workflow | B + U + N | PART | Transport, range tools, scene shortcuts, thumbnails landed; snapping, timeline zoom, waveforms still needed |
 | 06 | Background/layout inspector parity | B | PART | Colors/padding/corners landed; gradients, wallpaper, aspect, crop, shadows, presets pending |
 | 07 | Timed blur/pixelate/hide masks | B; U + N privacy requirements | TODO | Video masks and mask lane pending; screenshot redaction is not Studio implementation |
@@ -94,7 +94,7 @@ exists. The larger parity targets remain in the matrix below.
 | 13 | Separate camera source and timed bubble | B | TODO | Capture/import, synchronization, and layout controls pending |
 | 14 | Captions and transcript-based cuts | B | TODO | Local transcription decision, caption editing/rendering, and transcript cuts pending |
 | 15 | Opt-in keystroke overlays | B | TODO | Consent-safe capture, editable events, and rendering pending |
-| 16 | Multi-scene export/recovery/performance hardening | N + U; B workflow reference | PART | Basic MP4/save landed; mixed-source export, recovery, cancel/progress and full-project tests pending |
+| 16 | Multi-scene export/recovery/performance hardening | N + U; B workflow reference | PART | Mixed-source MP4, save/relink and composition tests landed in 01–04; wider recovery/output controls and sustained 4K preview cadence still need hardening |
 
 ### How to keep this tracker accurate
 
@@ -136,16 +136,17 @@ conventions. Establish that foundation before adding editing features.
 
 - Region/window/fullscreen recording, pause/stop, and opening a recording in Studio.
 - GPU video preview with bounded worker frame preparation and coalesced scrubbing.
-- One source video, one continuous trim interval, manual zoom cues, and MP4 export.
+- Non-destructive multi-source composition, range cuts/splits, scene arrangement,
+  crossfade/fade-through-black transitions, manual zoom cues, and MP4 export.
 - Thumbnail timeline, transport, and Canvas/Zoom/Clip inspector tabs.
 - Four canvas colors, padding, and rounded corners.
 - Session undo/redo for existing edits and asynchronous sidecar saving.
 - Space transport, frame stepping, five-second seeking, trim/zoom commands,
   save/export commands, and shortcut help.
 
-**Not supported yet:** scene transitions. Importing several scenes, reordering,
-duplicating, and trimming them now use the shared composition model alongside
-range cuts, splits, and selected-clip/zoom deletion.
+**Not supported yet:** directional wipes/slides, timed text/effects, editable
+pointer metadata/automatic zoom, and music mixing. These remain explicit tasks
+below; recording a cursor does not generate automatic tracking or zoom cues.
 
 ## Reference findings and evidence boundaries
 
@@ -323,13 +324,13 @@ the explicit Quattro palette, with a rendered-background regression check.
 
 ### 04 — Scene transitions
 
-- [ ] Keep hard cuts as the default; add Crossfade and Fade through black first.
-- [ ] Attach a transition to a clip boundary with a visible editable duration.
-- [ ] Blend both scenes on the GPU and crossfade their audio appropriately.
+- [x] Keep hard cuts as the default; add Crossfade and Fade through black first.
+- [x] Attach a transition to a clip boundary with a visible editable duration.
+- [x] Blend both scenes on the GPU and crossfade their audio appropriately.
   Preload/decode the incoming scene instead of opening it at the boundary.
-- [ ] Define overlap duration and source-handle rules; clamp or explain short
+- [x] Define overlap duration and source-handle rules; clamp or explain short
   clips, and make timeline duration match export exactly.
-- [ ] Undo adding/removing/changing a transition. Reordering clips must not
+- [x] Undo adding/removing/changing a transition. Reordering clips must not
   silently attach a transition to the wrong pair.
 - [ ] Add directional Wipe/Slide variants only after the first two pass parity tests.
 
@@ -337,6 +338,21 @@ Acceptance: scrub both ways through every transition, pause mid-transition,
 frame-step, and export sample frames/audio. No blank frames, audio bursts, or
 boundary stalls. Hard cuts need only one active scene; blends use a bounded pair,
 not one resident decoder per project clip.
+
+Core delivery: `feat(studio): blend scene transitions in preview and export`.
+Validated with `make check`, live Wayland GPU/keyboard checks, decoded RGB/audio
+quarter-points for both fade types, mixed hard-cut/fade boundaries, VFR/retiming,
+fractional FPS, exact undo/reopen, incoming decoder failure and source-EOF handoff.
+Real 4K recordings were inspected at 1280×820 and 980×680. The timeline clock
+remains real-time, but the measured preview coalesces frames and does not sustain
+locked 4K60; cadence optimization remains in 16. Directional variants remain
+unchecked, so 04 is PART, not full transition parity.
+
+Overlap uses only kept tail/head footage: no hidden handles reveal deleted
+material. Cuts/splits intersecting an active blend are refused with instructions
+to remove that transition first. The inspector reports the frame-snapped/clamped
+duration; arrangement reports removed/shortened pairs. Audio blends the primary
+stream only, with silence for silent scenes; independent mixing belongs to 12.
 
 ### 05 — Timeline usability and keyboard polish
 

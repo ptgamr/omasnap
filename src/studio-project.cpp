@@ -16,6 +16,17 @@ namespace {
 constexpr qint64 maxBytes = 4 * 1024 * 1024LL;
 constexpr qint64 maxDuration = 7 * 24 * 60 * 60 * 1000LL;
 constexpr qsizetype maxItems = 1000;
+bool finishSceneChange(StudioProject &, StudioProject, QString &,
+                       quint64 originalId = 0, quint64 duplicateId = 0);
+qint64 frameSnapped(const StudioProject &p, qint64 requested, bool floor) {
+  if (p.fpsNumerator <= 0 || p.fpsDenominator <= 0 || requested <= 0)
+    return 0;
+  const double frameMs = 1000.0 * p.fpsDenominator / p.fpsNumerator;
+  const double count = static_cast<double>(requested) / frameMs;
+  const auto frames =
+      floor ? static_cast<qint64>(std::floor(count)) : qRound64(count);
+  return qRound64(static_cast<double>(frames) * frameMs);
+}
 qint64 clipDuration(const StudioClip &clip) {
   if (!std::isfinite(clip.speed) || clip.speed < 0.125 || clip.speed > 8 ||
       clip.inMs < 0 || clip.outMs <= clip.inMs || clip.outMs > maxDuration)
@@ -62,6 +73,41 @@ bool unusedClipId(const StudioProject &p, quint64 id) {
     if (clip.id == id)
       return false;
   return true;
+}
+bool intersectsBlend(const StudioProject &p, qint64 from, qint64 to) {
+  const auto spans = studioComposition(p);
+  for (qsizetype i = 1; i < spans.size(); ++i)
+    if (qMax(from, spans[i].startMs) < qMin(to, spans[i - 1].endMs))
+      return true;
+  return false;
+}
+qint64 serialTime(const StudioProject &p, qint64 time) {
+  qint64 serial = 0;
+  for (const auto &span : studioComposition(p)) {
+    if (time >= span.startMs && time < span.endMs)
+      return serial + time - span.startMs;
+    serial += span.endMs - span.startMs;
+  }
+  return serial;
+}
+void rippleZoomAndRange(const StudioProject &before, StudioProject &after,
+                        qint64 from, qint64 to) {
+  after.zoom.cues.clear();
+  for (auto cue : before.zoom.cues) {
+    cue.startMs = studioTimeAfterDelete(cue.startMs, from, to);
+    cue.endMs = studioTimeAfterDelete(cue.endMs, from, to);
+    if (cue.endMs - cue.startMs >= kMinCueMs)
+      after.zoom.cues.push_back(cue);
+  }
+  after.trimInMs = studioTimeAfterDelete(before.trimInMs, from, to);
+  after.trimOutMs = before.trimOutMs < 0
+                        ? -1
+                        : studioTimeAfterDelete(before.trimOutMs, from, to);
+  if (studioDuration(after) == 0 ||
+      (after.trimOutMs >= 0 && after.trimOutMs <= after.trimInMs)) {
+    after.trimInMs = 0;
+    after.trimOutMs = -1;
+  }
 }
 /** Split temporary pieces without allocating identity: discarded middle pieces
  * never need IDs, and only a surviving second occurrence gets a new one. */
@@ -117,18 +163,82 @@ const StudioAsset *studioAsset(const StudioProject &p, quint64 id) {
       return &asset;
   return nullptr;
 }
+const StudioTransition *studioTransition(const StudioProject &p,
+                                         quint64 outgoing, quint64 incoming) {
+  for (const auto &transition : p.transitions)
+    if (transition.outgoingClipId == outgoing &&
+        transition.incomingClipId == incoming)
+      return &transition;
+  return nullptr;
+}
+qint64 studioTransitionMaximum(const StudioProject &p, quint64 outgoing,
+                               quint64 incoming) {
+  for (qsizetype i = 0; i + 1 < p.clips.size(); ++i)
+    if (p.clips[i].id == outgoing && p.clips[i + 1].id == incoming)
+      return frameSnapped(p,
+                          qMax<qint64>(0, (qMin(clipDuration(p.clips[i]),
+                                                clipDuration(p.clips[i + 1])) -
+                                           250) /
+                                              2),
+                          true);
+  return 0;
+}
 QVector<StudioSpan> studioComposition(const StudioProject &p) {
   QVector<StudioSpan> spans;
+  QHash<quint64, const StudioTransition *> outgoingTransitions;
+  for (const auto &transition : p.transitions)
+    outgoingTransitions.insert(transition.outgoingClipId, &transition);
   qint64 position = 0;
   for (const auto &clip : p.clips) {
+    if (!spans.isEmpty()) {
+      const auto *transition =
+          outgoingTransitions.value(spans.back().clipId, nullptr);
+      if (transition && transition->incomingClipId == clip.id) {
+        if (transition->durationMs <= 0 || transition->durationMs > position)
+          return {};
+        position -= transition->durationMs;
+      }
+    }
     const qint64 duration = clipDuration(clip);
-    if (duration <= 0 || duration > maxDuration - position)
+    if (position < 0 || duration <= 0 || duration > maxDuration - position)
       return {};
     spans.push_back({clip.id, clip.assetId, position, position + duration,
                      clip.inMs, clip.outMs, clip.speed});
     position += duration;
   }
   return spans;
+}
+std::optional<StudioBlend> studioBlendAt(const StudioProject &p, qint64 time) {
+  const auto spans = studioComposition(p);
+  for (qsizetype i = 1; i < spans.size(); ++i) {
+    const auto &outgoing = spans[i - 1], &incoming = spans[i];
+    if (time < incoming.startMs || time >= outgoing.endMs)
+      continue;
+    const auto *transition =
+        studioTransition(p, outgoing.clipId, incoming.clipId);
+    if (!transition || transition->durationMs <= 0)
+      continue;
+    const auto frame = [time](const StudioSpan &span) {
+      return StudioFrame{
+          span,
+          qBound(span.inMs,
+                 span.inMs + qRound64(static_cast<double>(time - span.startMs) *
+                                      span.speed),
+                 span.outMs - 1)};
+    };
+    const double progress = static_cast<double>(time - incoming.startMs) /
+                            static_cast<double>(transition->durationMs);
+    const bool black = transition->kind == StudioTransitionKind::FadeBlack;
+    return StudioBlend{frame(outgoing),
+                       frame(incoming),
+                       transition->kind,
+                       progress,
+                       black ? qMax(0.0, 1 - 2 * progress) : 1 - progress,
+                       black ? qMax(0.0, 2 * progress - 1) : progress,
+                       1 - progress,
+                       progress};
+  }
+  return std::nullopt;
 }
 qint64 studioDuration(const StudioProject &p) {
   const auto spans = studioComposition(p);
@@ -195,6 +305,23 @@ QString validateStudioProject(const StudioProject &p) {
     clips.insert(c.id);
     total += duration;
   }
+  if (p.transitions.size() > qMax<qsizetype>(0, p.clips.size() - 1))
+    return QStringLiteral("Too many scene transitions.");
+  QSet<quint64> boundaries;
+  for (const auto &t : p.transitions) {
+    if (!t.outgoingClipId || !t.incomingClipId ||
+        boundaries.contains(t.outgoingClipId) ||
+        (t.kind != StudioTransitionKind::Crossfade &&
+         t.kind != StudioTransitionKind::FadeBlack) ||
+        t.durationMs <= 0 ||
+        t.durationMs >
+            studioTransitionMaximum(p, t.outgoingClipId, t.incomingClipId) ||
+        frameSnapped(p, t.durationMs, false) != t.durationMs)
+      return QStringLiteral("Invalid transition pair or duration; preserve 250 "
+                            "ms between neighboring blends.");
+    boundaries.insert(t.outgoingClipId);
+    total -= t.durationMs;
+  }
   if (p.trimInMs < 0 || p.trimInMs > total || p.trimOutMs < -1 ||
       (p.trimOutMs != -1 && (p.trimOutMs > total || p.trimOutMs < p.trimInMs)))
     return QStringLiteral("Invalid project review/export range.");
@@ -222,7 +349,7 @@ QString validateStudioProject(const StudioProject &p) {
   return {};
 }
 QByteArray encodeStudioProject(const StudioProject &p) {
-  QJsonArray assets, clips;
+  QJsonArray assets, clips, transitions;
   for (const auto &a : p.assets)
     assets.append(QJsonObject{{"id", QString::number(a.id)},
                               {"path", a.path},
@@ -233,11 +360,19 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                              {"inMs", c.inMs},
                              {"outMs", c.outMs},
                              {"speed", c.speed}});
+  for (const auto &t : p.transitions)
+    transitions.append(QJsonObject{
+        {"outgoingClipId", QString::number(t.outgoingClipId)},
+        {"incomingClipId", QString::number(t.incomingClipId)},
+        {"kind", t.kind == StudioTransitionKind::Crossfade ? "crossfade"
+                                                           : "fade-black"},
+        {"durationMs", t.durationMs}});
   return QJsonDocument(
              QJsonObject{
                  {"schema", StudioProject::kSchema},
                  {"assets", assets},
                  {"clips", clips},
+                 {"transitions", transitions},
                  {"canvas", QJsonObject{{"width", p.canvas.width()},
                                         {"height", p.canvas.height()},
                                         {"fpsNumerator", p.fpsNumerator},
@@ -262,12 +397,14 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
   if (!integer(root["schema"], StudioProject::kSchema, StudioProject::kSchema))
     return QStringLiteral("Unsupported Studio project schema.");
   if (!root["assets"].isArray() || !root["clips"].isArray() ||
-      !root["canvas"].isObject() || !root["style"].isObject() ||
-      !root["zoom"].isObject() || !integer(root["trimInMs"], 0, maxDuration) ||
+      !root["transitions"].isArray() || !root["canvas"].isObject() ||
+      !root["style"].isObject() || !root["zoom"].isObject() ||
+      !integer(root["trimInMs"], 0, maxDuration) ||
       !integer(root["trimOutMs"], -1, maxDuration))
     return malformed;
   const auto assets = root["assets"].toArray(), clips = root["clips"].toArray();
-  if (assets.size() > maxItems || clips.size() > maxItems)
+  if (assets.size() > maxItems || clips.size() > maxItems ||
+      root["transitions"].toArray().size() > maxItems)
     return QStringLiteral("Project exceeds the 1000 asset/scene limit.");
   StudioProject p;
   p.trimInMs = root["trimInMs"].toInteger();
@@ -315,6 +452,19 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
     p.clips.push_back({idFrom(c["id"]), idFrom(c["assetId"]),
                        c["inMs"].toInteger(), c["outMs"].toInteger(),
                        c["speed"].toDouble()});
+  }
+  for (const auto &value : root["transitions"].toArray()) {
+    const auto t = value.toObject();
+    const auto kind = t["kind"].toString();
+    if (!value.isObject() || !integer(t["durationMs"], 1, maxDuration) ||
+        (kind != QStringLiteral("crossfade") &&
+         kind != QStringLiteral("fade-black")))
+      return malformed;
+    p.transitions.push_back(
+        {idFrom(t["outgoingClipId"]), idFrom(t["incomingClipId"]),
+         kind == QStringLiteral("crossfade") ? StudioTransitionKind::Crossfade
+                                             : StudioTransitionKind::FadeBlack,
+         t["durationMs"].toInteger()});
   }
   const auto zoom = root["zoom"].toObject();
   if (!zoom["cues"].isArray() || zoom["cues"].toArray().size() > kMaxZoomCues)
@@ -373,10 +523,21 @@ QString saveStudioProject(const QString &path, const StudioProject &project) {
     return QStringLiteral("Could not save project: %1").arg(file.errorString());
   return {};
 }
-bool studioSplitClip(StudioProject &p, qint64 at, quint64 newId) {
+bool studioSplitClip(StudioProject &p, qint64 at, quint64 newId,
+                     QString *error) {
+  if (error)
+    error->clear();
   if (!validateStudioProject(p).isEmpty() || !unusedClipId(p, newId) ||
       p.clips.size() >= maxItems)
     return false;
+  if (const auto blend = studioBlendAt(p, at)) {
+    if (blend->progress > 0) {
+      if (error)
+        *error = QStringLiteral(
+            "Remove the transition before splitting through it.");
+      return false;
+    }
+  }
   const auto spans = studioComposition(p);
   for (qsizetype i = 0; i < spans.size(); ++i) {
     if (at <= spans[i].startMs || at >= spans[i].endMs)
@@ -385,10 +546,21 @@ bool studioSplitClip(StudioProject &p, qint64 at, quint64 newId) {
         splitAt(p.clips[i], at - spans[i].startMs, frameMilliseconds(p));
     if (!split)
       return false;
-    p.clips[i] = split->left;
+    auto edited = p;
+    edited.clips[i] = split->left;
     auto right = split->right;
     right.id = newId;
-    p.clips.insert(i + 1, right);
+    edited.clips.insert(i + 1, right);
+    for (auto &transition : edited.transitions)
+      if (transition.outgoingClipId == split->left.id)
+        transition.outgoingClipId = right.id;
+    if (!validateStudioProject(edited).isEmpty()) {
+      if (error)
+        *error = QStringLiteral("Leave more source room beside the transition, "
+                                "or remove it before splitting.");
+      return false;
+    }
+    p = std::move(edited);
     return true;
   }
   return false;
@@ -409,6 +581,41 @@ StudioCutResult studioDeleteRange(StudioProject &p, qint64 from, qint64 to,
   to = qBound<qint64>(0, to, duration);
   if (from == to)
     return {};
+  if (intersectsBlend(p, from, to))
+    return {false, 0, 0, 0,
+            QStringLiteral("Remove the transition before cutting through it.")};
+  if (!p.transitions.isEmpty()) {
+    StudioProject serial = p;
+    serial.transitions.clear();
+    serial.zoom.cues.clear();
+    serial.trimInMs = 0;
+    serial.trimOutMs = -1;
+    const qint64 serialFrom = serialTime(p, from), serialTo = serialTime(p, to);
+    const auto result =
+        studioDeleteRange(serial, serialFrom, serialTo, remainderId);
+    if (!result.changed)
+      return result;
+    const qint64 actualFrom = from + result.fromMs - serialFrom;
+    const qint64 actualTo = actualFrom + result.removedMs;
+    if (intersectsBlend(p, actualFrom, actualTo))
+      return {false, 0, 0, 0,
+              QStringLiteral("The snapped cut enters a transition; remove the "
+                             "transition first.")};
+    serial.transitions = p.transitions;
+    const auto oldFrame = studioFrameAt(p, qMin(actualFrom, duration - 1));
+    if (oldFrame && remainderId && !unusedClipId(serial, remainderId))
+      for (auto &transition : serial.transitions)
+        if (transition.outgoingClipId == oldFrame->span.clipId)
+          transition.outgoingClipId = remainderId;
+    rippleZoomAndRange(p, serial, actualFrom, actualTo);
+    if (!validateStudioProject(serial).isEmpty() ||
+        duration - studioDuration(serial) != result.removedMs)
+      return {false, 0, 0, 0,
+              QStringLiteral("Leave more source room beside the transition, or "
+                             "remove it before cutting.")};
+    p = std::move(serial);
+    return {true, actualFrom, actualTo, result.removedMs, {}};
+  }
   QVector<StudioClip> pieces = p.clips;
   const auto end = splitPieces(pieces, to, frameMilliseconds(p));
   if (!end)
@@ -457,9 +664,28 @@ StudioCutResult studioDeleteRange(StudioProject &p, qint64 from, qint64 to,
   if (!validateStudioProject(edited).isEmpty())
     return {};
   p = edited;
-  return {true, *start, *end, removed};
+  return {true, *start, *end, removed, {}};
 }
 StudioCutResult studioDeleteClip(StudioProject &p, quint64 id) {
+  if (!p.transitions.isEmpty()) {
+    const auto validation = validateStudioProject(p);
+    if (!validation.isEmpty())
+      return {false, 0, 0, 0, validation};
+    for (const auto &span : studioComposition(p)) {
+      if (span.clipId != id)
+        continue;
+      const qint64 before = studioDuration(p);
+      auto edited = p;
+      edited.clips.removeIf(
+          [id](const StudioClip &clip) { return clip.id == id; });
+      QString error;
+      if (!finishSceneChange(p, std::move(edited), error))
+        return {false, 0, 0, 0, error};
+      const qint64 removed = before - studioDuration(p);
+      return {true, span.startMs, span.startMs + removed, removed, {}};
+    }
+    return {};
+  }
   for (const auto &span : studioComposition(p))
     if (span.clipId == id)
       return studioDeleteRange(p, span.startMs, span.endMs, 0);
@@ -510,11 +736,23 @@ std::optional<ZoomFragment> sceneZoom(const ZoomCue &cue,
   return ZoomFragment{mapped, oldStart, oldEnd};
 }
 bool finishSceneChange(StudioProject &project, StudioProject edited,
-                       QString &error, quint64 originalId = 0,
-                       quint64 duplicateId = 0) {
+                       QString &error, quint64 originalId,
+                       quint64 duplicateId) {
   edited.trimInMs = 0;
   edited.trimOutMs = -1;
   edited.zoom.cues.clear();
+  // A transition belongs to one directed pair. Arrangement never transfers it
+  // to a different neighbor; short trims clamp to the remaining source handles.
+  QVector<StudioTransition> retained;
+  for (auto transition : edited.transitions) {
+    const auto maximum = studioTransitionMaximum(
+        edited, transition.outgoingClipId, transition.incomingClipId);
+    if (maximum <= 0)
+      continue;
+    transition.durationMs = qMin(transition.durationMs, maximum);
+    retained.push_back(transition);
+  }
+  edited.transitions = std::move(retained);
   error = validateStudioProject(edited);
   if (!error.isEmpty())
     return false;
@@ -535,10 +773,15 @@ bool finishSceneChange(StudioProject &project, StudioProject edited,
           // Appending a scene must not fragment an otherwise unchanged cue.
           // Merge only pieces still adjacent in both old and new order.
           if (!originals.isEmpty() &&
-              originals.back().oldEndMs == mapped->oldStartMs &&
-              originals.back().cue.endMs == mapped->cue.startMs) {
-            originals.back().cue.endMs = mapped->cue.endMs;
-            originals.back().oldEndMs = mapped->oldEndMs;
+              originals.back().oldEndMs >= mapped->oldStartMs &&
+              originals.back().cue.endMs >= mapped->cue.startMs &&
+              originals.back().cue.startMs <= mapped->cue.endMs) {
+            originals.back().cue.startMs =
+                qMin(originals.back().cue.startMs, mapped->cue.startMs);
+            originals.back().cue.endMs =
+                qMax(originals.back().cue.endMs, mapped->cue.endMs);
+            originals.back().oldEndMs =
+                qMax(originals.back().oldEndMs, mapped->oldEndMs);
           } else
             originals.push_back(*mapped);
         }
@@ -580,6 +823,9 @@ bool finishSceneChange(StudioProject &project, StudioProject edited,
       edited.zoom.cues.begin(), edited.zoom.cues.end(),
       [](const ZoomCue &a, const ZoomCue &b) { return a.startMs < b.startMs; });
   error = validateStudioProject(edited);
+  if (error == QStringLiteral("Overlapping zoom cues."))
+    error = QStringLiteral("Move zoom cues away from this boundary before "
+                           "adding or changing a transition.");
   if (!error.isEmpty())
     return false;
   project = std::move(edited);
@@ -667,6 +913,45 @@ bool studioTrimClip(StudioProject &p, quint64 id, qint64 in, qint64 out,
   auto edited = p;
   edited.clips[index].inMs = in;
   edited.clips[index].outMs = out;
+  return finishSceneChange(p, std::move(edited), error);
+}
+bool studioSetTransition(StudioProject &p, quint64 outgoing, quint64 incoming,
+                         StudioTransitionKind kind, qint64 requested,
+                         QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto maximum = studioTransitionMaximum(p, outgoing, incoming);
+  if (maximum <= 0 || requested <= 0 ||
+      (kind != StudioTransitionKind::Crossfade &&
+       kind != StudioTransitionKind::FadeBlack)) {
+    error = QStringLiteral("These scenes are too short for a transition; leave "
+                           "250 ms between blends.");
+    return false;
+  }
+  const auto duration =
+      qBound<qint64>(frameSnapped(p, frameMilliseconds(p), false),
+                     frameSnapped(p, qMin(requested, maximum), false), maximum);
+  const StudioTransition transition{outgoing, incoming, kind, duration};
+  if (const auto *existing = studioTransition(p, outgoing, incoming))
+    if (*existing == transition)
+      return false;
+  auto edited = p;
+  edited.transitions.removeIf([outgoing](const StudioTransition &t) {
+    return t.outgoingClipId == outgoing;
+  });
+  edited.transitions.push_back(transition);
+  return finishSceneChange(p, std::move(edited), error);
+}
+bool studioRemoveTransition(StudioProject &p, quint64 outgoing,
+                            quint64 incoming, QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty() || !studioTransition(p, outgoing, incoming))
+    return false;
+  auto edited = p;
+  edited.transitions.removeIf([outgoing, incoming](const StudioTransition &t) {
+    return t.outgoingClipId == outgoing && t.incomingClipId == incoming;
+  });
   return finishSceneChange(p, std::move(edited), error);
 }
 void StudioHistory::reset(const StudioEditState &state) {

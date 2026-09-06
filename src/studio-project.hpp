@@ -37,10 +37,19 @@ struct StudioClip {
   double speed = 1.0;
   bool operator==(const StudioClip &) const = default;
 };
+enum class StudioTransitionKind { Crossfade, FadeBlack };
+struct StudioTransition {
+  quint64 outgoingClipId = 0;
+  quint64 incomingClipId = 0;
+  StudioTransitionKind kind = StudioTransitionKind::Crossfade;
+  qint64 durationMs = 0;
+  bool operator==(const StudioTransition &) const = default;
+};
 struct StudioProject {
-  static constexpr int kSchema = 1;
+  static constexpr int kSchema = 2;
   QVector<StudioAsset> assets;
   QVector<StudioClip> clips;
+  QVector<StudioTransition> transitions;
   ZoomTrack zoom; // Edited composition time, never source-file time.
   StudioStyle style;
   QSize canvas{1920, 1080};
@@ -63,6 +72,32 @@ struct StudioFrame {
   StudioSpan span;
   qint64 sourceMs = 0;
 };
+struct StudioBlend {
+  StudioFrame outgoing;
+  StudioFrame incoming;
+  StudioTransitionKind kind = StudioTransitionKind::Crossfade;
+  double progress = 0;
+  double outgoingOpacity = 1;
+  double incomingOpacity = 0;
+  double outgoingAudioGain = 1;
+  double incomingAudioGain = 0;
+};
+[[nodiscard]] const StudioTransition *studioTransition(const StudioProject &,
+                                                       quint64 outgoingClipId,
+                                                       quint64 incomingClipId);
+[[nodiscard]] qint64 studioTransitionMaximum(const StudioProject &,
+                                             quint64 outgoingClipId,
+                                             quint64 incomingClipId);
+[[nodiscard]] std::optional<StudioBlend> studioBlendAt(const StudioProject &,
+                                                       qint64 timelineMs);
+[[nodiscard]] bool studioSetTransition(StudioProject &, quint64 outgoingClipId,
+                                       quint64 incomingClipId,
+                                       StudioTransitionKind, qint64 durationMs,
+                                       QString &error);
+[[nodiscard]] bool studioRemoveTransition(StudioProject &,
+                                          quint64 outgoingClipId,
+                                          quint64 incomingClipId,
+                                          QString &error);
 [[nodiscard]] const StudioAsset *studioAsset(const StudioProject &, quint64 id);
 [[nodiscard]] QVector<StudioSpan> studioComposition(const StudioProject &);
 [[nodiscard]] qint64 studioDuration(const StudioProject &);
@@ -92,12 +127,13 @@ struct StudioProjectLoad {
 /** Clip identity comes from the window's monotonic allocator, outside undo
  * snapshots. A split never changes composition duration or zoom timing. */
 [[nodiscard]] bool studioSplitClip(StudioProject &, qint64 atMs,
-                                   quint64 newClipId);
+                                   quint64 newClipId, QString *error = nullptr);
 struct StudioCutResult {
   bool changed = false;
   qint64 fromMs = 0;
   qint64 toMs = 0;
   qint64 removedMs = 0;
+  QString error;
 };
 /** Removes a passage and closes the gap. Effective boundaries may snap by at
  * most one output frame to representable source milliseconds. Failure leaves

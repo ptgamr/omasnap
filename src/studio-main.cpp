@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
       "B selects a passage, V selects clips, S splits, Delete removes "
       "selection, "
       "Ctrl+O imports scenes, Ctrl+D duplicates a scene, "
+      "T edits its next transition, "
       "Ctrl+Z undoes, and Ctrl+E exports. Press ? for all shortcuts.\n"
       "\n"
       "Source assets, clip ranges, zoom cues, and canvas styling are saved as "

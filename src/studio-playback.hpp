@@ -62,8 +62,13 @@ private:
   void preload();
   void present(int index, const QVideoFrame &frame, bool cached = false);
   void tick();
+  void finishSpan(const StudioSpan &span);
   void setState(QMediaPlayer::PlaybackState state);
   void updateAudio();
+  void refreshComposition();
+  void synchronize();
+  [[nodiscard]] const StudioSpan *nextSpan() const;
+  [[nodiscard]] bool contributing(int index) const;
   [[nodiscard]] const StudioSpan *spanFor(quint64 clipId) const;
   StudioPreview *preview_;
   StudioProject project_;
@@ -76,5 +81,6 @@ private:
   int active_ = 0;
   qint64 position_ = 0;
   double rate_ = 1.0;
+  bool waiting_ = false;
   QMediaPlayer::PlaybackState state_ = QMediaPlayer::StoppedState;
 };

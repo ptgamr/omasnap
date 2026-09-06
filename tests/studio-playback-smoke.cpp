@@ -40,6 +40,38 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
           QStringLiteral("GPU zoom was applied before canonical source fit");
       return false;
     }
+    QImage blue(160, 90, QImage::Format_RGBA8888);
+    blue.fill(Qt::blue);
+    surface.setFrame(0, prepareStudioVideoFrame(QVideoFrame(portrait)));
+    surface.setFrame(1, prepareStudioVideoFrame(QVideoFrame(blue)));
+    surface.primary = 0;
+    surface.secondary = 1;
+    surface.primaryOpacity = 0.25;
+    surface.secondaryOpacity = 0.75;
+    surface.fits[0] = QRectF(0.359375, 0, 0.28125, 1);
+    surface.fits[1] = QRectF(0, 0, 1, 1);
+    surface.source = QRectF(0, 0, 1, 1);
+    surface.drawn = surface.canvas.adjusted(32, 18, -32, -18);
+    surface.background = Qt::green;
+    surface.radius = 16;
+    shot = surface.grabFramebuffer();
+    const QColor blended = colorAt(shot, 0.5);
+    const QColor bar = colorAt(shot, 0.25);
+    if (qAbs(blended.red() - 64) > 3 || qAbs(blended.blue() - 191) > 3 ||
+        blended.green() > 3 || bar.red() > 3 || qAbs(bar.blue() - 191) > 3 ||
+        shot.pixelColor(shot.width() / 2, 2).green() < 250) {
+      error = QStringLiteral(
+          "GPU paired RGB blend did not preserve canonical fit/style once");
+      return false;
+    }
+    surface.primaryOpacity = surface.secondaryOpacity = 0;
+    shot = surface.grabFramebuffer();
+    if (colorAt(shot, 0.5) != QColor(Qt::black) ||
+        shot.pixelColor(shot.width() / 2, 2).green() < 250) {
+      error = QStringLiteral("GPU black fade changed the style background or "
+                             "missed black midpoint");
+      return false;
+    }
   }
   StudioPreview preview;
   preview.resize(480, 320);
@@ -395,5 +427,115 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
                "playing reordered sequence did not end with portrait green"))
     return false;
   playback.pause();
-  return failures.isEmpty();
+  StudioProject transitioned = mixed;
+  QString transitionError;
+  if (!require(studioSetTransition(transitioned, 1, 2,
+                                   StudioTransitionKind::Crossfade, 100,
+                                   transitionError) &&
+                   studioSetTransition(transitioned, 2, 3,
+                                       StudioTransitionKind::FadeBlack, 100,
+                                       transitionError),
+               "could not construct paired playback transitions"))
+    return false;
+  const auto colorNear = [&](QColor expected, int tolerance = 18) {
+    const auto shot = preview.grab().toImage();
+    if (shot.isNull())
+      return false;
+    const auto pixel = shot.pixelColor(shot.width() / 2, shot.height() / 2);
+    return qAbs(pixel.red() - expected.red()) <= tolerance &&
+           qAbs(pixel.green() - expected.green()) <= tolerance &&
+           qAbs(pixel.blue() - expected.blue()) <= tolerance;
+  };
+  playback.setProject(transitioned, 525);
+  playback.audioOutput()->setVolume(0.8F);
+  if (!require(playback.duration() == 1600 &&
+                   QTest::qWaitFor(
+                       [&] { return colorNear(QColor(190, 64, 0)); }, 4000),
+               "paused crossfade quarter did not blend both source pixels"))
+    return false;
+  playback.setPosition(575);
+  if (!require(
+          QTest::qWaitFor([&] { return colorNear(QColor(64, 190, 0)); }, 4000),
+          "forward transition seek retained the wrong pair/progress")) {
+    return false;
+  }
+  playback.setPosition(1050);
+  if (!require(QTest::qWaitFor([&] { return colorNear(Qt::black, 5); }, 4000),
+               "fade-through-black midpoint was not black"))
+    return false;
+  playback.setPosition(525);
+  if (!require(
+          QTest::qWaitFor([&] { return colorNear(QColor(190, 64, 0)); }, 4000),
+          "reverse transition seek retained later scene textures"))
+    return false;
+  const auto players = playback.findChildren<QMediaPlayer *>();
+  const auto *outgoingAudio = playback.activePlayer()->audioOutput();
+  const auto *incomingAudio = players[0] == playback.activePlayer()
+                                  ? players[1]->audioOutput()
+                                  : players[0]->audioOutput();
+  if (!require(qAbs(outgoingAudio->volume() - 0.6F) < 0.01F &&
+                   qAbs(incomingAudio->volume() - 0.2F) < 0.01F &&
+                   outgoingAudio->isMuted() && incomingAudio->isMuted(),
+               "transition source gains did not follow shared audio "
+               "weights/master volume"))
+    return false;
+  QTest::qWait(150);
+  if (!require(playback.position() == 525 && colorNear(QColor(190, 64, 0)),
+               "paused pair advanced while queued decoder frames drained"))
+    return false;
+  playback.setPosition(450);
+  playback.play();
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     return playback.position() >= 700 && pixelsMatch(1, true);
+                   },
+                   4000),
+               "playing transition failed to hand off to the incoming scene") ||
+      !require(QTest::qWaitFor(
+                   [&] {
+                     return playback.position() >= 1150 &&
+                            pixelsMatch(2, false);
+                   },
+                   4000),
+               "second transition failed after bounded decoder reuse"))
+    return false;
+  playback.pause();
+  if (!require(failures.isEmpty(), "Unexpected transition decoder error"))
+    return false;
+
+  // Full source ranges exercise the decoder's EOF callback, rather than only
+  // the composition timer's earlier trimmed-out boundary.
+  StudioProject eof = mixed;
+  eof.clips = {{1, 1, 0, 1000, 1}, {2, 2, 0, 1000, 1}};
+  if (!require(studioSetTransition(eof, 1, 2, StudioTransitionKind::Crossfade,
+                                   200, transitionError),
+               "Could not create full-source EOF transition"))
+    return false;
+  playback.setProject(eof, 700);
+  bool handoffReady = false;
+  const auto handoff = QObject::connect(
+      &playback, &StudioPlayback::activeClipChanged, &preview, [&](quint64 id) {
+        if (id == 2)
+          handoffReady =
+              preview.videoSlotReady(players.indexOf(playback.activePlayer()));
+      });
+  playback.play();
+  if (!require(
+          QTest::qWaitFor([&] { return playback.position() >= 1200; }, 5000) &&
+              handoffReady && pixelsMatch(1, true),
+          "Full-source EOF discarded the already-playing incoming frame"))
+    return false;
+  playback.pause();
+  QObject::disconnect(handoff);
+
+  // An incoming asset can disappear after metadata probing. Its decoder error
+  // must become actionable at the overlap, not leave Playing waiting forever.
+  StudioProject unavailable = eof;
+  unavailable.assets[1].path = scratch.filePath("missing-incoming.mp4");
+  playback.setProject(unavailable, 700);
+  playback.play();
+  return require(
+      QTest::qWaitFor([&] { return !failures.isEmpty(); }, 5000) &&
+          playback.playbackState() == QMediaPlayer::PausedState,
+      "Failed incoming decoder left transition playback waiting forever");
 }

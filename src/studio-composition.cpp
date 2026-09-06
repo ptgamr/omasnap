@@ -60,6 +60,7 @@ QStringList studioCompositionArguments(const StudioProject &project,
                    QStringLiteral("2")};
   QStringList graph;
   QString joined;
+  const bool transitions = !project.transitions.isEmpty();
   for (qsizetype i = 0; i < spans.size(); ++i) {
     const auto &span = spans[i];
     const auto *asset = studioAsset(project, span.assetId);
@@ -77,15 +78,22 @@ QStringList studioCompositionArguments(const StudioProject &project,
     // Do not independently subtract STARTPTS from audio and video: doing so
     // erases an intentional audio offset. concat gets exact segment length
     // from its padded audio anchor, not a rounded number of video frames.
-    graph << QStringLiteral(
-                 "[%1:v:0]trim=duration=%2,setpts=PTS/%3,"
-                 "scale=%4:%5:force_original_aspect_ratio=decrease:"
-                 "force_divisible_by=2,setsar=1,pad=%4:%5:(ow-iw)/2:(oh-ih)/2:"
-                 "color=black,format=yuv420p,settb=AVTB[v%1]")
-                 .arg(index, seconds(span.outMs - span.inMs),
-                      QString::number(span.speed, 'g', 12))
-                 .arg(width)
-                 .arg(height);
+    QString sourceVideo =
+        QStringLiteral(
+            "[%1:v:0]trim=duration=%2,setpts=PTS/%3,"
+            "scale=%4:%5:force_original_aspect_ratio=decrease:"
+            "force_divisible_by=2,setsar=1,pad=%4:%5:(ow-iw)/2:(oh-ih)/2:"
+            "color=black,format=yuv420p,settb=AVTB")
+            .arg(index, seconds(span.outMs - span.inMs),
+                 QString::number(span.speed, 'g', 12))
+            .arg(width)
+            .arg(height);
+    if (transitions)
+      sourceVideo +=
+          QStringLiteral(",fps=%1/%2:start_time=0,format=gbrp,settb=AVTB")
+              .arg(project.fpsNumerator)
+              .arg(project.fpsDenominator);
+    graph << sourceVideo + QStringLiteral("[v%1]").arg(index);
     QString audio;
     if (asset->source.audioStreams == 0) {
       audio = QStringLiteral("anullsrc=r=48000:cl=stereo");
@@ -104,8 +112,55 @@ QStringList studioCompositionArguments(const StudioProject &project,
                      .arg(length, index);
     joined += QStringLiteral("[v%1][a%1]").arg(index);
   }
-  graph << joined + QStringLiteral("concat=n=%1:v=1:a=1[sequence][sound]")
-                        .arg(spans.size());
+  if (!transitions) {
+    // Leave the timestamp-aware hard-cut path alone: it does not need a
+    // per-scene CFR conversion, RGB intermediate, or overlapping decoders.
+    graph << joined + QStringLiteral("concat=n=%1:v=1:a=1[sequence][sound]")
+                          .arg(spans.size());
+  } else {
+    QString currentVideo = QStringLiteral("v0"),
+            currentAudio = QStringLiteral("a0");
+    for (qsizetype i = 1; i < spans.size(); ++i) {
+      const auto *transition =
+          studioTransition(project, spans[i - 1].clipId, spans[i].clipId);
+      const QString index = QString::number(i);
+      if (transition) {
+        // Blend in RGB, as the GPU does. FFmpeg's built-in fadeblack has an
+        // asymmetric nonlinear curve, not a black midpoint. P runs 1 -> 0.
+        const QString effect =
+            transition->kind == StudioTransitionKind::Crossfade
+                ? QStringLiteral("transition=fade")
+                : QStringLiteral(
+                      "transition=custom:expr='A*max(2*P-1,0)+B*max(1-2*P,0)'");
+        graph << QStringLiteral("[%1][v%2]xfade=%3:duration=%4:offset=%5[jv%2]")
+                     .arg(currentVideo, index, effect,
+                          seconds(transition->durationMs),
+                          seconds(spans[i].startMs));
+        graph << QStringLiteral(
+                     "[%1][a%2]acrossfade=d=%3:o=1:c1=tri:c2=tri[ja%2]")
+                     .arg(currentAudio, index, seconds(transition->durationMs));
+      } else {
+        graph << QStringLiteral(
+                     "[%1][%2][v%3][a%3]concat=n=2:v=1:a=1[jv%3][ja%3]")
+                     .arg(currentVideo, currentAudio, index);
+      }
+      currentVideo = QStringLiteral("mv%1").arg(index);
+      currentAudio = QStringLiteral("ma%1").arg(index);
+      // Absolute model endpoints own every join. Do not propagate a rounded
+      // previous video's length into the next transition's placement.
+      graph << QStringLiteral("[jv%1]trim=duration=%2,fps=%3/%4:start_time=0,"
+                              "format=gbrp,settb=AVTB[%5]")
+                   .arg(index, seconds(spans[i].endMs))
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator)
+                   .arg(currentVideo);
+      graph << QStringLiteral(
+                   "[ja%1]apad,atrim=duration=%2,asetpts=N/SR/TB[%3]")
+                   .arg(index, seconds(spans[i].endMs), currentAudio);
+    }
+    graph << QStringLiteral("[%1]null[sequence]").arg(currentVideo);
+    graph << QStringLiteral("[%1]anull[sound]").arg(currentAudio);
+  }
   QString video = QStringLiteral("[sequence]fps=%1/%2:start_time=0")
                       .arg(project.fpsNumerator)
                       .arg(project.fpsDenominator);

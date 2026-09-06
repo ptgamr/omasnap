@@ -80,6 +80,7 @@ signals:
   void deleteRequested();
   void sceneMoveRequested(quint64 id, quint64 before);
   void sceneTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
+  void transitionRequested(quint64 outgoingClipId);
 
 protected:
   void leaveEvent(QEvent *event) override;
@@ -116,6 +117,8 @@ private:
   [[nodiscard]] Grab grabAt(const QPointF &position) const;
   /** The cue under `position`, or 0. `edge` reports which end was hit. */
   [[nodiscard]] quint64 cueAt(const QPointF &position, Grab *edge) const;
+  [[nodiscard]] QRectF transitionRect(const StudioSpan &outgoing,
+                                      const StudioSpan &incoming) const;
 
   const ZoomTrack *track_ = nullptr;
   const StudioProject *project_ = nullptr;
@@ -220,6 +223,15 @@ private:
   void duplicateScene();
   void trimScene(quint64 id, qint64 inMs, qint64 outMs);
   void refreshSceneControls();
+  void setupTransitions(class QVBoxLayout *controls);
+  void refreshTransitionControls();
+  void changeTransition();
+  void showTransitionEditor(quint64 outgoingClipId);
+  [[nodiscard]] QString
+  transitionAdjustment(const QVector<StudioTransition> &before) const;
+  class StudioComboBox *transitionType_ = nullptr;
+  class QSpinBox *transitionDuration_ = nullptr;
+  class QLabel *transitionLabel_ = nullptr;
   [[nodiscard]] bool scenesEditable() const;
   bool importing_ = false;
   quint64 nextAssetId_ = 1;

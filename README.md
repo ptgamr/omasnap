@@ -312,6 +312,16 @@ Zooms follow scene content, and duplicates have independent edits. Structural
 scene edits reset the project export range to include the whole composition.
 `I`/`O`/`R` still set/reset that project-wide range, not individual scene trims.
 
+**Transitions.** Click a timeline boundary badge (`+`, `F`, or `B`), or select
+a scene and press `T`. Choose Hard cut, Crossfade, or Fade through black in the
+Clip inspector and edit the overlap duration. Both preview and export blend
+the kept source frames and linearly fade their primary audio. Short clips clamp
+the frame-snapped overlap; no discarded footage is used as hidden handles.
+Undo restores transition pairs and timing. Scene arrangement reports any
+transitions it removes or shortens. Remove a transition before range-cutting
+or splitting inside its overlap. Projects now use schema 2; older project files
+are not migrated, and original recordings remain untouched.
+
 **Cut passages.** Choose **Range** (`B`), drag over the video lane in either
 direction, adjust the range edges, and press Delete/Backspace. The gap closes
 in playback and export, including its audio. `V` returns to clip selection
@@ -365,6 +375,7 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | `Space` | Play / pause |
 | `Ctrl+O` | Add scene files (also available in the Clip inspector) |
 | `Ctrl+D` | Duplicate the selected scene |
+| `T` | Edit the selected scene's transition to its next neighbor |
 | `Left` / `Right` | Previous / next frame |
 | `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
 | `Home` / `End` | Go to trim start / end |
@@ -414,11 +425,15 @@ recorder is already running — it never signals a recorder it did not start.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
-- **Transitions are still pending**: multi-source import and arrangement,
-  range cuts/splits, playback, trim, manual zoom, canvas styling,
-  undo/redo, and MP4 export exist. Scene transitions, automatic pointer zoom, camera
+- **Studio parity remains incomplete**: multi-source import and arrangement,
+  range cuts/splits, crossfade/fade-through-black transitions, playback, trim,
+  manual zoom, canvas styling, undo/redo, and MP4 export exist. Directional
+  wipes/slides, automatic pointer zoom, camera
   overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
+- **4K preview cadence still needs work.** Real-time timeline progression does
+  not guarantee every decoded frame is presented; 4K60 recordings can still
+  skip preview frames, including across transitions. See [PLAN.md](PLAN.md).
 - **`omasnap-studio` is optional at build time.** Configure with
   `-DOMASNAP_STUDIO=OFF` for a screenshot-only build that needs no Qt Multimedia.
 - **A few narrow races remain, all with the same shape: a same-user process

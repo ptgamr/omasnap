@@ -366,6 +366,14 @@ QRectF StudioTimeline::cueLaneRect() const {
           kCueLaneHeight};
 }
 
+QRectF StudioTimeline::transitionRect(const StudioSpan &outgoing,
+                                      const StudioSpan &incoming) const {
+  const qreal start = xForTime(incoming.startMs);
+  const qreal end = xForTime(outgoing.endMs);
+  const qreal width = qMax<qreal>(24, end - start);
+  return {(start + end - width) / 2, trackRect().bottom() - 14, width, 14};
+}
+
 QRectF StudioTimeline::cueRect(const ZoomCue &cue) const {
   const QRectF lane = cueLaneRect();
   const qreal left = xForTime(cue.startMs);
@@ -490,6 +498,15 @@ void StudioTimeline::leaveEvent(QEvent *event) {
 void StudioTimeline::mousePressEvent(QMouseEvent *event) {
   if (event->button() != Qt::LeftButton || duration_ <= 0)
     return;
+  if (project_ && cuesEditable_ && !rangeMode_) {
+    const auto spans = studioComposition(*project_);
+    for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i)
+      if (transitionRect(spans[i], spans[i + 1]).contains(event->position())) {
+        setSelectedClip(project_->clips[i].id);
+        emit transitionRequested(project_->clips[i].id);
+        return;
+      }
+  }
   emit editStarted();
   grabbed_ = grabAt(event->position());
   scenePress_ = event->position();
@@ -770,6 +787,29 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
   };
   paintHandle(inX, Grab::In);
   paintHandle(outX, Grab::Out);
+
+  if (project_ && !rangeMode_) {
+    painter.setFont(chromeMonoFont(9));
+    const auto spans = studioComposition(*project_);
+    QHash<quint64, const StudioTransition *> transitions;
+    for (const auto &entry : project_->transitions)
+      transitions.insert(entry.outgoingClipId, &entry);
+    for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i) {
+      const auto *transition =
+          transitions.value(project_->clips[i].id, nullptr);
+      const QRectF badge = transitionRect(spans[i], spans[i + 1]);
+      painter.fillRect(badge, transition ? chrome_.accent : chrome_.background);
+      painter.setPen(QPen(chrome_.foreground, 1));
+      painter.setBrush(Qt::NoBrush);
+      painter.drawRect(badge);
+      painter.setPen(transition ? chrome_.onAccent() : chrome_.foreground);
+      painter.drawText(badge, Qt::AlignCenter,
+                       !transition ? QStringLiteral("+")
+                       : transition->kind == StudioTransitionKind::Crossfade
+                           ? QStringLiteral("F")
+                           : QStringLiteral("B"));
+    }
+  }
 
   // The cue lane, under the trim bar: each cue is a block you can drag by
   // its body and resize by either edge.
@@ -1292,7 +1332,12 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
               player_->pause();
               player_->setPosition(timeline_->trimOut());
             }
-            refreshControls();
+            // Scene/transition inspectors depend on edits and selection, not
+            // time. Rebuilding all their controls on every frame/timer tick
+            // needlessly competes with the GPU frame-preparation pipeline.
+            timeLabel_->setText(QStringLiteral("%1 / %2").arg(
+                studioTimecode(player_->position()).mid(3),
+                studioTimecode(timeline_->duration()).mid(3)));
           });
   connect(player_, &StudioPlayback::playbackStateChanged, this,
           [this](QMediaPlayer::PlaybackState) { refreshControls(); });
@@ -1669,7 +1714,8 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
 
 void StudioWindow::refreshThumbnails() {
   if (thumbnailsStarted_ && thumbnailProject_.assets == project_.assets &&
-      thumbnailProject_.clips == project_.clips)
+      thumbnailProject_.clips == project_.clips &&
+      thumbnailProject_.transitions == project_.transitions)
     return;
   if (thumbnailWatcher_.isRunning()) {
     thumbnailPending_ = true;
@@ -1985,9 +2031,12 @@ void StudioWindow::splitAtPlayhead() {
     return;
   captureCursor();
   const qint64 at = player_->position();
-  if (!studioSplitClip(project_, at, nextClipId_++)) {
-    setStatus(
-        QStringLiteral("Choose a representable point inside a scene to split"));
+  QString error;
+  if (!studioSplitClip(project_, at, nextClipId_++, &error)) {
+    setStatus(error.isEmpty()
+                  ? QStringLiteral(
+                        "Choose a representable point inside a scene to split")
+                  : error);
     return;
   }
   finishCompositionEdit(at);
@@ -2001,6 +2050,10 @@ void StudioWindow::deleteSelection() {
   if (!deleteButton_->isEnabled() || editGesture_)
     return;
   captureCursor();
+  const auto transitions = project_.transitions;
+  const auto anchor = studioFrameAt(project_, player_->position());
+  const bool sceneDeletion = timeline_->rangeOut() <= timeline_->rangeIn() &&
+                             timeline_->selectedClip();
   StudioCutResult result;
   if (timeline_->rangeOut() > timeline_->rangeIn() && timeline_->rangeIn() >= 0)
     result = studioDeleteRange(project_, timeline_->rangeIn(),
@@ -2011,15 +2064,23 @@ void StudioWindow::deleteSelection() {
   } else if (timeline_->selectedClip())
     result = studioDeleteClip(project_, timeline_->selectedClip());
   if (!result.changed) {
-    setStatus(QStringLiteral(
-        "Choose a wider passage with representable scene boundaries"));
+    setStatus(
+        result.error.isEmpty()
+            ? QStringLiteral(
+                  "Choose a wider passage with representable scene boundaries")
+            : result.error);
     return;
   }
-  const qint64 position =
+  qint64 position =
       studioTimeAfterDelete(player_->position(), result.fromMs, result.toMs);
+  if (sceneDeletion && anchor)
+    position =
+        studioTimelineTime(project_, anchor->span.clipId, anchor->sourceMs)
+            .value_or(position);
   finishCompositionEdit(position);
   setStatus(QStringLiteral("Removed %1 — Ctrl+Z to undo")
-                .arg(studioTimecode(result.removedMs).mid(3)));
+                .arg(studioTimecode(result.removedMs).mid(3)) +
+            transitionAdjustment(transitions));
 }
 
 void StudioWindow::startExport() {
@@ -2107,6 +2168,8 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
     action = [this] { chooseScenes(); };
   else if (key == Qt::Key_D && ctrl)
     action = [this] { duplicateScene(); };
+  else if (key == Qt::Key_T && plain)
+    action = [this] { showTransitionEditor(timeline_->selectedClip()); };
   else if (key == Qt::Key_R && plain)
     action = [this] { resetTrim(); };
   else if (key == Qt::Key_B && plain)
@@ -2209,6 +2272,7 @@ void StudioWindow::showShortcuts() {
                      "Ctrl+Shift+Z / Ctrl+Y  Redo\n"
                      "Ctrl+O               Add scene files\n"
                      "Ctrl+D               Duplicate selected scene\n"
+                     "T                    Edit transition to next scene\n"
                      "M                     Mute / unmute preview\n"
                      "Ctrl + S              Save edits\n"
                      "Ctrl + E              Export MP4\n"

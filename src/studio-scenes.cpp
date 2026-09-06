@@ -97,6 +97,7 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
         return;
       }
   });
+  setupTransitions(controls);
   controls->addWidget(new QLabel(QStringLiteral("Project export range"), this));
   connect(&importWatcher_, &QFutureWatcher<StudioProjectLoad>::finished, this,
           [this] {
@@ -107,10 +108,12 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
               refreshControls();
               return;
             }
+            const auto before = project_.transitions;
             project_ = result.project;
             finishCompositionEdit(player_->position());
             setStatus(QStringLiteral(
-                "Scenes added — drag to arrange; Ctrl+Z to undo"));
+                          "Scenes added — drag to arrange; Ctrl+Z to undo") +
+                      transitionAdjustment(before));
           });
 }
 
@@ -118,6 +121,7 @@ void StudioWindow::refreshSceneControls() {
   if (!importButton_)
     return;
   importButton_->setEnabled(scenesEditable() && !editGesture_);
+  refreshTransitionControls();
   const StudioClip *selected = nullptr;
   qsizetype index = 0;
   for (; index < project_.clips.size(); ++index)
@@ -229,6 +233,7 @@ void StudioWindow::moveScene(quint64 id, quint64 before) {
   if (!scenesEditable())
     return;
   captureCursor();
+  const auto transitions = project_.transitions;
   const auto frame = studioFrameAt(project_, player_->position());
   QString error;
   if (!studioMoveClip(project_, id, before, error)) {
@@ -242,13 +247,15 @@ void StudioWindow::moveScene(quint64 id, quint64 before) {
   finishCompositionEdit(mapped.value_or(player_->position()));
   timeline_->setSelectedClip(id);
   rememberEdit();
-  setStatus(QStringLiteral("Scene moved — Ctrl+Z to undo"));
+  setStatus(QStringLiteral("Scene moved — Ctrl+Z to undo") +
+            transitionAdjustment(transitions));
 }
 
 void StudioWindow::duplicateScene() {
   if (!scenesEditable() || editGesture_ || !timeline_->selectedClip())
     return;
   captureCursor();
+  const auto transitions = project_.transitions;
   QString error;
   const quint64 id = nextClipId_++;
   if (!studioDuplicateClip(project_, timeline_->selectedClip(), id, error)) {
@@ -259,7 +266,8 @@ void StudioWindow::duplicateScene() {
   finishCompositionEdit(player_->position());
   timeline_->setSelectedClip(id);
   rememberEdit();
-  setStatus(QStringLiteral("Scene duplicated — Ctrl+Z to undo"));
+  setStatus(QStringLiteral("Scene duplicated — Ctrl+Z to undo") +
+            transitionAdjustment(transitions));
 }
 
 void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
@@ -267,6 +275,7 @@ void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
     return;
   captureCursor();
   auto candidate = editGesture_ ? gestureProject_ : project_;
+  const auto transitions = candidate.transitions;
   QString error;
   const bool changed = studioTrimClip(candidate, id, in, out, error);
   if (!error.isEmpty()) {
@@ -281,7 +290,8 @@ void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
   applyProject(false, player_->position());
   timeline_->setSelectedClip(id);
   rememberEdit();
-  setStatus(QStringLiteral("Scene trimmed — Ctrl+Z to undo"));
+  setStatus(QStringLiteral("Scene trimmed — Ctrl+Z to undo") +
+            transitionAdjustment(transitions));
 }
 
 void StudioWindow::dragEnterEvent(QDragEnterEvent *event) {
