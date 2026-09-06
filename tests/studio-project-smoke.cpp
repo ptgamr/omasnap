@@ -168,6 +168,164 @@ bool cutChecks(QString &error) {
   }
   return true;
 }
+bool sceneChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject p;
+  p.canvas = {1280, 720};
+  p.fpsNumerator = 30000;
+  p.fpsDenominator = 1001;
+  StudioSource first;
+  first.size = {1280, 720};
+  first.fpsNumerator = 24;
+  first.durationMs = 10000;
+  first.audioStreams = 1;
+  auto portrait = first;
+  portrait.size = {720, 1280};
+  portrait.fpsNumerator = 60;
+  portrait.audioStreams = 0;
+  QString operationError;
+  if (!check(
+          studioInsertScenes(p,
+                             {{1, QStringLiteral("first.mp4"), first},
+                              {2, QStringLiteral("portrait.mp4"), portrait}},
+                             {{11, 1, 0, 1000, 1}, {12, 2, 1000, 3000, 1}}, 0,
+                             operationError) &&
+              p.clips.size() == 2 && p.assets.size() == 2 &&
+              studioDuration(p) == 3000 && p.canvas == QSize(1280, 720) &&
+              p.fpsNumerator == 30000 && p.fpsDenominator == 1001,
+          QStringLiteral(
+              "Mixed-scene import changed canonical canvas/rate or failed: %1")
+              .arg(operationError)))
+    return false;
+  p.zoom.cues = {{1, 100, 500, 100, 100, {0.2, 0.3}, 2},
+                 {2, 1300, 1800, 150, 150, {0.6, 0.7}, 3}};
+  p.trimInMs = 200;
+  p.trimOutMs = 2500;
+  const auto original = p;
+  if (!check(!studioMoveClip(p, 11, 12, operationError) &&
+                 operationError.isEmpty() && p == original &&
+                 !studioTrimClip(p, 11, 0, 1000, operationError) &&
+                 operationError.isEmpty() && p == original,
+             QStringLiteral(
+                 "No-op scene edit fragmented zooms or reset review range")))
+    return false;
+  if (!check(studioMoveClip(p, 12, 11, operationError) && p.clips[0].id == 12 &&
+                 p.zoom.cues[0].id == 2 && p.zoom.cues[0].startMs == 300 &&
+                 p.zoom.cues[1].id == 1 && p.zoom.cues[1].startMs == 2100 &&
+                 p.trimInMs == 0 && p.trimOutMs == -1,
+             QStringLiteral(
+                 "Scene reorder did not carry zooms/reset review range")))
+    return false;
+  if (!check(
+          studioMoveClip(p, 12, 0, operationError) &&
+              p.clips == original.clips && p.zoom == original.zoom,
+          QStringLiteral(
+              "Scene reorder return changed attached zoom identities/timing")))
+    return false;
+  if (!check(studioDuplicateClip(p, 11, 77, operationError) &&
+                 p.clips[1].id == 77 && p.clips[1].assetId == 1 &&
+                 p.assets == original.assets && p.zoom.cues.size() == 3 &&
+                 p.zoom.cues[0].id == 1 && p.zoom.cues[1].id != 1 &&
+                 p.zoom.cues[1].id != 2 && p.zoom.cues[1].startMs == 1100 &&
+                 p.zoom.cues[2].id == 2 && p.zoom.cues[2].startMs == 2300,
+             QStringLiteral(
+                 "Duplicate did not create independent zooms/source instance")))
+    return false;
+  const quint64 duplicateCue = p.zoom.cues[1].id;
+  if (!check(
+          studioTrimClip(p, 77, 200, 900, operationError) &&
+              p.clips[0].inMs == 0 && p.clips[0].outMs == 1000 &&
+              p.clips[1].inMs == 200 && p.clips[1].outMs == 900 &&
+              p.zoom.cues[1].id == duplicateCue &&
+              p.zoom.cues[1].startMs == 1000 && p.zoom.cues[1].endMs == 1300 &&
+              p.zoom.cues[2].startMs == 2000 && studioDuration(p) == 3700,
+          QStringLiteral(
+              "Trimming duplicate changed original or misplaced scene zooms")))
+    return false;
+  const auto beforeInvalid = p;
+  if (!check(!studioTrimClip(p, 77, 900, 200, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioMoveClip(p, 77, 999, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioDuplicateClip(p, 77, 11, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioInsertScenes(
+                     p, {{1, QStringLiteral("collision.mp4"), first}},
+                     {{99, 1, 0, 500, 1}}, 0, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid,
+             QStringLiteral("Invalid scene change partially mutated project")))
+    return false;
+  if (!check(
+          studioInsertScenes(p, {}, {{99, 2, 0, 500, 1}}, 1, operationError) &&
+              p.clips[1].id == 99 && p.zoom.cues[1].startMs == 1500 &&
+              p.assets == original.assets,
+          QStringLiteral(
+              "Insertion before a scene lost original zoom/source timing")))
+    return false;
+  StudioHistory history;
+  StudioEditState before;
+  before.project = original;
+  before.selectedClip = 12;
+  before.positionMs = 1500;
+  history.reset(before);
+  auto after = before;
+  after.project = p;
+  after.selectedClip = 77;
+  history.push(after);
+  if (!check(history.undo() && history.current() == before && history.redo() &&
+                 history.current() == after,
+             QStringLiteral("Scene edits are not exactly undoable")))
+    return false;
+  StudioProject decoded;
+  if (!check(decodeStudioProject(encodeStudioProject(p), decoded).isEmpty() &&
+                 decoded == p,
+             QStringLiteral("Combined scenes failed save/reopen")))
+    return false;
+
+  auto crossing = original;
+  crossing.zoom.cues = {{55, 500, 1500, 200, 200, {0.3, 0.4}, 2}};
+  if (!check(studioInsertScenes(crossing, {}, {{99, 1, 5000, 5500, 1}}, 2,
+                                operationError) &&
+                 crossing.zoom ==
+                     ZoomTrack{{{55, 500, 1500, 200, 200, {0.3, 0.4}, 2}}},
+             QStringLiteral("Append fragmented an unchanged cross-scene zoom")))
+    return false;
+  if (!check(studioMoveClip(crossing, 12, 11, operationError) &&
+                 crossing.zoom.cues.size() == 2 &&
+                 crossing.zoom.cues[0].id != 55 &&
+                 crossing.zoom.cues[0].startMs == 0 &&
+                 crossing.zoom.cues[0].endMs == 500 &&
+                 crossing.zoom.cues[1].id == 55 &&
+                 crossing.zoom.cues[1].startMs == 2500 &&
+                 crossing.zoom.cues[1].endMs == 3000,
+             QStringLiteral("Reordered cross-scene zoom did not preserve first "
+                            "original fragment identity")))
+    return false;
+  auto capped = original;
+  capped.clips = {{11, 1, 0, 10000, 1}};
+  capped.zoom.cues.clear();
+  capped.trimInMs = 0;
+  capped.trimOutMs = -1;
+  for (int i = 0; i < kMaxZoomCues; ++i)
+    capped.zoom.cues.push_back({static_cast<quint64>(i + 1),
+                                i * 250,
+                                i * 250 + 200,
+                                60,
+                                60,
+                                {0.5, 0.5},
+                                2});
+  const auto exactCap = capped;
+  if (!check(!studioDuplicateClip(capped, 11, 77, operationError) &&
+                 operationError.contains(QStringLiteral("zoom-cue limit")) &&
+                 capped == exactCap,
+             QStringLiteral("Zoom fragment overflow silently discarded edits")))
+    return false;
+  return true;
+}
 } // namespace
 
 bool runStudioProjectChecks(QString &error) {
@@ -335,5 +493,5 @@ bool runStudioProjectChecks(QString &error) {
                  loadStudioProject(file).project == empty,
              QStringLiteral("Saving empty project failed")))
     return false;
-  return cutChecks(error);
+  return cutChecks(error) && sceneChecks(error);
 }

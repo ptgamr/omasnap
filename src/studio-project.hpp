@@ -110,6 +110,23 @@ struct StudioCutResult {
 [[nodiscard]] qint64 studioTimeAfterDelete(qint64 timeMs, qint64 fromMs,
                                            qint64 toMs);
 
+/** Structural scene edits reset the review/export range to the whole project.
+ * Zooms follow the retained source content of each scene; scene-bound fragments
+ * shorter than kMinCueMs cannot form a cue. Exceeding the cue cap is an error,
+ * not silent truncation. False with empty error means an exact no-op. */
+[[nodiscard]] bool studioInsertScenes(StudioProject &,
+                                      const QVector<StudioAsset> &newAssets,
+                                      const QVector<StudioClip> &newClips,
+                                      qsizetype insertionIndex, QString &error);
+/** beforeClipId == 0 appends; otherwise move immediately before that scene. */
+[[nodiscard]] bool studioMoveClip(StudioProject &, quint64 clipId,
+                                  quint64 beforeClipId, QString &error);
+[[nodiscard]] bool studioDuplicateClip(StudioProject &, quint64 clipId,
+                                       quint64 newClipId, QString &error);
+[[nodiscard]] bool studioTrimClip(StudioProject &, quint64 clipId,
+                                  qint64 sourceInMs, qint64 sourceOutMs,
+                                  QString &error);
+
 struct StudioEditState {
   StudioProject project;
   quint64 selectedClip = 0;

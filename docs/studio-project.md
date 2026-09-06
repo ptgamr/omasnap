@@ -64,3 +64,29 @@ explicit range or clip; a selected zoom consumes Delete without deleting video.
 Text fields retain their normal editing shortcuts. Composition changes clear
 stale decoded frames so removed material cannot remain in the editing preview
 while the next valid source frame is being prepared.
+
+## Scene arrangement
+
+Import batches are probed on a worker and published atomically: one invalid
+file leaves the entire project unchanged. A local file drop on the timeline
+inserts at the marked boundary; drops elsewhere and Add scenes append. The
+initial project's canvas/FPS remain fixed, including after deleting all clips.
+Imports, ordering, duplicates, and source-edge trims share project history.
+Undoing an import removes references only; it never deletes a media file.
+
+In Select mode, drag scene bodies to reorder and selected scene edges to trim.
+The ruler remains a scrubbing target. The Clip inspector offers source in/out
+milliseconds, Duplicate, Earlier, and Later as precise alternatives. I/O/R
+continue to control the project-wide review/export range, not the selected scene.
+Structural scene edits reset that range to the full composition so newly added
+material is not silently excluded from export.
+
+Zooms follow retained scene content through source time. Duplicates receive new
+cue IDs; moved fragments keep an original ID on the first surviving original
+piece and allocate fresh IDs for separated pieces. Adjacent unchanged pieces
+merge. Fragments shorter than the existing 200 ms cue minimum are discarded;
+an edit exceeding the 40-cue cap is rejected with an explanation. A continuous
+edge drag evaluates against its starting snapshot and is one undo step.
+
+Scene files keep their recorded timing, including VFR; export normalizes to the
+project FPS. Audio remains primary-stream-only, with silence for silent scenes.

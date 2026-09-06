@@ -324,6 +324,20 @@ void StudioTimeline::clearSelection() {
   emit selectionChanged();
 }
 
+quint64 StudioTimeline::insertionBefore(qreal x) const {
+  if (project_)
+    for (const auto &span : studioComposition(*project_))
+      if (x < xForTime((span.startMs + span.endMs) / 2))
+        return span.clipId;
+  return 0;
+}
+
+void StudioTimeline::showInsertion(quint64 before, bool visible) {
+  insertionBefore_ = before;
+  insertionVisible_ = visible;
+  update();
+}
+
 void StudioTimeline::contextMenuEvent(QContextMenuEvent *event) {
   auto *menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose);
@@ -414,6 +428,14 @@ StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {
       return Grab::RangeEnd;
     return Grab::RangeNew;
   }
+  if (trackRect().contains(position) && selectedClip_ && project_)
+    for (const auto &span : studioComposition(*project_))
+      if (span.clipId == selectedClip_) {
+        if (std::abs(position.x() - xForTime(span.startMs)) <= kGrabSlack)
+          return Grab::SceneStart;
+        if (std::abs(position.x() - xForTime(span.endMs)) <= kGrabSlack)
+          return Grab::SceneEnd;
+      }
   // The cue lane is its own row, so a click there never means the playhead.
   if (cueLaneRect().contains(position)) {
     Grab edge = Grab::CueBody;
@@ -470,6 +492,22 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
     return;
   emit editStarted();
   grabbed_ = grabAt(event->position());
+  scenePress_ = event->position();
+  sceneDurationMs_ = duration_;
+  grabbedScene_ = {};
+  if (project_ && trackRect().contains(event->position()) && !rangeMode_) {
+    quint64 id = selectedClip_;
+    if (grabbed_ == Grab::Playhead)
+      if (const auto frame = studioFrameAt(
+              *project_, qMin(duration_ - 1, timeForX(event->position().x()))))
+        id = frame->span.clipId;
+    for (const auto &clip : project_->clips)
+      if (clip.id == id)
+        grabbedScene_ = clip;
+    for (const auto &span : studioComposition(*project_))
+      if (span.clipId == id)
+        sceneStartMs_ = span.startMs;
+  }
   if (grabbed_ == Grab::RangeNew) {
     rangeAnchor_ = timeForX(event->position().x());
     setRange(rangeAnchor_, rangeAnchor_);
@@ -509,7 +547,9 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
       hovered_ = hover;
       const bool resizes = hover == Grab::In || hover == Grab::Out ||
                            hover == Grab::CueStart || hover == Grab::CueEnd ||
-                           hover == Grab::RangeStart || hover == Grab::RangeEnd;
+                           hover == Grab::RangeStart ||
+                           hover == Grab::RangeEnd ||
+                           hover == Grab::SceneStart || hover == Grab::SceneEnd;
       setCursor(resizes                  ? Qt::SizeHorCursor
                 : hover == Grab::CueBody ? Qt::OpenHandCursor
                                          : Qt::ArrowCursor);
@@ -518,6 +558,35 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
     return;
   }
   const qint64 time = timeForX(event->position().x());
+  if (grabbed_ == Grab::Playhead && cuesEditable_ && grabbedScene_.id &&
+      (event->position() - scenePress_).manhattanLength() >=
+          QApplication::startDragDistance())
+    grabbed_ = Grab::SceneMove;
+  if (grabbed_ == Grab::SceneMove) {
+    showInsertion(insertionBefore(event->position().x()), true);
+    return;
+  }
+  if ((grabbed_ == Grab::SceneStart || grabbed_ == Grab::SceneEnd) &&
+      project_) {
+    const auto *asset = studioAsset(*project_, grabbedScene_.assetId);
+    if (!asset)
+      return;
+    const qint64 source =
+        (grabbed_ == Grab::SceneStart ? grabbedScene_.inMs
+                                      : grabbedScene_.outMs) +
+        qRound64((event->position().x() - scenePress_.x()) * sceneDurationMs_ /
+                 trackRect().width() * grabbedScene_.speed);
+    emit sceneTrimRequested(
+        grabbedScene_.id,
+        grabbed_ == Grab::SceneStart
+            ? qBound<qint64>(0, source, grabbedScene_.outMs - 1)
+            : grabbedScene_.inMs,
+        grabbed_ == Grab::SceneEnd
+            ? qBound<qint64>(grabbedScene_.inMs + 1, source,
+                             asset->source.durationMs)
+            : grabbedScene_.outMs);
+    return;
+  }
   if (grabbed_ == Grab::CueBody || grabbed_ == Grab::CueStart ||
       grabbed_ == Grab::CueEnd) {
     if (grabbedCue_ == 0 || !track_)
@@ -568,6 +637,9 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
   case Grab::CueBody:
   case Grab::CueStart:
   case Grab::CueEnd:
+  case Grab::SceneStart:
+  case Grab::SceneEnd:
+  case Grab::SceneMove:
     break;
   }
 }
@@ -575,6 +647,9 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
 void StudioTimeline::mouseReleaseEvent(QMouseEvent *event) {
   if (event->button() != Qt::LeftButton)
     return;
+  if (grabbed_ == Grab::SceneMove)
+    emit sceneMoveRequested(grabbedScene_.id, insertionBefore_);
+  showInsertion(0, false);
   grabbed_ = Grab::None;
   grabbedCue_ = 0;
   emit editFinished();
@@ -648,6 +723,13 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
       painter.drawText(scene.adjusted(8, 0, -8, 0), Qt::AlignVCenter,
                        asset ? QFileInfo(asset->path).fileName()
                              : QStringLiteral("Missing source"));
+      if (span.clipId == selectedClip_ && !rangeMode_) {
+        painter.fillRect(QRectF(scene.left(), scene.top(), 3, scene.height()),
+                         chrome_.accent);
+        painter.fillRect(
+            QRectF(scene.right() - 3, scene.top(), 3, scene.height()),
+            chrome_.accent);
+      }
       painter.restore();
     }
   } else
@@ -666,6 +748,16 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
     painter.fillRect(QRectF(range.left() - 3, range.top(), 6, range.height()),
                      chrome_.accent);
     painter.fillRect(QRectF(range.right() - 3, range.top(), 6, range.height()),
+                     chrome_.accent);
+  }
+  if (insertionVisible_) {
+    qint64 at = duration_;
+    if (project_)
+      for (const auto &span : studioComposition(*project_))
+        if (span.clipId == insertionBefore_)
+          at = span.startMs;
+    const qreal x = xForTime(at);
+    painter.fillRect(QRectF(x - 2, track.top() - 8, 4, track.height() + 16),
                      chrome_.accent);
   }
   painter.setPen(Qt::NoPen);
@@ -892,6 +984,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       QStringLiteral("Remove selected zoom · Delete"));
   zoomControls->addStretch();
   auto *clipPage = new QWidget(tabs);
+  clipPage->setObjectName(QStringLiteral("studioScenePage"));
   auto *clipControls = new QVBoxLayout(clipPage);
   clipControls->setContentsMargins(0, 22, 0, 0);
   clipControls->setSpacing(14);
@@ -899,6 +992,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   sourceLabel_->setWordWrap(true);
   sourceLabel_->setFont(chromeMonoFont(12));
   clipControls->addWidget(sourceLabel_);
+  setupScenes(clipControls);
   clipControls->addWidget(inButton);
   clipControls->addWidget(outButton);
   clipControls->addWidget(resetButton_);
@@ -906,15 +1000,21 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   outButton->setToolTip(QStringLiteral("Set trim end at playhead · O"));
   resetButton_->setToolTip(QStringLiteral("Keep the complete recording · R"));
   auto *clipHint = new QLabel(
-      QStringLiteral("Drag the handles on the video lane to choose the range "
-                     "to export. The original recording stays untouched."),
+      QStringLiteral("Drag scenes to arrange; drag a selected scene's edges "
+                     "to trim it. I/O set the project export range. Originals "
+                     "stay untouched."),
       clipPage);
   clipHint->setWordWrap(true);
   clipHint->setObjectName(QStringLiteral("muted"));
   clipControls->addWidget(clipHint);
   clipControls->addStretch();
   tabs->addTab(zoomPage, QStringLiteral("Zoom"));
-  tabs->addTab(clipPage, QStringLiteral("Clip"));
+  auto *clipScroll = new QScrollArea(tabs);
+  clipScroll->viewport()->setObjectName(QStringLiteral("studioScrollViewport"));
+  clipScroll->setWidgetResizable(true);
+  clipScroll->setFrameShape(QFrame::NoFrame);
+  clipScroll->setWidget(clipPage);
+  tabs->addTab(clipScroll, QStringLiteral("Clip"));
   auto *stylePage = new QWidget(tabs);
   auto *styleControls = new QVBoxLayout(stylePage);
   styleControls->setContentsMargins(0, 22, 0, 0);
@@ -1041,6 +1141,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::deleteSelection);
   connect(timeline_, &StudioTimeline::selectionChanged, this,
           &StudioWindow::refreshControls);
+  connect(timeline_, &StudioTimeline::sceneMoveRequested, this,
+          &StudioWindow::moveScene);
+  connect(timeline_, &StudioTimeline::sceneTrimRequested, this,
+          &StudioWindow::trimScene);
   connect(timeline_, &StudioTimeline::splitRequested, this,
           &StudioWindow::splitAtPlayhead);
   connect(timeline_, &StudioTimeline::deleteRequested, this,
@@ -1430,6 +1534,7 @@ void StudioWindow::captureCursor() {
 
 void StudioWindow::beginEdit() {
   captureCursor();
+  gestureProject_ = project_;
   editGesture_ = true;
 }
 
@@ -1522,6 +1627,8 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
   restoring_ = true;
   for (const auto &clip : project_.clips)
     nextClipId_ = qMax(nextClipId_, clip.id + 1);
+  for (const auto &asset : project_.assets)
+    nextAssetId_ = qMax(nextAssetId_, asset.id + 1);
   missingAssets_.clear();
   for (const auto &asset : project_.assets)
     if (missingPaths_.contains(asset.path))
@@ -1613,7 +1720,8 @@ void StudioWindow::refreshThumbnails() {
 }
 
 void StudioWindow::relinkAsset() {
-  if (missingAssets_.isEmpty() || export_ || relinkWatcher_.isRunning())
+  if (missingAssets_.isEmpty() || export_ || importing_ ||
+      relinkWatcher_.isRunning())
     return;
   auto *dialog = new QFileDialog(this, QStringLiteral("Relink missing media"));
   dialog->setAttribute(Qt::WA_DeleteOnClose);
@@ -1621,7 +1729,7 @@ void StudioWindow::relinkAsset() {
   dialog->setFileMode(QFileDialog::ExistingFile);
   connect(
       dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
-        if (missingAssets_.isEmpty() || relinking_ || export_)
+        if (missingAssets_.isEmpty() || relinking_ || export_ || importing_)
           return;
         captureCursor();
         relinking_ = true;
@@ -1663,8 +1771,8 @@ StudioWindow::~StudioWindow() = default;
 void StudioWindow::closeEvent(QCloseEvent *event) {
   if (editGesture_)
     endEdit();
-  if (relinking_) {
-    setStatus(QStringLiteral("Wait for media relinking to finish"));
+  if (relinking_ || importing_) {
+    setStatus(QStringLiteral("Wait for media loading to finish"));
     event->ignore();
     return;
   }
@@ -1698,7 +1806,8 @@ void StudioWindow::setStatus(const QString &status, bool error) {
 }
 
 void StudioWindow::refreshControls() {
-  const bool exporting = export_ || relinking_;
+  const bool exporting = export_ || relinking_ || importing_;
+  refreshSceneControls();
   const qint64 duration = timeline_->duration();
   const bool trimmed = duration > 0 && (timeline_->trimIn() > 0 ||
                                         timeline_->trimOut() < duration);
@@ -1833,7 +1942,8 @@ void StudioWindow::stepFrame(int direction) {
 
 void StudioWindow::setTrimIn() {
   captureCursor();
-  if (!loaded_ || export_ || relinking_ || timeline_->duration() <= 0)
+  if (!loaded_ || export_ || relinking_ || importing_ ||
+      timeline_->duration() <= 0)
     return;
   timeline_->setTrim(
       qMin(player_->position(), timeline_->trimOut() - kMinimumTrimMs),
@@ -1844,7 +1954,7 @@ void StudioWindow::setTrimIn() {
 
 void StudioWindow::setTrimOut() {
   captureCursor();
-  if (!loaded_ || export_ || relinking_)
+  if (!loaded_ || export_ || relinking_ || importing_)
     return;
   timeline_->setTrim(
       timeline_->trimIn(),
@@ -1855,7 +1965,7 @@ void StudioWindow::setTrimOut() {
 
 void StudioWindow::resetTrim() {
   captureCursor();
-  if (!loaded_ || export_ || relinking_)
+  if (!loaded_ || export_ || relinking_ || importing_)
     return;
   timeline_->setTrim(0, timeline_->duration());
   rememberEdit();
@@ -1993,6 +2103,10 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
     action = [this] { setTrimIn(); };
   else if (key == Qt::Key_O && plain)
     action = [this] { setTrimOut(); };
+  else if (key == Qt::Key_O && ctrl)
+    action = [this] { chooseScenes(); };
+  else if (key == Qt::Key_D && ctrl)
+    action = [this] { duplicateScene(); };
   else if (key == Qt::Key_R && plain)
     action = [this] { resetTrim(); };
   else if (key == Qt::Key_B && plain)
@@ -2093,6 +2207,8 @@ void StudioWindow::showShortcuts() {
                      "Delete / Backspace    Delete range, clip, or zoom\n"
                      "Ctrl + Z              Undo\n"
                      "Ctrl+Shift+Z / Ctrl+Y  Redo\n"
+                     "Ctrl+O               Add scene files\n"
+                     "Ctrl+D               Duplicate selected scene\n"
                      "M                     Mute / unmute preview\n"
                      "Ctrl + S              Save edits\n"
                      "Ctrl + E              Export MP4\n"

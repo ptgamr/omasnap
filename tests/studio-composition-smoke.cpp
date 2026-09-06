@@ -208,6 +208,90 @@ bool runCutExportChecks(const QString &ffmpeg, const QTemporaryDir &scratch,
   error.clear();
   return true;
 }
+
+bool runSceneExportChecks(const QString &ffmpeg,
+                          const QVector<StudioAsset> &assets,
+                          const QTemporaryDir &scratch, QString &error) {
+  StudioProject project;
+  // The import controller picks the initial canvas once. Structural edits
+  // must retain it, including when later clips use a different shape/FPS.
+  project.canvas = assets.first().source.size;
+  project.fpsNumerator = assets.first().source.fpsNumerator;
+  project.fpsDenominator = assets.first().source.fpsDenominator;
+  const auto checked = [&error](bool result, const char *message) {
+    if (!result && error.isEmpty())
+      error = QString::fromLatin1(message);
+    return result;
+  };
+  if (!checked(studioInsertScenes(
+                   project, assets,
+                   {{1, 1, 0, 1000, 1}, {2, 2, 0, 1000, 1}, {3, 3, 0, 1000, 1}},
+                   0, error),
+               "three-scene import was rejected") ||
+      !checked(studioMoveClip(project, 3, 1, error),
+               "scene reorder was rejected") ||
+      !checked(studioDuplicateClip(project, 3, 4, error),
+               "scene duplicate was rejected") ||
+      !checked(studioTrimClip(project, 4, 250, 750, error),
+               "independent scene trim was rejected"))
+    return false;
+  StudioHistory history;
+  StudioEditState before;
+  before.project = project;
+  before.selectedClip = 4;
+  before.positionMs = 1200;
+  history.reset(before);
+  if (!checked(studioMoveClip(project, 4, 0, error),
+               "scene append reorder was rejected"))
+    return false;
+  StudioEditState after = before;
+  after.project = project;
+  after.positionMs = 3200;
+  history.push(after);
+  if (!checked(history.undo() && history.current() == before &&
+                   history.redo() && history.current() == after,
+               "scene reorder undo/redo lost composition or selection"))
+    return false;
+  const QString projectPath = scratch.filePath("combined.omasnap-project.json");
+  error = saveStudioProject(projectPath, project);
+  if (!error.isEmpty())
+    return false;
+  const auto reopened = loadStudioProject(projectPath);
+  if (!checked(reopened.error.isEmpty() && reopened.missingAssets.isEmpty() &&
+                   reopened.project == project &&
+                   studioDuration(reopened.project) == 3500 &&
+                   project.canvas == assets.first().source.size &&
+                   project.fpsNumerator == 24,
+               "combined scene save/reopen or locked canvas/FPS changed"))
+    return false;
+  const QString outputPath = scratch.filePath("combined.mp4");
+  if (!exportProject(ffmpeg, reopened.project, outputPath, error))
+    return false;
+  const QPoint centre(project.canvas.width() / 2, project.canvas.height() / 2);
+  const auto green = sample(ffmpeg, outputPath, 0.5, error);
+  const auto red = sample(ffmpeg, outputPath, 1.5, error);
+  const auto blue = sample(ffmpeg, outputPath, 2.5, error);
+  const auto duplicate = sample(ffmpeg, outputPath, 3.25, error);
+  if (!checked(!green.isNull() && !red.isNull() && !blue.isNull() &&
+                   !duplicate.isNull() && green.size() == project.canvas &&
+                   green.pixelColor(centre).green() > 90 &&
+                   red.pixelColor(centre).red() > 200 &&
+                   blue.pixelColor(centre).blue() > 200 &&
+                   duplicate.pixelColor(centre).green() > 90,
+               "import/reorder/duplicate/trim output scene sequence differed"))
+    return false;
+  QByteArray audio;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", outputPath, "-vn", "-ac", "1", "-ar", "48000",
+            "-f", "s16le", "-"},
+           audio, error))
+    return false;
+  return checked(
+      std::abs(audio.size() / 96000.0 - 3.5) < 0.04 &&
+          audioEnergy(audio, 0.5) > 0.01 && audioEnergy(audio, 1.5) > 0.01 &&
+          audioEnergy(audio, 2.5) < 0.0001 && audioEnergy(audio, 3.25) > 0.01,
+      "reopened scene audio order or duration differed");
+}
 } // namespace
 
 bool runStudioCompositionChecks(QString &error) {
@@ -274,6 +358,8 @@ bool runStudioCompositionChecks(QString &error) {
     source.audioStreams = i == 1 ? 0 : i == 2 ? 2 : 1;
     project.assets.push_back({static_cast<quint64>(i + 1), path, source});
   }
+  if (!runSceneExportChecks(ffmpeg, project.assets, scratch, error))
+    return false;
   project.clips = {{1, 1, 500, 1500, 2},
                    {2, 2, 500, 1500, 1},
                    {3, 1, 0, 500, 1},

@@ -151,6 +151,7 @@ QString StudioChrome::styleSheet() const {
   QString sheet = QStringLiteral(R"(
 QWidget { color: @text; font-family: monospace; }
 QWidget#studioHeader, QWidget#studioInspector, QWidget#timelinePanel, QDialog { background: @background; }
+QWidget#studioScenePage, QWidget#studioScrollViewport { background: @background; }
 QLabel#muted, QLabel#section { color: @muted; }
 QLabel[studioError="true"] { color: @urgent; }
 QPushButton {

@@ -18,7 +18,8 @@ Omarchy Quattro ----------------------->  [DONE] 00 Theme palette + sharp chrome
                                           FIRST: foundation for all later UI
 
 Bettershot code + demos ---------------->  [PART] Workspace, styling, manual zoom
-                                          [TODO] Clip edits, masks, auto zoom,
+                                          [DONE] Non-destructive clip edits
+                                          [TODO] Masks, auto zoom,
                                                  speed/audio, camera, captions,
                                                  keystroke overlays
 
@@ -31,13 +32,13 @@ Omascreen website + screenshots -------->  [TODO] Moments / Follow / Raw / Paced
                                                  vignettes, wipes / design tray
 
 Your workflow requirements ------------>  [DONE] Drag-select -> Delete -> Undo
-                                          [TODO] Import and reorder scene files
+                                          [DONE] Import and reorder scene files
 
 Omasnap native implementation --------->  [DONE] GPU playback, basic keyboard
                                                  transport, single-source trim,
                                                  edit undo/save, MP4 export
 
-NEXT: 03 Scenes -> 04 Transitions
+NEXT: 04 Transitions
 ```
 
 "Comes from" identifies the behavioral/design reference, **not copied code or
@@ -80,9 +81,9 @@ exists. The larger parity targets remain in the matrix below.
 | **00** | **Quattro design foundation** | **Q + U** | **DONE** | `57e3700`; inherited palette/reload/fallback, square mono controls; approved to continue |
 | 01 | Project/composition model | B + U + N | DONE | Assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full and live checks pass |
 | 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | DONE | Explicit range tool, handles, clip/zoom selection, split, delete, exact history; decoded audio/video and UI checks pass |
-| 03 | Import, combine, duplicate, reorder scenes | U | TODO | Multi-file composition is requested here, not verified in Bettershot's single-recording clip model |
+| 03 | Import, combine, duplicate, reorder scenes | U | DONE | Atomic multi-file import/drop, markers, reorder/duplicate/source trims, source-anchored zooms, undo and reopen; full/live checks pass |
 | 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | TODO | No scene transitions in current Studio |
-| 05 | Full timeline and keyboard workflow | B + U + N | PART | Transport/hotkeys/thumbnails landed; range tools, snapping, timeline zoom, waveforms still needed |
+| 05 | Full timeline and keyboard workflow | B + U + N | PART | Transport, range tools, scene shortcuts, thumbnails landed; snapping, timeline zoom, waveforms still needed |
 | 06 | Background/layout inspector parity | B | PART | Colors/padding/corners landed; gradients, wallpaper, aspect, crop, shadows, presets pending |
 | 07 | Timed blur/pixelate/hide masks | B; U + N privacy requirements | TODO | Video masks and mask lane pending; screenshot redaction is not Studio implementation |
 | 08 | Title cards, text overlays, design tray | O-web + U | TODO | Editable timed text and reusable designs pending |
@@ -142,9 +143,9 @@ conventions. Establish that foundation before adding editing features.
 - Space transport, frame stepping, five-second seeking, trim/zoom commands,
   save/export commands, and shortcut help.
 
-**Not supported yet:** importing several scenes through the UI, reordering
-scenes, or transitions between them. Range cuts, splits, and selected-clip/zoom
-deletion now work on the shared composition model. Import/reorder is next.
+**Not supported yet:** scene transitions. Importing several scenes, reordering,
+duplicating, and trimming them now use the shared composition model alongside
+range cuts, splits, and selected-clip/zoom deletion.
 
 ## Reference findings and evidence boundaries
 
@@ -294,22 +295,31 @@ deleted frames. Non-unit-speed cuts use explicit duration-conserving snapping.
 
 ### 03 — Import and combine scenes
 
-- [ ] Drag video files from the file manager into Studio; also provide an Add
+- [x] Drag video files from the file manager into Studio; also provide an Add
   scenes action and `Ctrl+O` import command.
-- [ ] Show an insertion marker: drop on a boundary to insert there, or after
+- [x] Show an insertion marker: drop on a boundary to insert there, or after
   the last clip to append. Multiple files arrive as distinct scenes.
-- [ ] Reorder clips by dragging, duplicate them, trim individual edges, and
+- [x] Reorder clips by dragging, duplicate them, trim individual edges, and
   allow the same source to appear multiple times with independent edits.
-- [ ] Show each scene's filename/thumbnail, duration, and selection state.
-- [ ] Probe asynchronously; explain invalid/unsupported media without losing
+- [x] Show each scene's filename/thumbnail, duration, and selection state.
+- [x] Probe asynchronously; explain invalid/unsupported media without losing
   the existing project. Establish a clear output aspect/FPS policy for mixed media.
-- [ ] Keep imports, reorder, duplicate, and trim undoable and persistent.
+- [x] Keep imports, reorder, duplicate, and trim undoable and persistent.
 
 Acceptance: combine three recordings of different dimensions/frame rates,
 reorder them, undo, reopen, and export. Frame order, duration, and audio agree
 with the project. Missing audio is silence, not an export failure. Handle VFR
 explicitly through timestamp-aware playback or an announced normalization path;
 never silently assume that all imported clips are CFR.
+
+Delivery: `feat(studio): import and arrange independent scenes`.
+Validated with `make check`, live Wayland GPU/keyboard tests, and 1280×820 /
+980×680 inspector screenshots using real 4K recordings. Tests cover batch and
+boundary drops, invalid-batch atomicity, drag reorder/edge trim, exact undo,
+duplicate independence, reopen, mixed-source export pixels/audio and canvas/FPS.
+Zooms follow retained scene content; cue-cap overflow is refused. Scene trims
+and arrangement reset the project-wide export range. Scroll surfaces inherit
+the explicit Quattro palette, with a rendered-background regression check.
 
 ### 04 — Scene transitions
 

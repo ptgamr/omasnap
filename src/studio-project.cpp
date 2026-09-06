@@ -2,6 +2,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -463,6 +464,210 @@ StudioCutResult studioDeleteClip(StudioProject &p, quint64 id) {
     if (span.clipId == id)
       return studioDeleteRange(p, span.startMs, span.endMs, 0);
   return {};
+}
+
+namespace {
+struct ZoomFragment {
+  ZoomCue cue;
+  qint64 oldStartMs = 0;
+  qint64 oldEndMs = 0;
+};
+std::optional<ZoomFragment> sceneZoom(const ZoomCue &cue,
+                                      const StudioSpan &oldSpan,
+                                      const StudioSpan &newSpan) {
+  const qint64 oldStart = qMax(cue.startMs, oldSpan.startMs);
+  const qint64 oldEnd = qMin(cue.endMs, oldSpan.endMs);
+  if (oldStart >= oldEnd)
+    return std::nullopt;
+  const double sourceStart =
+      oldStart == oldSpan.startMs
+          ? oldSpan.inMs
+          : static_cast<double>(oldSpan.inMs) +
+                static_cast<double>(oldStart - oldSpan.startMs) * oldSpan.speed;
+  const double sourceEnd =
+      oldEnd == oldSpan.endMs
+          ? oldSpan.outMs
+          : static_cast<double>(oldSpan.inMs) +
+                static_cast<double>(oldEnd - oldSpan.startMs) * oldSpan.speed;
+  const double keptStart = qMax(sourceStart, static_cast<double>(newSpan.inMs));
+  const double keptEnd = qMin(sourceEnd, static_cast<double>(newSpan.outMs));
+  if (keptStart >= keptEnd)
+    return std::nullopt;
+  auto mapped = cue;
+  mapped.startMs =
+      qBound(newSpan.startMs,
+             newSpan.startMs +
+                 qRound64((keptStart - static_cast<double>(newSpan.inMs)) /
+                          newSpan.speed),
+             newSpan.endMs);
+  mapped.endMs = qBound(
+      newSpan.startMs,
+      newSpan.startMs + qRound64((keptEnd - static_cast<double>(newSpan.inMs)) /
+                                 newSpan.speed),
+      newSpan.endMs);
+  if (mapped.startMs >= mapped.endMs)
+    return std::nullopt;
+  return ZoomFragment{mapped, oldStart, oldEnd};
+}
+bool finishSceneChange(StudioProject &project, StudioProject edited,
+                       QString &error, quint64 originalId = 0,
+                       quint64 duplicateId = 0) {
+  edited.trimInMs = 0;
+  edited.trimOutMs = -1;
+  edited.zoom.cues.clear();
+  error = validateStudioProject(edited);
+  if (!error.isEmpty())
+    return false;
+  const auto oldSpans = studioComposition(project);
+  QHash<quint64, StudioSpan> newSpans;
+  for (const auto &span : studioComposition(edited))
+    newSpans.insert(span.clipId, span);
+  quint64 nextCueId = 1;
+  for (const auto &cue : project.zoom.cues)
+    nextCueId = qMax(nextCueId, cue.id + 1);
+  for (const auto &cue : project.zoom.cues) {
+    QVector<ZoomFragment> originals, duplicates;
+    for (const auto &oldSpan : oldSpans) {
+      const auto found = newSpans.constFind(oldSpan.clipId);
+      if (found != newSpans.cend()) {
+        const auto mapped = sceneZoom(cue, oldSpan, *found);
+        if (mapped) {
+          // Appending a scene must not fragment an otherwise unchanged cue.
+          // Merge only pieces still adjacent in both old and new order.
+          if (!originals.isEmpty() &&
+              originals.back().oldEndMs == mapped->oldStartMs &&
+              originals.back().cue.endMs == mapped->cue.startMs) {
+            originals.back().cue.endMs = mapped->cue.endMs;
+            originals.back().oldEndMs = mapped->oldEndMs;
+          } else
+            originals.push_back(*mapped);
+        }
+      }
+      if (oldSpan.clipId == originalId && newSpans.contains(duplicateId)) {
+        const auto mapped =
+            sceneZoom(cue, oldSpan, newSpans.value(duplicateId));
+        if (mapped)
+          duplicates.push_back(*mapped);
+      }
+    }
+    bool retainedId = false;
+    const auto append = [&](const ZoomFragment &fragment, bool duplicate) {
+      if (fragment.cue.endMs - fragment.cue.startMs < kMinCueMs)
+        return true;
+      if (edited.zoom.cues.size() >= kMaxZoomCues ||
+          ((duplicate || retainedId) && nextCueId > 9007199254740991ULL)) {
+        error = QStringLiteral("Scene change would exceed the %1 zoom-cue "
+                               "limit. Remove zooms before retrying.")
+                    .arg(kMaxZoomCues);
+        return false;
+      }
+      auto result = fragment.cue;
+      if (duplicate || retainedId)
+        result.id = nextCueId++;
+      else
+        retainedId = true;
+      edited.zoom.cues.push_back(result);
+      return true;
+    };
+    for (const auto &fragment : originals)
+      if (!append(fragment, false))
+        return false;
+    for (const auto &fragment : duplicates)
+      if (!append(fragment, true))
+        return false;
+  }
+  std::sort(
+      edited.zoom.cues.begin(), edited.zoom.cues.end(),
+      [](const ZoomCue &a, const ZoomCue &b) { return a.startMs < b.startMs; });
+  error = validateStudioProject(edited);
+  if (!error.isEmpty())
+    return false;
+  project = std::move(edited);
+  return true;
+}
+qsizetype clipIndex(const StudioProject &p, quint64 id) {
+  for (qsizetype i = 0; i < p.clips.size(); ++i)
+    if (p.clips[i].id == id)
+      return i;
+  return -1;
+}
+} // namespace
+bool studioInsertScenes(StudioProject &p, const QVector<StudioAsset> &assets,
+                        const QVector<StudioClip> &clips, qsizetype index,
+                        QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  if (clips.isEmpty()) {
+    if (!assets.isEmpty())
+      error = QStringLiteral("Import must contain at least one scene.");
+    return false;
+  }
+  if (index < 0 || index > p.clips.size()) {
+    error = QStringLiteral("The scene insertion boundary no longer exists.");
+    return false;
+  }
+  auto edited = p;
+  edited.assets.append(assets);
+  for (const auto &clip : clips)
+    edited.clips.insert(index++, clip);
+  return finishSceneChange(p, std::move(edited), error);
+}
+bool studioMoveClip(StudioProject &p, quint64 id, quint64 beforeId,
+                    QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = clipIndex(p, id);
+  if (index < 0 || (beforeId && clipIndex(p, beforeId) < 0)) {
+    error = QStringLiteral(
+        "The scene to move or insertion boundary no longer exists.");
+    return false;
+  }
+  if (id == beforeId)
+    return false;
+  auto edited = p;
+  const auto clip = edited.clips.takeAt(index);
+  const auto destination =
+      beforeId ? clipIndex(edited, beforeId) : edited.clips.size();
+  edited.clips.insert(destination, clip);
+  if (edited.clips == p.clips)
+    return false;
+  return finishSceneChange(p, std::move(edited), error);
+}
+bool studioDuplicateClip(StudioProject &p, quint64 id, quint64 newId,
+                         QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = clipIndex(p, id);
+  if (index < 0 || !unusedClipId(p, newId)) {
+    error = QStringLiteral(
+        "Cannot duplicate a missing scene or reuse its identity.");
+    return false;
+  }
+  auto edited = p;
+  auto copy = p.clips[index];
+  copy.id = newId;
+  edited.clips.insert(index + 1, copy);
+  return finishSceneChange(p, std::move(edited), error, id, newId);
+}
+bool studioTrimClip(StudioProject &p, quint64 id, qint64 in, qint64 out,
+                    QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = clipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The scene to trim no longer exists.");
+    return false;
+  }
+  if (p.clips[index].inMs == in && p.clips[index].outMs == out)
+    return false;
+  auto edited = p;
+  edited.clips[index].inMs = in;
+  edited.clips[index].outMs = out;
+  return finishSceneChange(p, std::move(edited), error);
 }
 void StudioHistory::reset(const StudioEditState &state) {
   states_ = {state};

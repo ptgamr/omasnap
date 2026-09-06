@@ -217,6 +217,7 @@ qt_add_executable(omasnap-studio-smoke
   tests/studio-composition-smoke.cpp tests/studio-composition-smoke.hpp
   tests/studio-playback-smoke.cpp tests/studio-playback-smoke.hpp
   tests/studio-cuts-ui-smoke.cpp tests/studio-cuts-ui-smoke.hpp
+  tests/studio-scenes-ui-smoke.cpp tests/studio-scenes-ui-smoke.hpp
   tests/studio-theme-smoke.cpp
   tests/studio-theme-smoke.hpp
   src/studio-theme.cpp
@@ -227,6 +228,7 @@ qt_add_executable(omasnap-studio-smoke
   tests/zoom-track-smoke.cpp
   tests/zoom-track-smoke.hpp
   src/studio.cpp
+  src/studio-scenes.cpp
   src/studio.hpp
   src/studio-preview.cpp
   src/studio-preview.hpp
@@ -264,6 +266,7 @@ qt_add_executable(omasnap-studio
   src/studio-video.hpp
   src/studio-main.cpp
   src/studio.cpp
+  src/studio-scenes.cpp
   src/studio.hpp
   src/studio-preview.cpp
   src/studio-preview.hpp

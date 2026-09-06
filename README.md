@@ -300,7 +300,17 @@ speed, project-time zoom cues, and canvas settings in one non-destructive docume
 Open a video or its `.omasnap.json` project directly. Missing sources expose
 **Relink media**; empty projects remain valid. The first source defines the output
 canvas (rounded down to even dimensions) and FPS; other sources fit that canvas.
-Scene import/reorder controls follow in the next milestone.
+Use **Add scenes** in the Clip inspector or `Ctrl+O` to import more recordings.
+Drop local video files onto a marked timeline boundary to insert, or elsewhere
+to append. An invalid import batch leaves the project unchanged.
+
+**Arrange scenes.** In Select mode (`V`), drag scene bodies to reorder them;
+the ruler still scrubs. Drag a selected scene's edges to trim it, or use the
+Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
+Earlier/Later offer precise reorder buttons. Each operation is undoable.
+Zooms follow scene content, and duplicates have independent edits. Structural
+scene edits reset the project export range to include the whole composition.
+`I`/`O`/`R` still set/reset that project-wide range, not individual scene trims.
 
 **Cut passages.** Choose **Range** (`B`), drag over the video lane in either
 direction, adjust the range edges, and press Delete/Backspace. The gap closes
@@ -353,6 +363,8 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / pause |
+| `Ctrl+O` | Add scene files (also available in the Clip inspector) |
+| `Ctrl+D` | Duplicate the selected scene |
 | `Left` / `Right` | Previous / next frame |
 | `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
 | `Home` / `End` | Go to trim start / end |
@@ -402,9 +414,9 @@ recorder is already running — it never signals a recorder it did not start.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
-- **Scene import and transitions are still pending**: the shared multi-source
-  model, range cuts/splits, playback, trim, manual zoom, canvas styling,
-  undo/redo, and MP4 export exist. Import/transition controls, automatic pointer zoom, camera
+- **Transitions are still pending**: multi-source import and arrangement,
+  range cuts/splits, playback, trim, manual zoom, canvas styling,
+  undo/redo, and MP4 export exist. Scene transitions, automatic pointer zoom, camera
   overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **`omasnap-studio` is optional at build time.** Configure with

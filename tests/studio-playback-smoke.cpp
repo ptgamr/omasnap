@@ -325,5 +325,75 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
               4000),
           "rapid initial splits left a paused decoder without a preview frame"))
     return false;
+  initialPreview.hide();
+  StudioProject imported;
+  imported.canvas = mixed.canvas;
+  QString sceneError;
+  if (!require(studioInsertScenes(imported, mixed.assets, mixed.clips, 0,
+                                  sceneError),
+               "three-file scene import failed"))
+    return false;
+  StudioHistory sceneHistory;
+  StudioEditState sceneState;
+  sceneState.project = imported;
+  sceneHistory.reset(sceneState);
+  playback.setProject(imported, 650);
+  if (!require(QTest::qWaitFor([&] { return pixelsMatch(1, true); }, 4000),
+               "imported portrait scene did not display at the requested "
+               "project time"))
+    return false;
+  if (!require(studioMoveClip(imported, 3, 1, sceneError),
+               "moving the blue scene before red failed"))
+    return false;
+  sceneState.project = imported;
+  sceneHistory.push(sceneState);
+  playback.setProject(imported, 0);
+  if (!require(QTest::qWaitFor([&] { return pixelsMatch(2, false); }, 4000),
+               "reorder retained the old opening scene") ||
+      !require(seekAndCheck(650, 0, false),
+               "reorder did not place red second") ||
+      !require(seekAndCheck(1250, 1, true),
+               "reorder did not place portrait green last"))
+    return false;
+  if (!require(studioDuplicateClip(imported, 3, 77, sceneError),
+               "duplicating the blue source failed"))
+    return false;
+  sceneState.project = imported;
+  sceneHistory.push(sceneState);
+  if (!require(studioTrimClip(imported, 77, 200, 450, sceneError),
+               "trimming the duplicated blue scene failed"))
+    return false;
+  sceneState.project = imported;
+  sceneHistory.push(sceneState);
+  playback.setProject(imported, 650);
+  if (!require(
+          playback.duration() == 2050 &&
+              QTest::qWaitFor([&] { return pixelsMatch(2, false); }, 4000),
+          "duplicate edge trim did not map project time onto blue source") ||
+      !require(seekAndCheck(1450, 1, true),
+               "trimmed sequence green boundary is wrong") ||
+      !require(seekAndCheck(850, 0, false),
+               "reverse seek retained wrong scene after trim") ||
+      !require(seekAndCheck(600, 2, false),
+               "duplicate opening source frame was missing"))
+    return false;
+  if (!require(sceneHistory.undo(), "scene trim undo was unavailable"))
+    return false;
+  playback.setProject(sceneHistory.current().project, 900);
+  if (!require(
+          playback.duration() == 2400 &&
+              QTest::qWaitFor([&] { return pixelsMatch(2, false); }, 4000),
+          "undo did not restore the duplicate's untrimmed duration and pixels"))
+    return false;
+  if (!require(sceneHistory.redo(), "scene trim redo was unavailable"))
+    return false;
+  playback.setProject(sceneHistory.current().project, 800);
+  playback.play();
+  if (!require(QTest::qWaitFor([&] { return pixelsMatch(0, false); }, 4000),
+               "playing reordered duplicate/trim sequence did not enter red") ||
+      !require(QTest::qWaitFor([&] { return pixelsMatch(1, true); }, 4000),
+               "playing reordered sequence did not end with portrait green"))
+    return false;
+  playback.pause();
   return failures.isEmpty();
 }

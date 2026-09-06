@@ -53,6 +53,9 @@ public:
   [[nodiscard]] qint64 rangeIn() const { return rangeIn_; }
   [[nodiscard]] qint64 rangeOut() const { return rangeOut_; }
   [[nodiscard]] quint64 selectedClip() const { return selectedClip_; }
+  /** Drop location in the ordered scene list; zero means append. */
+  [[nodiscard]] quint64 insertionBefore(qreal x) const;
+  void showInsertion(quint64 before, bool visible);
   void setChrome(const StudioChrome &chrome) {
     chrome_ = chrome;
     update();
@@ -75,6 +78,8 @@ signals:
   void selectionChanged();
   void splitRequested();
   void deleteRequested();
+  void sceneMoveRequested(quint64 id, quint64 before);
+  void sceneTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
 
 protected:
   void leaveEvent(QEvent *event) override;
@@ -95,7 +100,10 @@ private:
     CueEnd,
     RangeStart,
     RangeEnd,
-    RangeNew
+    RangeNew,
+    SceneStart,
+    SceneEnd,
+    SceneMove
   };
 
   /** The trim bar's row. */
@@ -116,6 +124,12 @@ private:
   qint64 rangeOut_ = -1;
   qint64 rangeAnchor_ = 0;
   quint64 selectedClip_ = 0;
+  QPointF scenePress_;
+  StudioClip grabbedScene_;
+  qint64 sceneStartMs_ = 0;
+  qint64 sceneDurationMs_ = 0;
+  bool insertionVisible_ = false;
+  quint64 insertionBefore_ = 0;
   qint64 duration_ = 0;
   qint64 position_ = 0;
   qint64 trimIn_ = 0;
@@ -154,6 +168,10 @@ protected:
   void resizeEvent(QResizeEvent *event) override;
   void keyPressEvent(QKeyEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
+  void dragEnterEvent(QDragEnterEvent *event) override;
+  void dragMoveEvent(QDragMoveEvent *event) override;
+  void dragLeaveEvent(QDragLeaveEvent *event) override;
+  void dropEvent(QDropEvent *event) override;
 
 private:
   void applyChrome();
@@ -195,6 +213,25 @@ private:
   void splitAtPlayhead();
   void deleteSelection();
   void finishCompositionEdit(qint64 position);
+  void setupScenes(class QVBoxLayout *controls);
+  void chooseScenes();
+  void importScenes(const QStringList &paths, quint64 before = 0);
+  void moveScene(quint64 id, quint64 before);
+  void duplicateScene();
+  void trimScene(quint64 id, qint64 inMs, qint64 outMs);
+  void refreshSceneControls();
+  [[nodiscard]] bool scenesEditable() const;
+  bool importing_ = false;
+  quint64 nextAssetId_ = 1;
+  StudioProject gestureProject_;
+  QFutureWatcher<StudioProjectLoad> importWatcher_;
+  class QPushButton *importButton_ = nullptr;
+  class QPushButton *duplicateButton_ = nullptr;
+  class QPushButton *earlierButton_ = nullptr;
+  class QPushButton *laterButton_ = nullptr;
+  class QLabel *sceneLabel_ = nullptr;
+  class QSpinBox *sceneIn_ = nullptr;
+  class QSpinBox *sceneOut_ = nullptr;
   quint64 nextClipId_ = 1;
   class QPushButton *rangeButton_ = nullptr;
   class QPushButton *selectButton_ = nullptr;
