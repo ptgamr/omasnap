@@ -32,6 +32,10 @@ public:
 
   void setFrame(const QImage &frame);
   void setVideoFrame(const QVideoFrame &frame);
+  /** Timestamp is composition time, independent of source-file PTS. */
+  void setVideoFrame(const QVideoFrame &frame, qint64 timelineMs);
+  void setCanvasSize(const QSize &size);
+  void clearFrame();
   void invalidatePendingFrames();
   void setCanvasInset(int inset);
   void setStyle(const StudioStyle &style);
@@ -84,6 +88,8 @@ private:
   StudioVideoSurface *surface_ = nullptr;
   QFutureWatcher<StudioVideoFrame> frameWatcher_;
   QVideoFrame pendingFrame_;
+  std::optional<qint64> pendingPosition_;
+  QSize canvasSize_;
   quint64 generation_ = 0;
   quint64 preparingGeneration_ = 0;
   bool preparing_ = false;

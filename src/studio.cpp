@@ -2,6 +2,8 @@
 #include "studio.hpp"
 
 #include "overlay-chrome.hpp"
+#include "studio-composition.hpp"
+#include "studio-playback.hpp"
 #include "studio-preview.hpp"
 
 #include <QAbstractSpinBox>
@@ -11,9 +13,11 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -89,62 +93,56 @@ StudioSource probeStudioSource(const QString &path) {
       QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
   if (probe.isEmpty() || path.isEmpty())
     return media;
-  QProcess ffprobe;
-  ffprobe.start(probe, {QStringLiteral("-v"), QStringLiteral("error"),
-                        QStringLiteral("-select_streams"),
-                        QStringLiteral("v:0"), QStringLiteral("-show_entries"),
-                        QStringLiteral("stream=width,height,r_frame_rate"),
-                        QStringLiteral("-show_entries"),
-                        QStringLiteral("stream_side_data=rotation"),
-                        QStringLiteral("-of"),
-                        QStringLiteral("default=noprint_wrappers=1"), path});
-  if (!ffprobe.waitForFinished(kProbeTimeoutMs)) {
-    ffprobe.kill();
-    ffprobe.waitForFinished(1000);
+  QProcess process;
+  process.start(probe, {QStringLiteral("-v"), QStringLiteral("error"),
+                        QStringLiteral("-show_streams"),
+                        QStringLiteral("-show_format"), QStringLiteral("-of"),
+                        QStringLiteral("json"), path});
+  if (!process.waitForFinished(kProbeTimeoutMs)) {
+    process.kill();
+    process.waitForFinished(1000);
     return media;
   }
-  int width = 0;
-  int height = 0;
-  const QStringList lines = QString::fromLatin1(ffprobe.readAllStandardOutput())
-                                .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-  for (const QString &line : lines) {
-    const qsizetype split = line.indexOf(QLatin1Char('='));
-    if (split < 0)
+  if (process.exitCode() != 0)
+    return media;
+  const auto root =
+      QJsonDocument::fromJson(process.readAllStandardOutput()).object();
+  bool foundVideo = false;
+  for (const auto &value : root.value(QStringLiteral("streams")).toArray()) {
+    const auto stream = value.toObject();
+    const auto kind = stream.value(QStringLiteral("codec_type")).toString();
+    if (kind == QStringLiteral("audio")) {
+      ++media.audioStreams;
       continue;
-    const QString key = line.left(split).trimmed();
-    const QString value = line.mid(split + 1).trimmed();
-    if (key == QStringLiteral("width"))
-      width = value.toInt();
-    else if (key == QStringLiteral("height"))
-      height = value.toInt();
-    else if (key == QStringLiteral("rotation"))
-    // ffprobe reports av_display_rotation_get: the angle by which the
-    // matrix turns the coded frame *counter-clockwise* for display. Qt's
-    // QTransform::rotate is clockwise, so what gets stored here is the
-    // clockwise angle to apply -- the negation is the conversion, not a
-    // mistake. A phone portrait file reports -90 and is displayed by
-    // turning the stored landscape pixels 90 clockwise.
-    {
-      // A right angle is a transpose, which the preview can reproduce
-      // exactly. Anything else -- ffmpeg takes a general rotation path
-      // that resizes the canvas differently -- is refused rather than
-      // framed differently in the two places.
-      const double degrees = value.toDouble();
+    }
+    if (kind != QStringLiteral("video") || foundVideo)
+      continue;
+    foundVideo = true;
+    media.size = QSize(stream.value(QStringLiteral("width")).toInt(),
+                       stream.value(QStringLiteral("height")).toInt());
+    const auto rate =
+        stream.value(QStringLiteral("r_frame_rate")).toString().split('/');
+    media.fpsNumerator = rate.value(0).toInt();
+    media.fpsDenominator = qMax(1, rate.value(1).toInt());
+    for (const auto &data :
+         stream.value(QStringLiteral("side_data_list")).toArray()) {
+      const auto side = data.toObject();
+      if (!side.contains(QStringLiteral("rotation")))
+        continue;
+      const double degrees = side.value(QStringLiteral("rotation")).toDouble();
       const double snapped = qRound(degrees / 90.0) * 90.0;
-      if (std::abs(degrees - snapped) > 0.5)
-        media.unsupportedTransform = true;
+      media.unsupportedTransform = std::abs(degrees - snapped) > 0.5;
       media.rotation = ((static_cast<int>(-snapped) % 360) + 360) % 360;
-    } else if (key == QStringLiteral("r_frame_rate")) {
-      const QStringList rate = value.split(QLatin1Char('/'));
-      media.fpsNumerator = rate.value(0).toInt();
-      media.fpsDenominator = rate.size() > 1 ? rate.at(1).toInt() : 1;
     }
   }
-  // ffmpeg autorotates before the filter chain, so the size the zoom filter
-  // has to produce is the rotated one.
-  media.size = media.rotation == 90 || media.rotation == 270
-                   ? QSize(height, width)
-                   : QSize(width, height);
+  media.durationMs = qRound64(root.value(QStringLiteral("format"))
+                                  .toObject()
+                                  .value(QStringLiteral("duration"))
+                                  .toString()
+                                  .toDouble() *
+                              1000);
+  if (media.rotation % 180)
+    media.size.transpose();
   return media;
 }
 
@@ -346,6 +344,8 @@ qint64 StudioTimeline::timeForX(qreal x) const {
 StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {
   if (duration_ <= 0)
     return Grab::None;
+  if (!cuesEditable_)
+    return Grab::Playhead;
   // The cue lane is its own row, so a click there never means the playhead.
   if (cueLaneRect().contains(position)) {
     Grab edge = Grab::CueBody;
@@ -674,6 +674,36 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   headerLayout->addWidget(help);
   headerLayout->addWidget(inspectorToggle);
   headerLayout->addWidget(exportButton_);
+  relinkButton_ = button(QStringLiteral("Relink media"),
+                         QStringLiteral("Locate a missing project source"));
+  relinkButton_->hide();
+  headerLayout->addWidget(relinkButton_);
+  connect(relinkButton_, &QPushButton::clicked, this,
+          &StudioWindow::relinkAsset);
+  connect(&relinkWatcher_, &QFutureWatcher<StudioProjectLoad>::finished, this,
+          [this] {
+            relinking_ = false;
+            const auto result = relinkWatcher_.result();
+            if (!result.error.isEmpty()) {
+              setStatus(result.error, true);
+              refreshControls();
+              return;
+            }
+            project_ = result.project;
+            for (const auto &asset : project_.assets) {
+              if (result.missingAssets.contains(asset.id))
+                missingPaths_.insert(asset.path);
+              else
+                missingPaths_.remove(asset.path);
+            }
+            missingAssets_ = result.missingAssets;
+            applyProject();
+            rememberEdit();
+            setStatus(
+                missingAssets_.isEmpty()
+                    ? QStringLiteral("Media relinked")
+                    : QStringLiteral("Relink the remaining missing sources"));
+          });
 
   inspector_ = new QWidget(this);
   inspector_->setObjectName(QStringLiteral("studioInspector"));
@@ -886,10 +916,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   layout->addWidget(header);
   layout->addWidget(splitter, 1);
 
-  audio_ = new QAudioOutput(this);
-  sink_ = new QVideoSink(this);
-  player_ = new QMediaPlayer(this);
-  player_->setAudioOutput(audio_);
+  player_ = new StudioPlayback(preview_, this);
+  audio_ = player_->audioOutput();
   connect(preview_, &StudioPreview::previewFailed, this,
           [this](const QString &error) {
             player_->pause();
@@ -928,17 +956,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   connect(timeline_, &StudioTimeline::editFinished, this,
           &StudioWindow::endEdit);
   qApp->installEventFilter(this);
-  // Frames rather than a video widget: the preview draws them through the
-  // zoom model, which is what makes it show what the export will produce.
-  player_->setVideoSink(sink_);
-  connect(sink_, &QVideoSink::videoFrameChanged, this,
-          [this](const QVideoFrame &frame) {
-            // The frame's own timestamp, not whatever position last arrived:
-            // the two signals have no ordering contract, so during playback
-            // or a seek the widget could otherwise crop one frame using the
-            // time of its neighbour.
-            preview_->setVideoFrame(frame);
-          });
 
   connect(playButton_, &QPushButton::clicked, this,
           &StudioWindow::togglePlayback);
@@ -992,72 +1009,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             refreshControls();
           });
 
-  connect(
-      player_, &QMediaPlayer::durationChanged, this, [this](qint64 duration) {
-        timeline_->setDuration(duration);
-        // The clip length is only known now, so a sidecar loaded before
-        // it can hold cues past the end.
-        normalizeZoomTrack(zoom_, duration);
-        if (editIndex_ < 0 && duration > 0) {
-          timeline_->setTrim(initialTrimIn_,
-                             initialTrimOut_ < 0 ? duration : initialTrimOut_);
-          rememberEdit();
-        }
-        if (!thumbnailsStarted_ && duration > 0) {
-          thumbnailsStarted_ = true;
-          const QString source = path_;
-          thumbnailWatcher_.setFuture(QtConcurrent::run([source, duration] {
-            QVector<QImage> thumbnails;
-            const QString ffmpeg =
-                QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-            if (ffmpeg.isEmpty())
-              return thumbnails;
-            for (int i = 0; i < 8; ++i) {
-              QProcess process;
-              process.start(
-                  ffmpeg,
-                  {QStringLiteral("-v"), QStringLiteral("error"),
-                   QStringLiteral("-ss"), studioTimecode(duration * i / 8),
-                   QStringLiteral("-i"), source, QStringLiteral("-frames:v"),
-                   QStringLiteral("1"), QStringLiteral("-vf"),
-                   QStringLiteral("scale=160:90:force_original_aspect_ratio="
-                                  "decrease,pad=160:90:(ow-iw)/2:(oh-ih)/2"),
-                   QStringLiteral("-threads"), QStringLiteral("1"),
-                   QStringLiteral("-f"), QStringLiteral("image2pipe"),
-                   QStringLiteral("-c:v"), QStringLiteral("png"),
-                   QStringLiteral("-")});
-              if (!process.waitForFinished(5000)) {
-                process.kill();
-                process.waitForFinished(1000);
-                break;
-              }
-              QImage image;
-              if (!image.loadFromData(process.readAllStandardOutput(), "PNG"))
-                break;
-              thumbnails.push_back(image);
-            }
-            // Partial sampling must not stretch a clip's head across its
-            // entire timeline. Fall back to the plain lane on a failure.
-            return thumbnails.size() == 8 ? thumbnails : QVector<QImage>();
-          }));
-        }
-        refreshControls();
-      });
-  connect(player_, &QMediaPlayer::mediaStatusChanged, this,
-          [this](QMediaPlayer::MediaStatus status) {
-            // A player that has never played has decoded nothing, so the
-            // window would open on an empty rectangle. Coax one frame out of
-            // it and stop again, at the start.
-            const bool ready = status == QMediaPlayer::LoadedMedia ||
-                               status == QMediaPlayer::BufferedMedia;
-            if (!ready || primed_)
-              return;
-            primed_ = true;
-            player_->play();
-            player_->pause();
-            player_->setPosition(0);
+  connect(player_, &StudioPlayback::durationChanged, this,
+          [this](qint64 duration) {
+            if (timeline_->duration() != duration)
+              timeline_->setDuration(duration);
+            refreshControls();
           });
-  connect(player_, &QMediaPlayer::positionChanged, this,
+  connect(player_, &StudioPlayback::positionChanged, this,
           [this](qint64 position) {
             timeline_->setPosition(position);
             // Not the preview: its clock comes from the frame being painted,
@@ -1072,10 +1030,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             }
             refreshControls();
           });
-  connect(player_, &QMediaPlayer::playbackStateChanged, this,
+  connect(player_, &StudioPlayback::playbackStateChanged, this,
           [this](QMediaPlayer::PlaybackState) { refreshControls(); });
-  connect(player_, &QMediaPlayer::errorOccurred, this,
-          [this](QMediaPlayer::Error, const QString &message) {
+  connect(player_, &StudioPlayback::errorOccurred, this,
+          [this](const QString &message) {
             mediaFailed_ = true;
             setStatus(message.isEmpty()
                           ? QStringLiteral("Could not play this recording")
@@ -1086,11 +1044,18 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
 
   preview_->setTrack(&zoom_);
   connect(&thumbnailWatcher_, &QFutureWatcher<QVector<QImage>>::finished, this,
-          [this] { timeline_->setThumbnails(thumbnailWatcher_.result()); });
+          [this] {
+            if (thumbnailPending_) {
+              thumbnailPending_ = false;
+              thumbnailsStarted_ = false;
+              refreshThumbnails();
+            } else
+              timeline_->setThumbnails(thumbnailWatcher_.result());
+          });
   saveTimer_ = new QTimer(this);
   saveTimer_->setSingleShot(true);
   saveTimer_->setInterval(kSaveDebounceMs);
-  connect(saveTimer_, &QTimer::timeout, this, &StudioWindow::saveZoom);
+  connect(saveTimer_, &QTimer::timeout, this, &StudioWindow::saveProject);
   scrubTimer_ = new QTimer(this);
   scrubTimer_->setSingleShot(true);
   scrubTimer_->setInterval(35);
@@ -1101,59 +1066,58 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       seekTo(position);
     }
   });
-  // ffprobe rather than the player: the export needs the source's exact
-  // frame rate, and a wrong one slides every cue. It also reports the
-  // display rotation, which ffmpeg applies before the zoom filter and Qt
-  // drops when converting a frame.
+  // Probe and deserialize on a worker. The original media is never modified.
+  projectPath_ = path_.endsWith(QStringLiteral(".omasnap.json"))
+                     ? path_
+                     : path_ + QStringLiteral(".omasnap.json");
   connect(&loadWatcher_, &QFutureWatcher<LoadedSource>::finished, this, [this] {
     const LoadedSource source = loadWatcher_.result();
-    media_ = source.media;
-    zoom_ = source.zoom;
-    style_ = source.style;
-    preview_->setStyle(style_);
-    initialTrimIn_ = source.in;
-    initialTrimOut_ = source.out;
-    loaded_ = true;
-    preview_->setRotation(media_.rotation);
-    sourceLabel_->setText(
-        QStringLiteral("%1 × %2\n%3 fps\n\n%4")
-            .arg(media_.size.width())
-            .arg(media_.size.height())
-            .arg(media_.fpsNumerator /
-                     static_cast<double>(qMax(1, media_.fpsDenominator)),
-                 0, 'f', 2)
-            .arg(QFileInfo(path_).fileName()));
-    if (!source.error.isEmpty())
+    if (!source.error.isEmpty()) {
       setStatus(source.error, true);
-    player_->setSource(QUrl::fromLocalFile(path_));
-    refreshControls();
+      mediaFailed_ = true;
+      refreshControls();
+      return;
+    }
+    project_ = source.project;
+    missingAssets_ = source.missingAssets;
+    for (const auto id : missingAssets_)
+      if (const auto *asset = studioAsset(project_, id))
+        missingPaths_.insert(asset->path);
+    loaded_ = true;
+    applyProject(true);
+    if (!missingAssets_.isEmpty())
+      setStatus(QStringLiteral(
+                    "Missing media — use Relink media to locate the source."),
+                true);
   });
   const QString sourcePath = path_;
-  const QString sidecar = zoomSidecarPath();
-  loadWatcher_.setFuture(QtConcurrent::run([sourcePath, sidecar] {
+  const QString document = projectPath_;
+  loadWatcher_.setFuture(QtConcurrent::run([sourcePath, document] {
     LoadedSource source;
-    source.media = probeStudioSource(sourcePath);
-    if (QFileInfo(sidecar).isSymLink()) {
-      source.error = QStringLiteral("Ignoring a symlinked zoom sidecar");
+    if (QFileInfo::exists(document)) {
+      const auto loaded = loadStudioProject(document);
+      source.project = loaded.project;
+      source.error = loaded.error;
+      source.missingAssets = loaded.missingAssets;
       return source;
     }
-    QFile file(sidecar);
-    if (file.open(QIODevice::ReadOnly)) {
-      const QJsonObject object =
-          QJsonDocument::fromJson(file.readAll()).object();
-      if (readZoomTrack(object, source.zoom, source.error)) {
-        source.in = object.value(QStringLiteral("trimInMs")).toInteger(0);
-        source.out = object.value(QStringLiteral("trimOutMs")).toInteger(-1);
-        const QJsonObject style =
-            object.value(QStringLiteral("canvas")).toObject();
-        source.style.background =
-            qBound(0, style.value(QStringLiteral("background")).toInt(), 3);
-        source.style.padding =
-            qBound(0, style.value(QStringLiteral("padding")).toInt(), 20);
-        source.style.radius =
-            qBound(0, style.value(QStringLiteral("radius")).toInt(), 64);
-      }
+    if (sourcePath.endsWith(QStringLiteral(".omasnap.json"))) {
+      source.error = QStringLiteral("Project file is missing");
+      return source;
     }
+    const StudioSource media = probeStudioSource(sourcePath);
+    if (!media.usable() || media.durationMs <= 0) {
+      source.error = QStringLiteral("Could not read a supported video source");
+      return source;
+    }
+    source.project.assets.push_back(
+        {1, QFileInfo(sourcePath).absoluteFilePath(), media});
+    source.project.clips.push_back({1, 1, 0, media.durationMs, 1.0});
+    source.project.canvas =
+        QSize(media.size.width() / 2 * 2, media.size.height() / 2 * 2);
+    source.project.fpsNumerator = media.fpsNumerator;
+    source.project.fpsDenominator = media.fpsDenominator;
+    source.error = validateStudioProject(source.project);
     return source;
   }));
   connect(&saveWatcher_, &QFutureWatcher<QString>::finished, this, [this] {
@@ -1165,11 +1129,22 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     }
     if (savePending_) {
       savePending_ = false;
-      saveZoom();
+      saveProject();
     } else if (closing_ && error.isEmpty()) {
       close();
     }
   });
+  connect(&exportWatcher_, &QFutureWatcher<ExportResult>::finished, this,
+          [this] {
+            export_ = false;
+            const auto result = exportWatcher_.result();
+            setStatus(result.error.isEmpty()
+                          ? QStringLiteral("Saved %1")
+                                .arg(QFileInfo(result.destination).fileName())
+                          : result.error,
+                      !result.error.isEmpty());
+            refreshControls();
+          });
   refreshControls();
 }
 
@@ -1198,6 +1173,7 @@ void StudioWindow::zoomChanged() {
 }
 
 void StudioWindow::aimZoom(const QPointF &target) {
+  captureCursor();
   // Clicking aims the cue you are inside; outside one it makes a new cue
   // there, because that is what "click where I want to zoom" means when
   // nothing is happening yet.
@@ -1225,6 +1201,7 @@ void StudioWindow::aimZoom(const QPointF &target) {
 }
 
 void StudioWindow::addZoomAtPlayhead() {
+  captureCursor();
   const ZoomCue *current = activeCue();
   const QPointF target = current ? current->target : QPointF(0.5, 0.5);
   const quint64 id = addZoomCue(zoom_, player_->position(), target,
@@ -1241,6 +1218,7 @@ void StudioWindow::addZoomAtPlayhead() {
 }
 
 void StudioWindow::removeSelectedZoom() {
+  captureCursor();
   const ZoomCue *cue = activeCue();
   if (!cue)
     return;
@@ -1250,6 +1228,7 @@ void StudioWindow::removeSelectedZoom() {
 }
 
 void StudioWindow::setSelectedZoomScale(qreal scale) {
+  captureCursor();
   const ZoomCue *current = activeCue();
   if (!current || qFuzzyCompare(current->scale, scale))
     return;
@@ -1263,6 +1242,7 @@ void StudioWindow::setSelectedZoomScale(qreal scale) {
 }
 
 void StudioWindow::setSelectedZoomTiming(bool easeIn, int milliseconds) {
+  captureCursor();
   const ZoomCue *current = activeCue();
   if (!current || !addZoomButton_->isEnabled())
     return;
@@ -1278,9 +1258,19 @@ void StudioWindow::setSelectedZoomTiming(bool easeIn, int milliseconds) {
   }
 }
 
-void StudioWindow::beginEdit() { editGesture_ = true; }
+void StudioWindow::captureCursor() {
+  if (editGesture_ || restoring_)
+    return;
+  history_.setCursor(0, timeline_->selectedCue(), -1, -1, player_->position());
+}
+
+void StudioWindow::beginEdit() {
+  captureCursor();
+  editGesture_ = true;
+}
 
 void StudioWindow::styleChanged() {
+  captureCursor();
   if (restoring_ || !background_->isEnabled())
     return;
   const StudioStyle style{background_->currentIndex(), padding_->value(),
@@ -1300,85 +1290,207 @@ void StudioWindow::endEdit() {
   refreshControls();
 }
 
+StudioEditState StudioWindow::editState() const {
+  StudioEditState state;
+  state.project = project_;
+  state.selectedCue = timeline_->selectedCue();
+  state.positionMs = player_->position();
+  return state;
+}
+
 void StudioWindow::rememberEdit() {
-  if (restoring_ || editGesture_ || !loaded_ || timeline_->duration() <= 0)
+  if (restoring_ || editGesture_ || !loaded_)
     return;
-  const EditState state{zoom_, timeline_->trimIn(), timeline_->trimOut(),
-                        style_, timeline_->selectedCue()};
-  if (editIndex_ >= 0 && edits_.at(editIndex_) == state)
-    return;
-  edits_.resize(editIndex_ + 1);
-  edits_.push_back(state);
-  ++editIndex_;
-  if (editIndex_ > 0)
-    saveTimer_->start();
+  project_.zoom = zoom_;
+  project_.style = style_;
+  project_.trimInMs = timeline_->trimIn();
+  project_.trimOutMs = timeline_->trimOut();
+  history_.push(editState());
+  saveTimer_->start();
 }
 
 void StudioWindow::undoEdit() {
-  if (!undoButton_->isEnabled() || editGesture_)
+  if (!undoButton_->isEnabled() || editGesture_ || !history_.undo())
     return;
-  --editIndex_;
   restoreEdit();
 }
 
 void StudioWindow::redoEdit() {
-  if (!redoButton_->isEnabled() || editGesture_)
+  if (!redoButton_->isEnabled() || editGesture_ || !history_.redo())
     return;
-  ++editIndex_;
   restoreEdit();
 }
 
 void StudioWindow::restoreEdit() {
-  restoring_ = true;
-  const EditState &state = edits_.at(editIndex_);
-  zoom_ = state.zoom;
-  style_ = state.style;
-  preview_->setStyle(style_);
-  timeline_->setTrim(state.in, state.out);
-  timeline_->setSelectedCue(state.selection);
-  preview_->setTrack(&zoom_);
-  timeline_->update();
-  restoring_ = false;
+  const auto state = history_.current();
+  project_ = state.project;
+  applyProject();
+  timeline_->setSelectedCue(state.selectedCue);
+  seekTo(state.positionMs);
   saveTimer_->start();
   refreshControls();
 }
 
-QString StudioWindow::zoomSidecarPath() const {
-  return path_ + QStringLiteral(".omasnap-zoom.json");
-}
-
-void StudioWindow::saveZoom() {
-  if (!loaded_ || editIndex_ < 0)
+void StudioWindow::saveProject() {
+  if (!loaded_)
     return;
   if (saving_) {
     savePending_ = true;
     return;
   }
   saving_ = true;
-  const QString path = zoomSidecarPath();
-  QJsonObject object = writeZoomTrack(zoom_);
-  object.insert(QStringLiteral("trimInMs"), timeline_->trimIn());
-  object.insert(QStringLiteral("trimOutMs"), timeline_->trimOut());
-  object.insert(QStringLiteral("canvas"),
-                QJsonObject{{QStringLiteral("background"), style_.background},
-                            {QStringLiteral("padding"), style_.padding},
-                            {QStringLiteral("radius"), style_.radius}});
-  saveWatcher_.setFuture(QtConcurrent::run([path, object]() -> QString {
-    if (QFileInfo(path).isSymLink())
-      return QStringLiteral("Refusing to save through a symlink");
-    QSaveFile file(path);
-    const QByteArray data =
-        QJsonDocument(object).toJson(QJsonDocument::Indented);
-    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() ||
-        !file.commit())
-      return QStringLiteral("Could not save the edits");
-    return {};
+  const QString path = projectPath_;
+  const StudioProject project = project_;
+  saveWatcher_.setFuture(QtConcurrent::run(
+      [path, project] { return saveStudioProject(path, project); }));
+}
+
+void StudioWindow::applyProject(bool resetHistory) {
+  restoring_ = true;
+  missingAssets_.clear();
+  for (const auto &asset : project_.assets)
+    if (missingPaths_.contains(asset.path))
+      missingAssets_.push_back(asset.id);
+  zoom_ = project_.zoom;
+  style_ = project_.style;
+  media_ = {};
+  media_.size = project_.canvas;
+  media_.fpsNumerator = project_.fpsNumerator;
+  media_.fpsDenominator = project_.fpsDenominator;
+  const qint64 duration = studioDuration(project_);
+  timeline_->setDuration(duration);
+  timeline_->setTrim(project_.trimInMs,
+                     project_.trimOutMs < 0 ? duration : project_.trimOutMs);
+  preview_->setStyle(style_);
+  preview_->setTrack(&zoom_);
+  mediaFailed_ = !missingAssets_.isEmpty();
+  if (!mediaFailed_)
+    player_->setProject(project_);
+  else
+    player_->pause();
+  preview_->setTrack(&zoom_);
+  preview_->setStyle(style_);
+  sourceLabel_->setText(
+      QStringLiteral("%1 scenes\n%2 × %3\n%4 fps")
+          .arg(project_.clips.size())
+          .arg(project_.canvas.width())
+          .arg(project_.canvas.height())
+          .arg(project_.fpsNumerator / double(qMax(1, project_.fpsDenominator)),
+               0, 'f', 2));
+  relinkButton_->setVisible(!missingAssets_.isEmpty());
+  restoring_ = false;
+  if (resetHistory)
+    history_.reset(editState());
+  refreshThumbnails();
+  refreshControls();
+}
+
+void StudioWindow::refreshThumbnails() {
+  if (thumbnailsStarted_ && thumbnailProject_.assets == project_.assets &&
+      thumbnailProject_.clips == project_.clips)
+    return;
+  if (thumbnailWatcher_.isRunning()) {
+    thumbnailPending_ = true;
+    return;
+  }
+  thumbnailProject_ = project_;
+  thumbnailsStarted_ = true;
+  timeline_->setThumbnails({});
+  const StudioProject snapshot = project_;
+  thumbnailWatcher_.setFuture(QtConcurrent::run([snapshot] {
+    QVector<QImage> images;
+    const QString ffmpeg =
+        QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    const qint64 duration = studioDuration(snapshot);
+    if (ffmpeg.isEmpty() || duration <= 0)
+      return images;
+    for (int i = 0; i < 8; ++i) {
+      const auto frame = studioFrameAt(snapshot, duration * i / 8);
+      if (!frame)
+        break;
+      const auto *asset = studioAsset(snapshot, frame->span.assetId);
+      if (!asset)
+        break;
+      QProcess process;
+      process.start(
+          ffmpeg,
+          {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-ss"),
+           studioTimecode(frame->sourceMs), QStringLiteral("-i"), asset->path,
+           QStringLiteral("-frames:v"), QStringLiteral("1"),
+           QStringLiteral("-vf"),
+           QStringLiteral("scale=160:90:force_original_aspect_ratio=decrease,"
+                          "pad=160:90:(ow-iw)/2:(oh-ih)/2"),
+           QStringLiteral("-threads"), QStringLiteral("1"),
+           QStringLiteral("-f"), QStringLiteral("image2pipe"),
+           QStringLiteral("-c:v"), QStringLiteral("png"), QStringLiteral("-")});
+      if (!process.waitForFinished(5000)) {
+        process.kill();
+        process.waitForFinished(1000);
+        break;
+      }
+      QImage image;
+      if (!image.loadFromData(process.readAllStandardOutput(), "PNG"))
+        break;
+      images.push_back(image);
+    }
+    return images.size() == 8 ? images : QVector<QImage>{};
   }));
+}
+
+void StudioWindow::relinkAsset() {
+  if (missingAssets_.isEmpty() || export_ || relinkWatcher_.isRunning())
+    return;
+  auto *dialog = new QFileDialog(this, QStringLiteral("Relink missing media"));
+  dialog->setAttribute(Qt::WA_DeleteOnClose);
+  dialog->setOption(QFileDialog::DontUseNativeDialog);
+  dialog->setFileMode(QFileDialog::ExistingFile);
+  connect(
+      dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
+        if (missingAssets_.isEmpty() || relinking_ || export_)
+          return;
+        captureCursor();
+        relinking_ = true;
+        refreshControls();
+        const quint64 id = missingAssets_.first();
+        const StudioProject snapshot = project_;
+        relinkWatcher_.setFuture(QtConcurrent::run([snapshot, id, path] {
+          StudioProjectLoad result;
+          result.project = snapshot;
+          const StudioSource source = probeStudioSource(path);
+          if (!source.usable() || source.durationMs <= 0) {
+            result.error =
+                QStringLiteral("Replacement is not a supported video");
+            return result;
+          }
+          for (auto &asset : result.project.assets) {
+            if (asset.id != id)
+              continue;
+            for (const auto &clip : result.project.clips)
+              if (clip.assetId == id && clip.outMs > source.durationMs) {
+                result.error = QStringLiteral(
+                    "Replacement is shorter than the referenced clip ranges");
+                return result;
+              }
+            asset.path = QFileInfo(path).absoluteFilePath();
+            asset.source = source;
+          }
+          for (const auto &asset : result.project.assets)
+            if (!QFileInfo::exists(asset.path))
+              result.missingAssets.push_back(asset.id);
+          return result;
+        }));
+      });
+  dialog->open();
 }
 
 StudioWindow::~StudioWindow() = default;
 
 void StudioWindow::closeEvent(QCloseEvent *event) {
+  if (relinking_) {
+    setStatus(QStringLiteral("Wait for media relinking to finish"));
+    event->ignore();
+    return;
+  }
   if (export_) {
     setStatus(QStringLiteral("Export is still running"));
     event->ignore();
@@ -1390,7 +1502,7 @@ void StudioWindow::closeEvent(QCloseEvent *event) {
     player_->pause();
     if (saveTimer_->isActive()) {
       saveTimer_->stop();
-      saveZoom();
+      saveProject();
     }
     return;
   }
@@ -1409,7 +1521,7 @@ void StudioWindow::setStatus(const QString &status, bool error) {
 }
 
 void StudioWindow::refreshControls() {
-  const bool exporting = export_ != nullptr;
+  const bool exporting = export_ || relinking_;
   const qint64 duration = timeline_->duration();
   const bool trimmed = duration > 0 && (timeline_->trimIn() > 0 ||
                                         timeline_->trimOut() < duration);
@@ -1430,8 +1542,8 @@ void StudioWindow::refreshControls() {
   timeLabel_->setToolTip(QStringLiteral("Export range: %1 – %2")
                              .arg(studioTimecode(timeline_->trimIn()),
                                   studioTimecode(timeline_->trimOut())));
-  undoButton_->setEnabled(!exporting && editIndex_ > 0);
-  redoButton_->setEnabled(!exporting && editIndex_ + 1 < edits_.size());
+  undoButton_->setEnabled(!exporting && history_.canUndo());
+  redoButton_->setEnabled(!exporting && history_.canRedo());
 
   const ZoomCue *cue = activeCue();
   // Editing is off while an export runs: ffmpeg already has its expressions,
@@ -1535,7 +1647,8 @@ void StudioWindow::stepFrame(int direction) {
 }
 
 void StudioWindow::setTrimIn() {
-  if (!loaded_ || export_ || timeline_->duration() <= 0)
+  captureCursor();
+  if (!loaded_ || export_ || relinking_ || timeline_->duration() <= 0)
     return;
   timeline_->setTrim(
       qMin(player_->position(), timeline_->trimOut() - kMinimumTrimMs),
@@ -1545,7 +1658,8 @@ void StudioWindow::setTrimIn() {
 }
 
 void StudioWindow::setTrimOut() {
-  if (!loaded_ || export_)
+  captureCursor();
+  if (!loaded_ || export_ || relinking_)
     return;
   timeline_->setTrim(
       timeline_->trimIn(),
@@ -1555,7 +1669,8 @@ void StudioWindow::setTrimOut() {
 }
 
 void StudioWindow::resetTrim() {
-  if (!loaded_ || export_)
+  captureCursor();
+  if (!loaded_ || export_ || relinking_)
     return;
   timeline_->setTrim(0, timeline_->duration());
   rememberEdit();
@@ -1565,46 +1680,40 @@ void StudioWindow::resetTrim() {
 void StudioWindow::startExport() {
   if (!exportButton_->isEnabled() || export_)
     return;
-  const QString ffmpeg =
-      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-  if (ffmpeg.isEmpty()) {
-    setStatus(QStringLiteral("ffmpeg is not installed"), true);
-    return;
-  }
-  const QString destination = studioExportPath(path_);
-  const QStringList arguments =
-      studioExportArguments(path_, destination, timeline_->trimIn(),
-                            timeline_->trimOut(), zoom_, media_, style_);
-  if (arguments.isEmpty()) {
-    setStatus(QStringLiteral("Nothing to export"));
-    return;
-  }
-
-  export_ = new QProcess(this);
-  export_->setProcessChannelMode(QProcess::MergedChannels);
-  const auto conclude = [this, destination](bool ok) {
-    if (!export_)
-      return;
-    export_->deleteLater();
-    export_ = nullptr;
-    if (ok && QFileInfo::exists(destination)) {
-      QFile::setPermissions(destination,
-                            QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-      setStatus(
-          QStringLiteral("Saved %1").arg(QFileInfo(destination).fileName()));
-    } else {
-      QFile::remove(destination);
-      setStatus(QStringLiteral("Export failed"), true);
+  export_ = true;
+  const StudioProject snapshot = project_;
+  const QString sourcePath = path_;
+  exportWatcher_.setFuture(QtConcurrent::run([snapshot, sourcePath] {
+    ExportResult result;
+    const QString ffmpeg =
+        QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    if (ffmpeg.isEmpty()) {
+      result.error = QStringLiteral("ffmpeg is not installed");
+      return result;
     }
-    refreshControls();
-  };
-  connect(export_, &QProcess::finished, this,
-          [conclude](int code, QProcess::ExitStatus status) {
-            conclude(code == 0 && status == QProcess::NormalExit);
-          });
-  connect(export_, &QProcess::errorOccurred, this,
-          [conclude] { conclude(false); });
-  export_->start(ffmpeg, arguments);
+    result.destination = studioExportPath(sourcePath);
+    const auto arguments =
+        studioCompositionArguments(snapshot, result.destination, result.error);
+    if (arguments.isEmpty())
+      return result;
+    QProcess process;
+    process.start(ffmpeg, arguments);
+    if (!process.waitForFinished(3600000)) {
+      process.kill();
+      process.waitForFinished(1000);
+      result.error = QStringLiteral("Export timed out or could not start");
+    } else if (process.exitStatus() != QProcess::NormalExit ||
+               process.exitCode() != 0)
+      result.error = QStringLiteral("Export failed: %1")
+                         .arg(QString::fromUtf8(process.readAllStandardError())
+                                  .right(1000));
+    if (!result.error.isEmpty())
+      QFile::remove(result.destination);
+    else
+      QFile::setPermissions(result.destination,
+                            QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return result;
+  }));
   setStatus(QStringLiteral("Exporting…"));
   refreshControls();
 }
@@ -1670,7 +1779,7 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
   else if (key == Qt::Key_S && ctrl)
     action = [this] {
       saveTimer_->stop();
-      saveZoom();
+      saveProject();
     };
   else if (key == Qt::Key_M && plain)
     action = [this] { audio_->setMuted(!audio_->isMuted()); };
@@ -1690,8 +1799,10 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
     action = [this] { close(); };
   if (!action)
     return false;
-  if (activate && (repeat || !event->isAutoRepeat()))
+  if (activate && (repeat || !event->isAutoRepeat())) {
+    captureCursor();
     action();
+  }
   return true;
 }
 

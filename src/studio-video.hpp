@@ -37,6 +37,8 @@ public:
   QColor workspace{QStringLiteral("#101315")};
   qreal radius = 0;
   QRectF source{0, 0, 1, 1};
+  // Display-oriented source rectangle inside the canonical composition.
+  QRectF fit{0, 0, 1, 1};
   int rotation = 0;
   std::function<void(QPainter &)> overlay;
   std::function<void(const QString &)> failed;

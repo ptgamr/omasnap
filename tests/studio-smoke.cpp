@@ -1,7 +1,11 @@
 /** @fileoverview Exercises the Studio without a compositor: the export
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
+#include "studio-composition-smoke.hpp"
+#include "studio-playback-smoke.hpp"
+#include "studio-playback.hpp"
 #include "studio-preview.hpp"
+#include "studio-project-smoke.hpp"
 #include "studio-theme-smoke.hpp"
 #include "studio.hpp"
 #include "zoom-track-smoke.hpp"
@@ -229,6 +233,8 @@ int main(int argc, char **argv) {
     bool (*run)(QString &);
   } checks[] = {{"timecode", runTimecodeChecks},
                 {"Quattro theme", runStudioThemeChecks},
+                {"project model", runStudioProjectChecks},
+                {"composition export", runStudioCompositionChecks},
                 {"export command", runExportCommandChecks},
                 {"export path", runExportPathChecks},
                 {"timeline", runTimelineChecks},
@@ -713,9 +719,11 @@ bool runStudioInteractionChecks(QString &error) {
     return false;
   }
   const QString palettePath = scratch.filePath(QStringLiteral("colors.toml"));
+  if (!runStudioPlaybackChecks(source, error))
+    return false;
   StudioWindow window(source, nullptr, palettePath);
   window.show();
-  auto *player = window.findChild<QMediaPlayer *>();
+  auto *player = window.findChild<StudioPlayback *>();
   auto *slider = window.findChild<QSlider *>(QStringLiteral("zoomScale"));
   auto *padding = window.findChild<QSlider *>(QStringLiteral("canvasPadding"));
   auto *exportButton =
@@ -759,7 +767,7 @@ bool runStudioInteractionChecks(QString &error) {
         static_cast<QWidget *>(padding)}) {
     focus->setFocus();
     const bool playing = player->playbackState() == QMediaPlayer::PlayingState;
-    QSignalSpy states(player, &QMediaPlayer::playbackStateChanged);
+    QSignalSpy states(player, &StudioPlayback::playbackStateChanged);
     QTest::keyClick(focus, Qt::Key_Space);
     if (!check((player->playbackState() == QMediaPlayer::PlayingState) !=
                        playing &&
@@ -815,21 +823,73 @@ bool runStudioInteractionChecks(QString &error) {
   if (!check(QTest::qWaitFor([&] { return !window.isVisible(); }, 5000), error,
              QStringLiteral("Studio did not finish saving before close")))
     return false;
-  QFile saved(source + QStringLiteral(".omasnap-zoom.json"));
-  if (!check(saved.open(QIODevice::ReadOnly), error,
-             QStringLiteral("closing lost pending edits")))
-    return false;
-  const QJsonObject object = QJsonDocument::fromJson(saved.readAll()).object();
-  ZoomTrack track;
-  if (!check(readZoomTrack(object, track, error) && track.cues.size() == 1 &&
-                 object.value(QStringLiteral("canvas"))
-                         .toObject()
-                         .value(QStringLiteral("padding"))
-                         .toInt() == 8 &&
-                 object.value(QStringLiteral("trimOutMs")).toInteger() == 5000,
+  const auto saved =
+      loadStudioProject(source + QStringLiteral(".omasnap.json"));
+  if (!check(saved.error.isEmpty() && saved.project.zoom.cues.size() == 1 &&
+                 saved.project.style.padding == 8 &&
+                 saved.project.trimOutMs == 5000,
              error,
-             QStringLiteral("saved edits do not match the last visible state")))
+             QStringLiteral(
+                 "saved project does not match the last visible state")))
     return false;
+  {
+    StudioWindow reopened(source + QStringLiteral(".omasnap.json"), nullptr,
+                          palettePath);
+    reopened.show();
+    auto *transport = reopened.findChild<StudioPlayback *>();
+    auto *canvas =
+        reopened.findChild<QSlider *>(QStringLiteral("canvasPadding"));
+    if (!check(QTest::qWaitFor(
+                   [&] {
+                     return transport->duration() == 6000 &&
+                            canvas->value() == 8 &&
+                            reopened.findChild<StudioTimeline *>()->trimOut() ==
+                                5000;
+                   },
+                   5000),
+               error,
+               QStringLiteral("Opening the project did not restore its state")))
+      return false;
+    reopened.close();
+  }
+  {
+    const QString emptyPath =
+        scratch.filePath(QStringLiteral("empty.omasnap.json"));
+    if (!saveStudioProject(emptyPath, {}).isEmpty())
+      return false;
+    StudioWindow empty(emptyPath, nullptr, palettePath);
+    empty.show();
+    QTest::qWait(200);
+    if (!check(!empty.findChild<QPushButton *>(QStringLiteral("primary"))
+                    ->isEnabled(),
+               error, QStringLiteral("Empty project enabled export")))
+      return false;
+    QTest::keyClick(&empty, Qt::Key_S, Qt::ControlModifier);
+    empty.close();
+    if (!check(QTest::qWaitFor([&] { return !empty.isVisible(); }, 5000), error,
+               QStringLiteral("Empty project did not save and close")))
+      return false;
+    StudioProject missing = saved.project;
+    missing.assets[0].path = scratch.filePath(QStringLiteral("missing.mp4"));
+    const QString missingPath =
+        scratch.filePath(QStringLiteral("missing.omasnap.json"));
+    if (!saveStudioProject(missingPath, missing).isEmpty())
+      return false;
+    StudioWindow absent(missingPath, nullptr, palettePath);
+    absent.show();
+    if (!check(QTest::qWaitFor(
+                   [&] {
+                     for (auto *button : absent.findChildren<QPushButton *>())
+                       if (button->text() == QStringLiteral("Relink media") &&
+                           button->isVisible())
+                         return true;
+                     return false;
+                   },
+                   5000),
+               error, QStringLiteral("Missing media did not expose relink")))
+      return false;
+    absent.close();
+  }
   // Exercise the actual canvas filter, not just its argument spelling.
   const QString output = scratch.filePath(QStringLiteral("canvas.mp4"));
   const StudioStyle style{1, 10, 64};

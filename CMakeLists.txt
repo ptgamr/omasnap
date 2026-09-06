@@ -210,6 +210,12 @@ if(OMASNAP_STUDIO)
 # Its own binary for the same reason the Studio is its own binary: the
 # screenshot smoke suite must not link a media stack to test a video window.
 qt_add_executable(omasnap-studio-smoke
+  src/studio-project.cpp src/studio-project.hpp
+  src/studio-composition.cpp src/studio-composition.hpp
+  src/studio-playback.cpp src/studio-playback.hpp
+  tests/studio-project-smoke.cpp tests/studio-project-smoke.hpp
+  tests/studio-composition-smoke.cpp tests/studio-composition-smoke.hpp
+  tests/studio-playback-smoke.cpp tests/studio-playback-smoke.hpp
   tests/studio-theme-smoke.cpp
   tests/studio-theme-smoke.hpp
   src/studio-theme.cpp
@@ -248,6 +254,9 @@ if(OMASNAP_STUDIO)
 # Wayland protocols, and the process-wide layer-shell assumption, none of
 # which belong in a video window.
 qt_add_executable(omasnap-studio
+  src/studio-project.cpp src/studio-project.hpp
+  src/studio-composition.cpp src/studio-composition.hpp
+  src/studio-playback.cpp src/studio-playback.hpp
   src/studio-theme.cpp
   src/studio-theme.hpp
   src/studio-video.cpp

@@ -61,7 +61,7 @@ no user-visible benefit.
 | `tesseract` | OCR text recognition | Only if OCR is used; missing tesseract fails just that action |
 | `omarchy-notification-send` | Capture- and recording-finished notifications | No — falls back silently if absent (checked with `command -v` semantics via failed `QProcess::startDetached`) |
 | `gpu-screen-recorder` | The encoder behind `--record`, owned as one exact child with a private control socket | Only for recording; absent gives one actionable message and no recording |
-| `ffmpeg` | Remuxing the Matroska master to MP4 after a recording, and the Studio's trim export | No for recording (the `.mkv` is kept as-is); yes for a Studio export |
+| `ffmpeg` | Remuxing the Matroska master to MP4 after a recording, and Studio composition export | No for recording (the `.mkv` is kept as-is); yes for a Studio export |
 
 Each of these is invoked through the same small `runProcess`/
 `QProcess::startDetached` helpers in `src/capture.cpp`, from a background

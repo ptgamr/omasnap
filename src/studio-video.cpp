@@ -130,6 +130,9 @@ void StudioVideoSurface::initializeGL() {
       vec2 q = abs(local - 0.5) * cardSize - (cardSize * 0.5 - radius);
       float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
       float alpha = clamp(0.5 - d, 0.0, 1.0);
+      if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, alpha); return;
+      }
       if (videoLayout == 0) { gl_FragColor = vec4(first.rgb, first.a * alpha); return; }
       vec4 second = texture2D(plane1, vec2(uv.x * widths.y, uv.y));
       float y = (first.r - range.x) * range.y;
@@ -214,6 +217,7 @@ void StudioVideoSurface::paintGL() {
                 chromaWidth /
                     static_cast<float>(qMax(1, frame_.textures[2].width()))));
   const auto uv = [this](QPointF p) {
+    p = {(p.x() - fit.x()) / fit.width(), (p.y() - fit.y()) / fit.height()};
     if (rotation == 90)
       return QPointF(p.y(), 1 - p.x());
     if (rotation == 180)

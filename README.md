@@ -295,7 +295,15 @@ See [Studio design](docs/studio-design.md) for the palette contract.
 Canvas tab. These are exported along with the zoom and trim. Reset canvas
 returns to the original edge-to-edge framing.
 
-**Playback.** Video planes are prepared on a worker and rendered with OpenGL;
+**Projects.** Studio stores source assets, ordered clip instances, source ranges,
+speed, project-time zoom cues, and canvas settings in one non-destructive document.
+Open a video or its `.omasnap.json` project directly. Missing sources expose
+**Relink media**; empty projects remain valid. The first source defines the output
+canvas (rounded down to even dimensions) and FPS; other sources fit that canvas.
+Scene-import and cut controls follow in the next milestones.
+
+**Playback.** A bounded pair of decoders reads the shared composition time map;
+video planes are prepared on a worker and rendered with OpenGL;
 only the newest pending frame is retained. Scrub requests are coalesced.
 Source probing, thumbnail generation, and saving edits also run off the UI thread.
 
@@ -314,10 +322,15 @@ Limits worth knowing, all of them measured rather than guessed:
 
 - **40 zooms per clip.** The cap bounds ffmpeg expression complexity. The
   golden test verifies a complete track at the cap with ffmpeg itself.
-- **Constant frame rate only.** A rational rate like 30000/1001 is handled
-  exactly. A genuinely variable-rate file — some phone recordings — will drift,
-  because the export moves the camera per output frame while the preview follows
-  each frame's own timestamp. Remux to CFR first if you hit this.
+- **Project FPS is fixed.** Rational rates like 30000/1001 are preserved.
+  Source timestamps (including VFR) are mapped into project time; export
+  normalizes the assembled composition to the project FPS before camera effects.
+- **Primary audio track only.** Composition preview/export use the first audio
+  stream, converted to stereo on export; silent sources contribute silence.
+  Separate mic/system-track mixing is not implemented yet. Additional tracks
+  remain untouched in the source file but are not included in composition export.
+- **64 clip occurrences per export.** Larger documents can be saved, but export
+  reports this limit rather than opening an unbounded number of FFmpeg inputs.
 - **Right-angle rotations only.** Anything else is refused with a reason rather
   than framed differently in the two places, because ffmpeg takes a general
   rotation path that a transpose cannot match.
@@ -345,8 +358,9 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | `Escape` / `Ctrl+W` | Clear selection / close Studio |
 | `?` / `F1` | Show keyboard shortcuts |
 
-Zoom cues, trim points, and canvas styling are saved next to the recording as
-`<recording>.omasnap-zoom.json`. The original file stays untouched. Edits are
+Projects are saved next to the recording as `<recording>.omasnap.json`.
+The old `.omasnap-zoom.json` format is not migrated or modified.
+The original video stays untouched. Edits are
 undoable within a session, and a slider or timeline drag is one undo step.
 Closing waits asynchronously for any pending save.
 
@@ -377,8 +391,9 @@ recorder is already running — it never signals a recorder it did not start.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
-- **The Studio edits one source**: playback, trim, manual zoom, canvas styling,
-  undo/redo, and MP4 export. Multi-clip editing, automatic pointer zoom, camera
+- **Scene editing UI is still pending**: the shared multi-source project model,
+  playback, trim, manual zoom, canvas styling, undo/redo, and MP4 export exist.
+  Cut/import/transition controls, automatic pointer zoom, camera
   overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **`omasnap-studio` is optional at build time.** Configure with

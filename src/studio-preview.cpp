@@ -61,24 +61,52 @@ void StudioPreview::setVideoFrame(const QVideoFrame &frame) {
   if (!frame.isValid())
     return;
   pendingFrame_ = frame;
+  pendingPosition_.reset();
   preparePendingFrame();
+}
+
+void StudioPreview::setVideoFrame(const QVideoFrame &frame, qint64 timelineMs) {
+  if (!frame.isValid())
+    return;
+  pendingFrame_ = frame;
+  pendingPosition_ = timelineMs;
+  preparePendingFrame();
+}
+
+void StudioPreview::setCanvasSize(const QSize &size) {
+  canvasSize_ = size;
+  refreshSurface();
+}
+
+void StudioPreview::clearFrame() {
+  invalidatePendingFrames();
+  frame_ = {};
+  videoSize_ = {};
+  if (surface_)
+    surface_->setFrame({});
+  refreshSurface();
 }
 
 void StudioPreview::invalidatePendingFrames() {
   ++generation_;
   pendingFrame_ = {};
+  pendingPosition_.reset();
 }
 
 void StudioPreview::preparePendingFrame() {
   if (preparing_ || !pendingFrame_.isValid())
     return;
   QVideoFrame frame = std::exchange(pendingFrame_, {});
+  const auto position = std::exchange(pendingPosition_, {});
   preparingGeneration_ = generation_;
   preparing_ = true;
   const bool offscreen =
       QGuiApplication::platformName() == QStringLiteral("offscreen");
-  frameWatcher_.setFuture(QtConcurrent::run([frame, offscreen] {
-    return prepareStudioVideoFrame(frame, offscreen);
+  frameWatcher_.setFuture(QtConcurrent::run([frame, offscreen, position] {
+    auto prepared = prepareStudioVideoFrame(frame, offscreen);
+    if (position)
+      prepared.positionMs = *position;
+    return prepared;
   }));
 }
 
@@ -107,6 +135,16 @@ void StudioPreview::refreshSurface() {
     surface_->source =
         track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
     surface_->rotation = rotation_;
+    QSizeF fitted = videoSize_;
+    if (canvasSize_.isValid() && !fitted.isEmpty())
+      fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
+    surface_->fit =
+        canvasSize_.isValid() && !fitted.isEmpty()
+            ? QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
+                     (1 - fitted.height() / canvasSize_.height()) / 2,
+                     fitted.width() / canvasSize_.width(),
+                     fitted.height() / canvasSize_.height())
+            : QRectF(0, 0, 1, 1);
     surface_->update();
   }
   update();
@@ -167,7 +205,9 @@ void StudioPreview::setTargetMarker(bool shown, const QPointF &target) {
 }
 
 QRectF StudioPreview::canvasRect() const {
-  const QSize size = surface_ ? videoSize_ : frame_.size();
+  const QSize size = canvasSize_.isValid() ? canvasSize_
+                     : surface_            ? videoSize_
+                                           : frame_.size();
   if (size.isEmpty())
     return {};
   // The frame keeps its aspect and is centred; the zoom happens inside it,
@@ -249,7 +289,27 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     clip.addRoundedRect(drawn, radius, radius);
     painter.setClipPath(clip);
   }
-  painter.drawImage(drawn, frame_, source);
+  if (canvasSize_.isValid()) {
+    // Match export: source is fitted into a black canonical canvas before
+    // the global camera is evaluated. No full-size intermediate allocation.
+    painter.setClipRect(drawn, Qt::IntersectClip);
+    painter.fillRect(drawn, Qt::black);
+    QSizeF fitted = frame_.size();
+    fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
+    const QRectF fit((canvasSize_.width() - fitted.width()) / 2,
+                     (canvasSize_.height() - fitted.height()) / 2,
+                     fitted.width(), fitted.height());
+    const QRectF target(
+        drawn.left() + (fit.x() / canvasSize_.width() - window.x()) /
+                           window.width() * drawn.width(),
+        drawn.top() + (fit.y() / canvasSize_.height() - window.y()) /
+                          window.height() * drawn.height(),
+        fit.width() / canvasSize_.width() / window.width() * drawn.width(),
+        fit.height() / canvasSize_.height() / window.height() * drawn.height());
+    painter.drawImage(target, frame_);
+  } else {
+    painter.drawImage(drawn, frame_, source);
+  }
   painter.restore();
   paintOverlay(painter);
 }

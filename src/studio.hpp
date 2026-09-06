@@ -2,12 +2,14 @@
  *  into. Playback, a scrubbable timeline, a trim range, and an export. */
 #pragma once
 
+#include "studio-project.hpp"
 #include "studio-style.hpp"
 #include "studio-theme.hpp"
 #include "zoom-track.hpp"
 
 #include <QFutureWatcher>
 #include <QImage>
+#include <QSet>
 #include <QSize>
 #include <QString>
 #include <QWidget>
@@ -17,30 +19,7 @@ class QMediaPlayer;
 class QProcess;
 class QVideoSink;
 class StudioPreview;
-
-/** What the export needs to know about the file it is reading. */
-struct StudioSource {
-  /** Display size: already swapped when the file carries a 90/270 rotation,
-   *  because that is the shape both the preview and the export produce. */
-  QSize size;
-  /** Frame rate as the ratio the file states, never rounded: 30000/1001 read
-   *  as 30 drifts the camera against the picture. */
-  int fpsNumerator = 0;
-  int fpsDenominator = 1;
-  /** Clockwise display rotation to apply, 0/90/180/270. ffmpeg applies the
-   *  container's rotation before the zoom filter, so the preview has to
-   *  apply it too or the two disagree about which way is up -- and a
-   *  normalized target then means a different point on each. */
-  int rotation = 0;
-  /** Set when the file asks for something the zoom cannot reproduce
-   *  faithfully: a rotation that is not a right angle, where ffmpeg takes a
-   *  general rotation path the preview's transpose would not match. */
-  bool unsupportedTransform = false;
-  [[nodiscard]] bool usable() const {
-    return size.isValid() && !size.isEmpty() && fpsNumerator > 0 &&
-           fpsDenominator > 0 && !unsupportedTransform;
-  }
-};
+class StudioPlayback;
 
 /**
  * The trim band under the video: the whole recording as one bar, the kept
@@ -175,19 +154,35 @@ private:
   /** The selected cue the inspector controls act on. */
   [[nodiscard]] const ZoomCue *activeCue() const;
   void zoomChanged();
-  [[nodiscard]] QString zoomSidecarPath() const;
-  void saveZoom();
+  void saveProject();
+  void applyProject(bool resetHistory = false);
+  void relinkAsset();
+  void refreshThumbnails();
+  void captureCursor();
+  [[nodiscard]] StudioEditState editState() const;
 
   QString path_;
-  QMediaPlayer *player_ = nullptr;
+  StudioPlayback *player_ = nullptr;
   QAudioOutput *audio_ = nullptr;
-  QVideoSink *sink_ = nullptr;
   StudioPreview *preview_ = nullptr;
   StudioTimeline *timeline_ = nullptr;
-  QProcess *export_ = nullptr;
+  bool export_ = false;
+  struct ExportResult {
+    QString destination;
+    QString error;
+  };
+  QFutureWatcher<ExportResult> exportWatcher_;
   ZoomTrack zoom_;
   StudioStyle style_;
   StudioSource media_;
+  StudioProject project_;
+  StudioHistory history_;
+  QString projectPath_;
+  QVector<quint64> missingAssets_;
+  QSet<QString> missingPaths_;
+  bool relinking_ = false;
+  class QPushButton *relinkButton_ = nullptr;
+  QFutureWatcher<StudioProjectLoad> relinkWatcher_;
   class QLabel *statusLabel_ = nullptr;
   class QLabel *timeLabel_ = nullptr;
   class QPushButton *playButton_ = nullptr;
@@ -213,43 +208,24 @@ private:
   class QSlider *radius_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;
   qint64 pendingSeek_ = -1;
-  struct EditState {
-    ZoomTrack zoom;
-    qint64 in = 0;
-    qint64 out = 0;
-    StudioStyle style;
-    quint64 selection = 0;
-    bool operator==(const EditState &other) const {
-      return zoom == other.zoom && in == other.in && out == other.out &&
-             style == other.style;
-    }
-  };
-  QVector<EditState> edits_;
-  qsizetype editIndex_ = -1;
   bool editGesture_ = false;
   bool restoring_ = false;
   bool loaded_ = false;
   bool closing_ = false;
-  qint64 initialTrimIn_ = 0;
-  qint64 initialTrimOut_ = -1;
   struct LoadedSource {
-    StudioSource media;
-    ZoomTrack zoom;
+    StudioProject project;
+    QVector<quint64> missingAssets;
     QString error;
-    qint64 in = 0;
-    qint64 out = -1;
-    StudioStyle style;
   };
   QFutureWatcher<LoadedSource> loadWatcher_;
   QFutureWatcher<QString> saveWatcher_;
   QFutureWatcher<QVector<QImage>> thumbnailWatcher_;
+  StudioProject thumbnailProject_;
+  bool thumbnailPending_ = false;
   bool thumbnailsStarted_ = false;
   bool saving_ = false;
   bool savePending_ = false;
   bool mediaFailed_ = false;
-  /// Whether a first frame has been coaxed out of the player, so opening
-  /// the window shows the recording rather than an empty rectangle.
-  bool primed_ = false;
 };
 
 /** `hh:mm:ss.mmm` for ffmpeg, and `m:ss` for people. */

@@ -1,6 +1,6 @@
 # Studio parity implementation plan
 
-Status: milestone 00 implemented, awaiting visual approval; 01–16 not started beyond the existing baseline.
+Status: Quattro foundation approved; implementing 01–04 sequentially with separate validated commits. Later milestones remain planned.
 Created: 2026-09-06.  
 Omasnap baseline: `21ab6ec` (`feat/record`).
 
@@ -14,7 +14,7 @@ The diagram is the quick overview; the matrix records scope and delivery status.
 ```text
 REFERENCE / REQUIREMENT                    OMASNAP STUDIO
 
-Omarchy Quattro ----------------------->  [PART] 00 Theme palette + sharp chrome
+Omarchy Quattro ----------------------->  [DONE] 00 Theme palette + sharp chrome
                                           FIRST: foundation for all later UI
 
 Bettershot code + demos ---------------->  [PART] Workspace, styling, manual zoom
@@ -37,7 +37,7 @@ Omasnap native implementation --------->  [DONE] GPU playback, basic keyboard
                                                  transport, single-source trim,
                                                  edit undo/save, MP4 export
 
-NEXT: 00 Quattro -> 01 Project model -> 02 Range cuts -> 03 Scenes -> 04 Transitions
+NEXT: 02 Range cuts -> 03 Scenes -> 04 Transitions
 ```
 
 "Comes from" identifies the behavioral/design reference, **not copied code or
@@ -53,7 +53,7 @@ comes from its site/screenshots, not a verified source repository.
   are stated explicitly.
 - **TODO**: planned but not implemented. **NEXT** marks the first TODO to tackle.
 - **DOING** / **BLOCKED**: use only when work actually starts or a named blocker
-  prevents it. Milestone 00 awaits visual approval; subsequent milestones are not started.
+  prevents it. Milestones 01–04 are authorized in order; later work is not started.
 - **B**: Bettershot source/demos inspected; **B-web**: website-only claim.
 - **O-web**: Omascreen website/screenshots; **Q**: Quattro design requirement,
   verified against installed shell tokens/geometry (see `docs/studio-design.md`).
@@ -77,8 +77,8 @@ exists. The larger parity targets remain in the matrix below.
 
 | Milestone | Target feature | Reference | Status | Landed subset / remaining work |
 |---|---|---|---|---|
-| **00** | **Quattro design foundation** | **Q + U** | **PART** | Implemented: palette/reload/fallback, square mono controls, canvas isolation; automated/live checks pass, awaiting your visual approval |
-| 01 | Project/composition model | B + U + N | TODO | Existing one-file sidecar is not a multi-source project; add assets, clip instances, time mapping |
+| **00** | **Quattro design foundation** | **Q + U** | **DONE** | `57e3700`; inherited palette/reload/fallback, square mono controls; approved to continue |
+| 01 | Project/composition model | B + U + N | DONE | Assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full and live checks pass |
 | 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | TODO | End trimming/zoom deletion exist; deleting an interior video passage does not |
 | 03 | Import, combine, duplicate, reorder scenes | U | TODO | Multi-file composition is requested here, not verified in Bettershot's single-recording clip model |
 | 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | TODO | No scene transitions in current Studio |
@@ -144,8 +144,8 @@ conventions. Establish that foundation before adding editing features.
 
 **Not supported yet:** deleting an interior time range, importing several scenes
 into one project, reordering scenes, or transitions between them. Delete currently
-removes a selected zoom cue, not recorded video. The current model stores one
-`path_` and trim endpoints; it is not yet a multi-source composition.
+removes a selected zoom cue, not recorded video. The multi-source composition
+model is implemented; range-cut/import/transition UI remains next.
 
 ## Reference findings and evidence boundaries
 
@@ -218,7 +218,7 @@ do not copy Apple's wallpaper collection into Omasnap.
   generic platform theme and explicit resolved colors: read Omarchy's palette
   directly rather than loading GTK theme plugins or deriving chrome from
   `QStyle`/`QWidget::palette()`. Do not change screenshot chrome or desktop config.
-- [ ] Obtain your visual approval before starting milestone 01.
+- [x] Obtain your visual approval before starting milestone 01.
 
 Delivery: `feat(studio): establish Quattro theme and control foundation`.
 `src/studio-theme.cpp` owns the
@@ -242,20 +242,27 @@ frame callbacks. Approve this visual baseline before moving to 01.
 
 ### 01 — Non-destructive project and composition model
 
-- [ ] Introduce a Studio project with source assets, ordered clip instances,
+- [x] Introduce a Studio project with source assets, ordered clip instances,
   source in/out points, speed, stable IDs, and project canvas settings.
-- [ ] Keep source time distinct from edited timeline time. Centralize mapping
+- [x] Keep source time distinct from edited timeline time. Centralize mapping
   for frames, audio, zoom, cursor events, masks, and captions.
-- [ ] Represent edits through one undoable project command/history mechanism;
+- [x] Represent edits through one undoable project command/history mechanism;
   one drag or range deletion is one undo step. Never modify source media.
-- [ ] Persist the project atomically, support an empty project, and report
+- [x] Persist the project atomically, support an empty project, and report
   missing media with an explicit relink action.
-- [ ] Establish a shared composition description for GPU preview and export.
+- [x] Establish a shared composition description for GPU preview and export.
   Prove timestamp/audio handling before promising seamless multi-clip playback.
 
 Acceptance: pure tests cover source/time mapping, repeated use of a source,
 split boundaries, undo/redo, empty projects, and save/reopen. No media work blocks
 the GUI. This is the prerequisite for 02–04, not a backend rewrite chosen in advance.
+
+Delivery: `feat(studio): add non-destructive composition projects`.
+Validated with `make check` and live Wayland decoded-pixel checks: ordered
+mixed-aspect scenes, reverse/boundary seeks, repeated sources, speed/VFR export,
+primary audio/silence, project reopen, empty/missing media, and history.
+See `docs/studio-project.md` for the 64-clip export cap and primary-track
+audio policy. Old zoom sidecars remain untouched and are not migrated.
 
 ### 02 — Drag-select a passage and Delete it
 

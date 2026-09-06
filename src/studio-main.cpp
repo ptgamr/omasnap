@@ -23,7 +23,8 @@ int main(int argc, char **argv) {
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral(
-      "Review, zoom and trim a screen recording. Any file will do -- it does "
+      "Review a non-destructive Studio project or screen recording. A video "
+      "does "
       "not\nhave to have been recorded by omasnap.\n"
       "\n"
       "Click the picture to aim a zoom: inside an existing cue that re-aims "
@@ -36,17 +37,18 @@ int main(int argc, char **argv) {
       "Shift+Left/Right seek five seconds. I/O set trim points, Z adds a zoom, "
       "Ctrl+Z undoes, and Ctrl+E exports. Press ? for all shortcuts.\n"
       "\n"
-      "Zoom cues, trim, and canvas styling are saved beside the recording as "
-      "`<recording>.omasnap-zoom.json`,\nso the original file is never "
+      "Source assets, clip ranges, zoom cues, and canvas styling are saved as "
+      "`<recording>.omasnap.json`,\nso the original file is never "
       "touched and reopening brings them back.\n"
       "\n"
       "Exit codes: 0 success; 1 the recording could not be opened; 2 usage "
       "error."));
   parser.addHelpOption();
   parser.addVersionOption();
-  parser.addPositionalArgument(QStringLiteral("recording"),
-                               QStringLiteral("Video file to open."),
-                               QStringLiteral("<recording>"));
+  parser.addPositionalArgument(
+      QStringLiteral("recording"),
+      QStringLiteral("Video or .omasnap.json project to open."),
+      QStringLiteral("<recording>"));
   parser.process(application);
 
   const QStringList positional = parser.positionalArguments();
