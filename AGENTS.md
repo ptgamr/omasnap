@@ -77,6 +77,11 @@ change that touches the principle, not just this summary.
   `generic` theme (see [docs/dependencies.md](docs/dependencies.md)). Chrome
   must use the pinned fonts and explicit colours; do not derive chrome from
   `QFontDatabase::systemFont`, `QStyle`, or `palette()`.
+  **Studio's chrome** resolves explicit colors from Omarchy's active palette
+  through `StudioTheme`, with built-in defaults when unavailable. It uses
+  `chromeMonoFont()` and shared square control geometry to match Quattro.
+  Theme changes never change saved video styling. Screenshot chrome remains
+  unchanged; see [docs/studio-design.md](docs/studio-design.md).
 
 ## Repository layout
 

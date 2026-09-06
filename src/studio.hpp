@@ -3,6 +3,7 @@
 #pragma once
 
 #include "studio-style.hpp"
+#include "studio-theme.hpp"
 #include "zoom-track.hpp"
 
 #include <QFutureWatcher>
@@ -61,6 +62,10 @@ public:
   /** Whether cues can be moved or resized; off while an export runs. */
   void setCuesEditable(bool editable);
   void setThumbnails(QVector<QImage> thumbnails);
+  void setChrome(const StudioChrome &chrome) {
+    chrome_ = chrome;
+    update();
+  }
   [[nodiscard]] quint64 selectedCue() const { return selected_; }
   [[nodiscard]] qint64 duration() const { return duration_; }
   [[nodiscard]] qint64 trimIn() const { return trimIn_; }
@@ -112,6 +117,7 @@ private:
   Grab hovered_ = Grab::None;
   bool cuesEditable_ = true;
   QVector<QImage> thumbnails_;
+  StudioChrome chrome_;
 };
 
 /**
@@ -123,7 +129,8 @@ private:
 class StudioWindow final : public QWidget {
   Q_OBJECT
 public:
-  explicit StudioWindow(QString path, QWidget *parent = nullptr);
+  explicit StudioWindow(QString path, QWidget *parent = nullptr,
+                        QString themePath = {});
   ~StudioWindow() override;
 
   /** False when the file could not be opened at all. */
@@ -137,6 +144,8 @@ protected:
   void paintEvent(QPaintEvent *event) override;
 
 private:
+  void applyChrome();
+  StudioTheme *theme_ = nullptr;
   bool handleShortcut(QKeyEvent *event, bool activate);
   void toggleInspector();
   void showShortcuts();
@@ -156,7 +165,7 @@ private:
   void setTrimOut();
   void resetTrim();
   void startExport();
-  void setStatus(const QString &status);
+  void setStatus(const QString &status, bool error = false);
   void refreshControls();
   /** Clicking the preview aims the cue under the playhead, or makes one. */
   void aimZoom(const QPointF &target);
@@ -199,7 +208,7 @@ private:
   class QSpinBox *easeOut_ = nullptr;
   class QWidget *inspector_ = nullptr;
   bool inspectorWanted_ = true;
-  class QComboBox *background_ = nullptr;
+  StudioComboBox *background_ = nullptr;
   class QSlider *padding_ = nullptr;
   class QSlider *radius_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;

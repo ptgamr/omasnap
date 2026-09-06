@@ -284,6 +284,13 @@ with Canvas, Zoom, and Clip inspector tabs. The inspector collapses in narrow
 tiled windows and can be toggled with `Ctrl+\`. The header has undo/redo, export,
 and a keyboard shortcut reference.
 
+Studio chrome follows **Omarchy Quattro**: square controls, monospace labels,
+and the active Omarchy palette. Palette changes are picked up automatically
+within about a second without interrupting playback or edits. Without a usable
+Omarchy palette, Studio uses built-in Quattro-style colors. Theme changes affect
+only the editor UI—not the saved canvas colors, video corners, or export.
+See [Studio design](docs/studio-design.md) for the palette contract.
+
 **Canvas.** Choose a background color, padding, and rounded corners in the
 Canvas tab. These are exported along with the zoom and trim. Reset canvas
 returns to the original edge-to-edge framing.

@@ -151,7 +151,7 @@ void StudioVideoSurface::initializeGL() {
 }
 
 void StudioVideoSurface::paintGL() {
-  glClearColor(0.055F, 0.055F, 0.067F, 1);
+  glClearColor(workspace.redF(), workspace.greenF(), workspace.blueF(), 1);
   glClear(GL_COLOR_BUFFER_BIT);
   const qreal dpr = devicePixelRatioF();
   glEnable(GL_SCISSOR_TEST);

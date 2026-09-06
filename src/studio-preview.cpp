@@ -11,11 +11,6 @@
 
 namespace {
 
-const QColor kLetterbox(10, 10, 12);
-const QColor kMarker(120, 170, 255);
-const QColor kMarkerRing(255, 255, 255, 200);
-const QColor kHint(255, 255, 255, 120);
-
 constexpr qreal kMarkerRadius = 7.0;
 
 } // namespace
@@ -97,11 +92,17 @@ void StudioPreview::setStyle(const StudioStyle &style) {
   refreshSurface();
 }
 
+void StudioPreview::setChrome(const StudioChrome &chrome) {
+  chrome_ = chrome;
+  refreshSurface();
+}
+
 void StudioPreview::refreshSurface() {
   if (surface_) {
     surface_->drawn = frameRect();
     surface_->canvas = canvasRect();
     surface_->background = style_.color();
+    surface_->workspace = chrome_.background;
     surface_->radius = style_.radius * canvasRect().height() / 1080.0;
     surface_->source =
         track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
@@ -229,7 +230,7 @@ void StudioPreview::paintEvent(QPaintEvent *) {
   if (surface_)
     return;
   QPainter painter(this);
-  painter.fillRect(rect(), kLetterbox);
+  painter.fillRect(rect(), chrome_.background);
   const QRectF drawn = frameRect();
   if (drawn.isEmpty())
     return;
@@ -267,16 +268,18 @@ void StudioPreview::paintOverlay(QPainter &painter) const {
                                          window.height() * drawn.height());
     if (drawn.contains(spot)) {
       painter.setBrush(Qt::NoBrush);
-      painter.setPen(QPen(kMarkerRing, 2));
+      painter.setPen(QPen(chrome_.foreground, 2));
       painter.drawEllipse(spot, kMarkerRadius, kMarkerRadius);
       painter.setPen(Qt::NoPen);
-      painter.setBrush(kMarker);
+      painter.setBrush(chrome_.accent);
       painter.drawEllipse(spot, 3.0, 3.0);
     }
   }
 
   if (pickable_ && drawn.contains(hover_)) {
-    painter.setPen(kHint);
+    painter.fillRect(drawn.adjusted(0, drawn.height() - 26, 0, 0),
+                     chrome_.background);
+    painter.setPen(chrome_.foreground);
     painter.setFont(font());
     painter.drawText(drawn.adjusted(0, 0, -10, -8),
                      Qt::AlignRight | Qt::AlignBottom,

@@ -1,6 +1,6 @@
 # Studio parity implementation plan
 
-Status: next milestones are planning only; the existing Studio baseline has landed.  
+Status: milestone 00 implemented, awaiting visual approval; 01–16 not started beyond the existing baseline.
 Created: 2026-09-06.  
 Omasnap baseline: `21ab6ec` (`feat/record`).
 
@@ -14,7 +14,7 @@ The diagram is the quick overview; the matrix records scope and delivery status.
 ```text
 REFERENCE / REQUIREMENT                    OMASNAP STUDIO
 
-Omarchy Quattro ----------------------->  [TODO] 00 Theme palette + sharp chrome
+Omarchy Quattro ----------------------->  [PART] 00 Theme palette + sharp chrome
                                           FIRST: foundation for all later UI
 
 Bettershot code + demos ---------------->  [PART] Workspace, styling, manual zoom
@@ -49,13 +49,14 @@ comes from its site/screenshots, not a verified source repository.
 
 - **DONE**: the precise scope in the row is implemented and validated on the
   current branch. This does not mean installed, released, or full product parity.
-- **PART**: a usable subset has landed; the missing scope is stated explicitly.
+- **PART**: a usable subset is implemented; missing scope and uncommitted work
+  are stated explicitly.
 - **TODO**: planned but not implemented. **NEXT** marks the first TODO to tackle.
 - **DOING** / **BLOCKED**: use only when work actually starts or a named blocker
-  prevents it. Nothing in this backlog is DOING yet.
+  prevents it. Milestone 00 awaits visual approval; subsequent milestones are not started.
 - **B**: Bettershot source/demos inspected; **B-web**: website-only claim.
 - **O-web**: Omascreen website/screenshots; **Q**: Quattro design requirement,
-  with runtime token/geometry verification still pending.
+  verified against installed shell tokens/geometry (see `docs/studio-design.md`).
 - **U**: your requested workflow; **N**: native Omasnap implementation/engineering.
 
 ### Landed baseline
@@ -76,7 +77,7 @@ exists. The larger parity targets remain in the matrix below.
 
 | Milestone | Target feature | Reference | Status | Landed subset / remaining work |
 |---|---|---|---|---|
-| **00** | **Quattro design foundation** | **Q + U** | **TODO — NEXT** | Inherit theme colors/live changes; sharp chrome and reusable design tokens |
+| **00** | **Quattro design foundation** | **Q + U** | **PART** | Implemented: palette/reload/fallback, square mono controls, canvas isolation; automated/live checks pass, awaiting your visual approval |
 | 01 | Project/composition model | B + U + N | TODO | Existing one-file sidecar is not a multi-source project; add assets, clip instances, time mapping |
 | 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | TODO | End trimming/zoom deletion exist; deleting an interior video passage does not |
 | 03 | Import, combine, duplicate, reorder scenes | U | TODO | Multi-file composition is requested here, not verified in Bettershot's single-recording clip model |
@@ -125,7 +126,8 @@ conventions. Establish that foundation before adding editing features.
   to implement the whole backlog, install dependencies, or change desktop config.
 - Keep each item independently testable and reviewable. Update its checkbox
   only after its acceptance checks pass; record any remaining limitations.
-- No implementation, commit, installation, or release is part of this planning step.
+- The plan was committed as `4acb775`; implementation is authorized one milestone
+  at a time. No installation or release is implied.
 - Feature parity means working editing, preview, persistence, undo, and export,
   not merely adding controls that resemble the reference UI.
 
@@ -187,35 +189,48 @@ do not copy Apple's wallpaper collection into Omasnap.
 
 ### 00 — Omarchy Quattro design foundation (first)
 
-- [ ] Inspect the installed Quattro shell's current theme provider and native
+- [x] Inspect the installed Quattro shell's current theme provider and native
   controls. Record the actual palette contract, typography, border/corner
   treatment, spacing, density, and interaction states; do not guess token names
   or copy outdated screenshots as an implementation specification.
-- [ ] Define a small shared Studio design-token layer: background/surface,
+- [x] Define a small shared Studio design-token layer: background/surface,
   foreground/muted text, accent, border, selection, focus, disabled, warning,
   and error colors, plus geometry and typography metrics.
-- [ ] Derive chrome colors from the active Omarchy theme, not fixed dark gray
+- [x] Derive chrome colors from the active Omarchy theme, not fixed dark gray
   and purple values. Handle theme changes while Studio is open without losing
   edits, resetting playback, or reopening the window. Load/refresh safely off
   the UI thread, with a deterministic fallback for unavailable or invalid data.
-- [ ] Use Quattro's sharp/square corner treatment for panels, buttons, menus,
+- [x] Use Quattro's sharp/square corner treatment for panels, buttons, menus,
   fields, tabs, timeline blocks, and dialogs. Centralize any measured exceptions
   rather than introducing arbitrary rounded cards or pill-shaped controls.
-- [ ] Standardize fonts, icon strokes, padding, separators, hover/pressed states,
+- [x] Standardize fonts, icon strokes, padding, separators, hover/pressed states,
   focus indicators, and selected/disabled states across reusable controls.
   Preserve pinned chrome font helpers unless a measured Quattro mismatch warrants
   an explicitly documented Studio-only change; do not use platform font fallbacks.
-- [ ] Restyle the existing header, inspector, timeline, transport, tooltips,
+- [x] Restyle the existing header, inspector, timeline, transport, tooltips,
   shortcut help, and status/error surfaces first. This becomes the component
   vocabulary for every later feature, not an optional finishing pass.
-- [ ] Keep application chrome separate from video design: a theme switch must
+- [x] Keep application chrome separate from video design: a theme switch must
   not recolor a saved canvas background, change an exported title, or square off
   the user's chosen video corners. Project visuals remain explicit saved edits.
-- [ ] Document the Studio-specific theme contract and reconcile the existing
+- [x] Document the Studio-specific theme contract and reconcile the existing
   fixed-color guidance when implementing this milestone. Continue using Qt's
   generic platform theme and explicit resolved colors: read Omarchy's palette
   directly rather than loading GTK theme plugins or deriving chrome from
   `QStyle`/`QWidget::palette()`. Do not change screenshot chrome or desktop config.
+- [ ] Obtain your visual approval before starting milestone 01.
+
+Delivery: `feat(studio): establish Quattro theme and control foundation`.
+`src/studio-theme.cpp` owns the
+shared contract; `tests/studio-theme-smoke.cpp` covers palette/fallback/reload
+and canvas isolation. Live Wayland checks verified playback across palette
+changes and existing keyboard/edit/export behavior. Dark/light screenshots
+were reviewed without changing the desktop theme. See `docs/studio-design.md`
+for the deliberately limited palette contract (not the full shell override API).
+Validation on 2026-09-06: `make check` passed (both smoke suites and clang-tidy;
+warnings remain, clazy unavailable, no QML pass applicable). Separate Wayland
+GPU/interaction/export checks passed. Binary dependencies still isolate
+Multimedia/Network from `omasnap` and layer-shell from Studio.
 
 Acceptance: compare the actual Studio window with installed Quattro controls;
 review dark and light theme variants where available, accent changes, narrow

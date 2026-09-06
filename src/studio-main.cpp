@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
   qputenv("QT_QPA_PLATFORMTHEME", "generic");
   QGuiApplication::setDesktopFileName(QStringLiteral("omasnap-studio"));
   const QApplication application(argc, argv);
-  QApplication::setFont(chromeDefaultFont());
+  QApplication::setFont(chromeMonoFont(12));
 
   QCommandLineParser parser;
   parser.setApplicationDescription(QStringLiteral(

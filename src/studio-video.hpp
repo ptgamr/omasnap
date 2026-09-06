@@ -34,6 +34,7 @@ public:
   QRectF drawn;
   QRectF canvas;
   QColor background;
+  QColor workspace{QStringLiteral("#101315")};
   qreal radius = 0;
   QRectF source{0, 0, 1, 1};
   int rotation = 0;

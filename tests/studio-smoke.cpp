@@ -2,6 +2,7 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio-preview.hpp"
+#include "studio-theme-smoke.hpp"
 #include "studio.hpp"
 #include "zoom-track-smoke.hpp"
 #include "zoom-track.hpp"
@@ -19,6 +20,7 @@
 #include <QMediaPlayer>
 #include <QProcess>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QStandardPaths>
@@ -226,6 +228,7 @@ int main(int argc, char **argv) {
     const char *name;
     bool (*run)(QString &);
   } checks[] = {{"timecode", runTimecodeChecks},
+                {"Quattro theme", runStudioThemeChecks},
                 {"export command", runExportCommandChecks},
                 {"export path", runExportPathChecks},
                 {"timeline", runTimelineChecks},
@@ -709,7 +712,8 @@ bool runStudioInteractionChecks(QString &error) {
     error = QStringLiteral("could not generate keyboard fixture");
     return false;
   }
-  StudioWindow window(source);
+  const QString palettePath = scratch.filePath(QStringLiteral("colors.toml"));
+  StudioWindow window(source, nullptr, palettePath);
   window.show();
   auto *player = window.findChild<QMediaPlayer *>();
   auto *slider = window.findChild<QSlider *>(QStringLiteral("zoomScale"));
@@ -729,6 +733,27 @@ bool runStudioInteractionChecks(QString &error) {
   if (!check(slider->isEnabled(), error,
              QStringLiteral("Z did not create a zoom")))
     return false;
+  // Theme swaps must not pause transport or mutate the editing history.
+  QTest::keyClick(&window, Qt::Key_Space);
+  const int initialScale = slider->value();
+  QSaveFile palette(palettePath);
+  const QByteArray paletteData(
+      "background = '#fafafa'\nforeground = '#202020'\naccent = '#3256a0'\n");
+  if (!palette.open(QIODevice::WriteOnly) ||
+      palette.write(paletteData) != paletteData.size() || !palette.commit())
+    return false;
+  auto *theme = window.findChild<StudioTheme *>();
+  theme->reload();
+  if (!check(
+          QTest::qWaitFor(
+              [&] { return theme->chrome().background == QColor("#fafafa"); },
+              3000) &&
+              player->playbackState() == QMediaPlayer::PlayingState &&
+              slider->value() == initialScale && padding->value() == 0 &&
+              window.styleSheet().contains(QStringLiteral("#3256a0")),
+          error, QStringLiteral("live theme reload changed playback or edits")))
+    return false;
+  player->pause();
   for (QWidget *focus :
        {static_cast<QWidget *>(slider), static_cast<QWidget *>(exportButton),
         static_cast<QWidget *>(padding)}) {

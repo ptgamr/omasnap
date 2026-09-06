@@ -85,6 +85,14 @@ depend on an external desktop theme, `QStyle`- or palette-derived chrome, or
 icon-theme lookup: each is a startup cost with nothing in this codebase to
 spend it on.
 
+Studio deliberately inherits **Omarchy palette data**, not a Qt platform theme:
+`StudioTheme` reads the flat color keys in
+`~/.local/state/omarchy/current/theme/colors.toml` asynchronously, with a
+built-in fallback. It adds no package, shell IPC, or desktop dependency. Chrome
+uses explicit resolved colors and `chromeMonoFont()`; the screenshot path is
+unchanged. See [Studio design](studio-design.md) for the supported contract and
+the strict separation between application chrome and exported video styling.
+
 ## The one config file
 
 `~/.config/omasnap/omasnap.conf` is optional INI, read with `QSettings`.

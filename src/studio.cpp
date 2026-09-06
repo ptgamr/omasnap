@@ -45,18 +45,6 @@
 
 namespace {
 
-const QColor kWindowBackground(16, 16, 19);
-const QColor kTrack(255, 255, 255, 28);
-const QColor kKept(120, 170, 255, 120);
-const QColor kHandle(196, 214, 255);
-const QColor kPlayhead(255, 255, 255, 232);
-const QColor kText(226, 226, 232);
-const QColor kMuted(150, 150, 160);
-const QColor kCue(120, 170, 255, 150);
-const QColor kCueSelected(150, 195, 255, 220);
-const QColor kCueEdge(220, 235, 255);
-const QColor kLaneLabel(255, 255, 255, 90);
-
 constexpr int kTimelineHeight = 176;
 /// The trim bar's row, then the cue lane under it.
 constexpr qreal kLaneGap = 10.0;
@@ -76,36 +64,6 @@ constexpr int kProbeTimeoutMs = 5000;
 constexpr qint64 kDefaultCueMs = 2500;
 /// How long dragging settles before the cues are written out.
 constexpr int kSaveDebounceMs = 400;
-
-const auto kControlStyle = QStringLiteral(R"(
-QWidget { color: #e2e2e8; }
-QWidget#studioHeader, QWidget#studioInspector, QWidget#timelinePanel { background: #1b1b20; }
-QLabel#muted { color: #8e8e9b; }
-QLabel#section { color: #bbbcc8; font-size: 11px; }
-QPushButton {
-  background: #27272e; border: 1px solid #36363f;
-  border-radius: 7px; padding: 7px 12px;
-}
-QPushButton:hover:enabled { background: #34343e; border-color: #565662; }
-QPushButton:pressed:enabled { background: #424251; }
-QPushButton:focus { border-color: #a5b4fc; }
-QPushButton:disabled { color: rgba(226,226,232,0.35); }
-QPushButton#primary { background: #b9a4f4; color: #1b1528; border-color: #b9a4f4; font-weight: 600; }
-QPushButton#play { border-radius: 8px; background: #ddd5f4; color: #211a30; min-width: 40px; }
-QSlider::groove:horizontal { height: 4px; background: #3a3a46; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #b9a4f4; border-radius: 2px; }
-QSlider::handle:horizontal { background: #ece6fa; border: 2px solid #b9a4f4; width: 10px; margin: -5px 0; border-radius: 7px; }
-QSpinBox, QComboBox { background: #27272e; border: 1px solid #41414c; border-radius: 6px; padding: 6px; selection-background-color: #685584; }
-QSpinBox:focus, QComboBox:focus { border-color: #b9a4f4; }
-QTabWidget::pane { border: 0; }
-QTabBar::tab { background: #222229; color: #9999a8; padding: 10px 12px; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: #e1d4ff; border-bottom-color: #b9a4f4; }
-QScrollArea { border: 0; background: transparent; }
-QScrollBar:vertical { background: #1b1b20; width: 8px; }
-QScrollBar::handle:vertical { background: #464650; border-radius: 4px; min-height: 24px; }
-QToolTip { background: #292930; color: #eeeeef; border: 1px solid #535360; padding: 5px; }
-QSplitter::handle { background: #303038; width: 1px; }
-)");
 
 } // namespace
 
@@ -537,26 +495,26 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
   QPainter painter(this);
   painter.setRenderHint(QPainter::Antialiasing, true);
   const QRectF track = trackRect();
-  painter.fillRect(rect(), QColor(27, 27, 32));
+  painter.fillRect(rect(), chrome_.background);
   painter.setFont(chromeMonoFont(10));
-  painter.setPen(kMuted);
+  painter.setPen(chrome_.mutedText());
   for (int tick = 0; tick <= 10; ++tick) {
     const qreal x = track.left() + track.width() * tick / 10;
     painter.drawLine(QPointF(x, 26), QPointF(x, 31));
     painter.drawText(QRectF(x - 22, 4, 44, 18), Qt::AlignCenter,
                      studioClock(duration_ * tick / 10));
   }
-  painter.setFont(chromeFont(10));
+  painter.setFont(chromeMonoFont(10));
   painter.drawText(QRectF(0, track.top(), 55, track.height()),
                    Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("VIDEO"));
 
   painter.setPen(Qt::NoPen);
-  painter.setBrush(kTrack);
-  painter.drawRoundedRect(track, 4, 4);
+  painter.setBrush(chrome_.surface());
+  painter.drawRect(track);
   if (!thumbnails_.isEmpty()) {
     painter.save();
     QPainterPath clip;
-    clip.addRoundedRect(track, 4, 4);
+    clip.addRect(track);
     painter.setClipPath(clip);
     const qreal cellWidth =
         track.width() / static_cast<qreal>(thumbnails_.size());
@@ -564,7 +522,9 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
       painter.drawImage(QRectF(track.left() + static_cast<qreal>(i) * cellWidth,
                                track.top(), cellWidth, track.height()),
                         thumbnails_.at(i));
-    painter.fillRect(track, QColor(0, 0, 0, 65));
+    QColor veil = chrome_.background;
+    veil.setAlphaF(0.72);
+    painter.fillRect(track, veil);
     painter.restore();
   }
 
@@ -573,23 +533,23 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
 
   const qreal inX = xForTime(trimIn_);
   const qreal outX = xForTime(trimOut_);
-  painter.setBrush(kKept);
-  painter.drawRoundedRect(
-      QRectF(inX, track.top(), qMax<qreal>(1.0, outX - inX), track.height()), 4,
-      4);
-  painter.setPen(kText);
-  painter.setFont(chromeFont(11));
+  QColor kept = chrome_.accent;
+  kept.setAlphaF(0.18);
+  painter.setBrush(kept);
+  painter.setPen(QPen(chrome_.border(), StudioChrome::borderWidth));
+  painter.drawRect(
+      QRectF(inX, track.top(), qMax<qreal>(1.0, outX - inX), track.height()));
+  painter.setPen(chrome_.foreground);
+  painter.setFont(chromeMonoFont(11));
   painter.drawText(track.adjusted(14, 0, -14, 0), Qt::AlignVCenter,
                    QStringLiteral("Screen recording"));
   painter.setPen(Qt::NoPen);
 
   const auto paintHandle = [&](qreal x, Grab which) {
-    painter.setBrush(hovered_ == which || grabbed_ == which
-                         ? QColor(255, 255, 255)
-                         : kHandle);
-    painter.drawRoundedRect(QRectF(x - kHandleWidth / 2.0, track.top() - 5.0,
-                                   kHandleWidth, track.height() + 10.0),
-                            3, 3);
+    painter.setBrush(hovered_ == which || grabbed_ == which ? chrome_.foreground
+                                                            : chrome_.accent);
+    painter.drawRect(QRectF(x - kHandleWidth / 2.0, track.top() - 5.0,
+                            kHandleWidth, track.height() + 10.0));
   };
   paintHandle(inX, Grab::In);
   paintHandle(outX, Grab::Out);
@@ -598,10 +558,10 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
   // its body and resize by either edge.
   const QRectF lane = cueLaneRect();
   painter.setPen(Qt::NoPen);
-  painter.setBrush(QColor(255, 255, 255, 14));
-  painter.drawRoundedRect(lane, 4, 4);
-  painter.setPen(kLaneLabel);
-  painter.setFont(chromeFont(10));
+  painter.setBrush(chrome_.surface());
+  painter.drawRect(lane);
+  painter.setPen(chrome_.mutedText());
+  painter.setFont(chromeMonoFont(10));
   painter.drawText(QRectF(0, lane.top(), lane.left() - 4.0, lane.height()),
                    Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("zoom"));
   if (track_) {
@@ -609,17 +569,16 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
       const QRectF rect = cueRect(cue);
       const bool chosen = cue.id == selected_;
       painter.setPen(Qt::NoPen);
-      painter.setBrush(chosen ? kCueSelected : kCue);
-      painter.drawRoundedRect(rect, 4, 4);
+      painter.setBrush(chosen ? chrome_.accent : chrome_.selected());
+      painter.drawRect(rect);
       if (chosen) {
-        painter.setBrush(kCueEdge);
-        painter.drawRoundedRect(
-            QRectF(rect.left(), rect.top(), 2.5, rect.height()), 1, 1);
-        painter.drawRoundedRect(
-            QRectF(rect.right() - 2.5, rect.top(), 2.5, rect.height()), 1, 1);
+        painter.setBrush(chrome_.onAccent());
+        painter.drawRect(QRectF(rect.left(), rect.top(), 2.5, rect.height()));
+        painter.drawRect(
+            QRectF(rect.right() - 2.5, rect.top(), 2.5, rect.height()));
       }
       if (rect.width() > 34.0) {
-        painter.setPen(QColor(16, 20, 30));
+        painter.setPen(chosen ? chrome_.onAccent() : chrome_.foreground);
         painter.setFont(chromeMonoFont(10));
         painter.drawText(rect, Qt::AlignCenter,
                          QStringLiteral("%1x").arg(cue.scale, 0, 'f', 1));
@@ -629,27 +588,30 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
 
   // The playhead spans both rows, so a cue's position against it is legible.
   const qreal playX = xForTime(position_);
-  painter.setPen(QPen(kPlayhead, 2));
+  painter.setPen(QPen(chrome_.foreground, 2));
   painter.drawLine(QPointF(playX, track.top() - 9.0),
                    QPointF(playX, lane.bottom() + 4.0));
   painter.setPen(Qt::NoPen);
-  painter.setBrush(kPlayhead);
-  painter.drawEllipse(QPointF(playX, track.top() - 9.0), 3.0, 3.0);
+  painter.setBrush(chrome_.foreground);
+  painter.drawRect(QRectF(playX - 3, track.top() - 12, 6, 6));
 }
 
-StudioWindow::StudioWindow(QString path, QWidget *parent)
+StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     : QWidget(parent), path_(std::move(path)) {
+  theme_ = new StudioTheme(this, std::move(themePath));
   setWindowTitle(
       QStringLiteral("%1 — OmaSnap Studio").arg(QFileInfo(path_).fileName()));
   setMinimumSize(980, 680);
   resize(1280, 820);
-  setStyleSheet(kControlStyle);
-  setFont(chromeDefaultFont());
+  setStyleSheet(theme_->chrome().styleSheet());
+  setFont(chromeMonoFont(12));
 
   preview_ = new StudioPreview(this);
   preview_->setCanvasInset(28);
   timeline_ = new StudioTimeline(this);
   timeline_->setTrack(&zoom_);
+  applyChrome();
+  connect(theme_, &StudioTheme::changed, this, &StudioWindow::applyChrome);
 
   const auto button = [this](const QString &text, const QString &hint) {
     auto *result = new QPushButton(text, this);
@@ -679,14 +641,16 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   timeLabel_ = new QLabel(this);
   timeLabel_->setFont(chromeMonoFont(13));
   statusLabel_ = new QLabel(this);
-  statusLabel_->setFont(chromeFont(12));
+  statusLabel_->setFont(chromeMonoFont(12));
 
   auto *header = new QWidget(this);
   header->setObjectName(QStringLiteral("studioHeader"));
   auto *headerLayout = new QHBoxLayout(header);
-  headerLayout->setContentsMargins(18, 12, 18, 12);
+  headerLayout->setContentsMargins(StudioChrome::panelPadding, 12,
+                                   StudioChrome::panelPadding, 12);
+  headerLayout->setSpacing(StudioChrome::gap);
   auto *brand = new QLabel(QStringLiteral("OmaSnap  /  Studio"), header);
-  brand->setFont(chromeFont(14));
+  brand->setFont(chromeMonoFont(14));
   headerLayout->addWidget(brand);
   undoButton_ = button(QStringLiteral("Undo"), QStringLiteral("Undo · Ctrl+Z"));
   redoButton_ =
@@ -716,9 +680,12 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   inspector_->setMinimumWidth(260);
   inspector_->setMaximumWidth(340);
   auto *inspectorLayout = new QVBoxLayout(inspector_);
-  inspectorLayout->setContentsMargins(18, 20, 18, 18);
+  inspectorLayout->setContentsMargins(
+      StudioChrome::panelPadding, StudioChrome::panelPadding,
+      StudioChrome::panelPadding, StudioChrome::panelPadding);
+  inspectorLayout->setSpacing(StudioChrome::gap);
   auto *inspectorTitle = new QLabel(QStringLiteral("Inspector"), inspector_);
-  inspectorTitle->setFont(chromeFont(16));
+  inspectorTitle->setFont(chromeMonoFont(16));
   inspectorLayout->addWidget(inspectorTitle);
   auto *tabs = new QTabWidget(inspector_);
   inspectorLayout->addWidget(tabs, 1);
@@ -728,7 +695,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   zoomControls->setSpacing(14);
   cueLabel_ = new QLabel(QStringLiteral("Select a zoom"), zoomPage);
   cueLabel_->setWordWrap(true);
-  cueLabel_->setFont(chromeFont(13));
+  cueLabel_->setFont(chromeMonoFont(13));
   zoomControls->addWidget(cueLabel_);
   auto *zoomHint = new QLabel(
       QStringLiteral("Click the preview to place or aim a zoom. Drag a cue on "
@@ -798,7 +765,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   styleControls->setSpacing(14);
   styleControls->addWidget(
       new QLabel(QStringLiteral("Canvas background"), stylePage));
-  background_ = new QComboBox(stylePage);
+  background_ = new StudioComboBox(stylePage);
+  background_->setChrome(theme_->chrome());
   background_->addItems({QStringLiteral("Midnight"), QStringLiteral("Lavender"),
                          QStringLiteral("Sand"), QStringLiteral("Pearl")});
   styleControls->addWidget(background_);
@@ -859,6 +827,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
   auto *timelineLayout = new QVBoxLayout(timelinePanel);
   timelineLayout->setContentsMargins(16, 12, 16, 8);
   auto *transport = new QHBoxLayout;
+  transport->setSpacing(StudioChrome::gap);
   auto *back =
       button(QStringLiteral("|‹"), QStringLiteral("Go to trim start · Home"));
   auto *forward =
@@ -925,7 +894,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
           [this](const QString &error) {
             player_->pause();
             mediaFailed_ = true;
-            setStatus(error);
+            setStatus(error, true);
             refreshControls();
           });
   connect(help, &QPushButton::clicked, this, &StudioWindow::showShortcuts);
@@ -1110,7 +1079,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
             mediaFailed_ = true;
             setStatus(message.isEmpty()
                           ? QStringLiteral("Could not play this recording")
-                          : message);
+                          : message,
+                      true);
             refreshControls();
           });
 
@@ -1154,7 +1124,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
                  0, 'f', 2)
             .arg(QFileInfo(path_).fileName()));
     if (!source.error.isEmpty())
-      setStatus(source.error);
+      setStatus(source.error, true);
     player_->setSource(QUrl::fromLocalFile(path_));
     refreshControls();
   });
@@ -1191,7 +1161,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent)
     const QString error = saveWatcher_.result();
     if (!error.isEmpty()) {
       closing_ = false;
-      setStatus(error);
+      setStatus(error, true);
     }
     if (savePending_) {
       savePending_ = false;
@@ -1429,9 +1399,13 @@ void StudioWindow::closeEvent(QCloseEvent *event) {
 
 bool StudioWindow::hasMedia() const { return !mediaFailed_; }
 
-void StudioWindow::setStatus(const QString &status) {
+void StudioWindow::setStatus(const QString &status, bool error) {
   statusLabel_->setText(status);
-  statusLabel_->setStyleSheet(QStringLiteral("color: %1;").arg(kMuted.name()));
+  statusLabel_->setProperty("studioError", error);
+  statusLabel_->setStyleSheet(
+      QStringLiteral("color: %1;")
+          .arg((error ? theme_->chrome().urgent : theme_->chrome().mutedText())
+                   .name()));
 }
 
 void StudioWindow::refreshControls() {
@@ -1594,7 +1568,7 @@ void StudioWindow::startExport() {
   const QString ffmpeg =
       QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
   if (ffmpeg.isEmpty()) {
-    setStatus(QStringLiteral("ffmpeg is not installed"));
+    setStatus(QStringLiteral("ffmpeg is not installed"), true);
     return;
   }
   const QString destination = studioExportPath(path_);
@@ -1620,7 +1594,7 @@ void StudioWindow::startExport() {
           QStringLiteral("Saved %1").arg(QFileInfo(destination).fileName()));
     } else {
       QFile::remove(destination);
-      setStatus(QStringLiteral("Export failed"));
+      setStatus(QStringLiteral("Export failed"), true);
     }
     refreshControls();
   };
@@ -1750,7 +1724,7 @@ void StudioWindow::showShortcuts() {
   auto *dialog = new QDialog(this);
   dialog->setAttribute(Qt::WA_DeleteOnClose);
   dialog->setWindowTitle(QStringLiteral("Studio shortcuts"));
-  dialog->setStyleSheet(QStringLiteral("QDialog { background: #1b1b20; }"));
+  dialog->setObjectName(QStringLiteral("studioShortcuts"));
   auto *layout = new QVBoxLayout(dialog);
   layout->setContentsMargins(28, 24, 28, 24);
   auto *label = new QLabel(
@@ -1780,9 +1754,22 @@ void StudioWindow::showShortcuts() {
   dialog->open();
 }
 
+void StudioWindow::applyChrome() {
+  const StudioChrome &chrome = theme_->chrome();
+  setStyleSheet(chrome.styleSheet());
+  preview_->setChrome(chrome);
+  timeline_->setChrome(chrome);
+  if (background_)
+    background_->setChrome(chrome);
+  if (statusLabel_)
+    setStatus(statusLabel_->text(),
+              statusLabel_->property("studioError").toBool());
+  update();
+}
+
 void StudioWindow::paintEvent(QPaintEvent *) {
   QPainter painter(this);
-  painter.fillRect(rect(), kWindowBackground);
+  painter.fillRect(rect(), theme_->chrome().background);
 }
 
 void StudioWindow::resizeEvent(QResizeEvent *event) {

@@ -3,6 +3,7 @@
 #pragma once
 
 #include "studio-style.hpp"
+#include "studio-theme.hpp"
 #include "studio-video.hpp"
 #include "zoom-track.hpp"
 
@@ -34,6 +35,7 @@ public:
   void invalidatePendingFrames();
   void setCanvasInset(int inset);
   void setStyle(const StudioStyle &style);
+  void setChrome(const StudioChrome &chrome);
   /** Borrowed; the window owns the track and outlives this widget. */
   void setTrack(const ZoomTrack *track);
   void setPosition(qint64 milliseconds);
@@ -87,6 +89,7 @@ private:
   bool preparing_ = false;
   int canvasInset_ = 0;
   StudioStyle style_;
+  StudioChrome chrome_;
   const ZoomTrack *track_ = nullptr;
   qint64 positionMs_ = 0;
   QPointF marker_;
