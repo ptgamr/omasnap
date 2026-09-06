@@ -118,6 +118,7 @@ change that touches the principle, not just this summary.
 | `docs/` | Longer writeups of the principles above — read before changing behavior they cover. `recording-studio-plan.md` is the video design; `recording-targets.md` is the measured GSR coordinate contract |
 | `install-omarchy` | Omarchy installer (deps via `omarchy-pkg-add`, installs to `~/.local`) |
 | `CMakeLists.txt` | Build definition; **the version lives here** (`project(omasnap VERSION ...)`) |
+| `studio/CMakeLists.txt`, `studio/README.md` | Independent Studio-only build and Ubuntu setup; keep its Studio source/test lists in sync without changing the root build |
 
 ## Build and verify
 

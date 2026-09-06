@@ -8,6 +8,13 @@ abstractions.
 
 ## What "Hyprland-only" means concretely
 
+This capture-platform policy is unchanged by the separate video editor.
+`studio/CMakeLists.txt` builds only `omasnap-studio` as a normal Qt window,
+without compositor discovery, recording, or layer-shell. The standalone Ubuntu
+build does not add any alternate capture backend; see
+[the Studio-only guide](../studio/README.md). No Omarchy installation is required
+to edit an existing video, and absent theme data uses built-in colors.
+
 - Monitor and window discovery goes through `hyprctl` (`hyprctl monitors
   -j`, `hyprctl clients -j`) — see `src/capture.cpp`. There is no
   generic-compositor fallback for this, because there is no generic,

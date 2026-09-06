@@ -27,6 +27,12 @@ library carries capture, the editor, Wayland protocols and the process-wide
 layer-shell setting, none of which belong in a video window. Check both link
 maps before adding a library:
 
+`studio/CMakeLists.txt` is an independent editor-only entry point. It finds only
+the Studio Qt modules (Qt Test only with `BUILD_TESTING=ON`), and never configures
+LayerShellQt, capture protocols, wayland-scanner, or capture tools. Its Ubuntu
+24.04 setup uses a side-by-side Qt SDK; see [the standalone guide](../studio/README.md).
+The root CMake and Makefile behavior is unchanged.
+
 ```bash
 ldd build/omasnap        | grep -i multimedia   # must be empty
 ldd build/omasnap-studio | grep -i layershell   # must be empty

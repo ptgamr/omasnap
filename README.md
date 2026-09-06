@@ -142,6 +142,13 @@ extensions; they do not install native executables or system packages.
 Set `OMASNAP_PREFIX` before running `install-omarchy` to use a prefix other than
 `~/.local`.
 
+### Studio only on Ubuntu
+
+For the video editor without the screenshot/recorder dependencies, use the
+independent [Studio build and Ubuntu 24.04 instructions](studio/README.md).
+It configures with `cmake -S studio -B build-studio`, using Qt 6.8+ installed
+alongside Ubuntu's system Qt. The existing root build is unchanged.
+
 ### Manual Arch Linux build
 
 Install the complete build/runtime dependency set:
