@@ -18,17 +18,21 @@ StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
     connect(slot.player, &QMediaPlayer::mediaStatusChanged, this,
             [this, index](QMediaPlayer::MediaStatus status) {
               auto &current = slots_[index];
-              if (status == QMediaPlayer::LoadedMedia) {
+              // LoadedMedia also occurs during seeks; prime once per source,
+              // not once per status event, or each seek queues another seek.
+              if (status == QMediaPlayer::LoadedMedia && !current.loaded) {
                 current.loaded = true;
-                current.player->setPosition(current.seekMs);
-                // Pause only once a seek frame has arrived. An immediate
-                // play/pause can stop FFmpeg before it delivers the first frame
-                // of a new source.
-                current.priming = true;
-                updateAudio();
-                current.player->play();
-                if (index == active_)
-                  emit ready();
+                // Loading completion can restore a pause requested while the
+                // source was loading. Start the seek after that callback has
+                // returned, or Qt can override play() before producing a frame.
+                QTimer::singleShot(0, this, [this, index] {
+                  auto &loaded = slots_[index];
+                  if (!loaded.loaded || !loaded.awaitingSeek)
+                    return;
+                  seekSlot(index, loaded.seekMs);
+                  if (index == active_)
+                    emit ready();
+                });
               } else if (status == QMediaPlayer::EndOfMedia &&
                          index == active_ &&
                          state_ == QMediaPlayer::PlayingState) {
@@ -66,7 +70,8 @@ const StudioSpan *StudioPlayback::spanFor(quint64 clipId) const {
   return nullptr;
 }
 
-void StudioPlayback::setProject(const StudioProject &project) {
+void StudioPlayback::setProject(const StudioProject &project,
+                                qint64 desiredPosition) {
   const QString error = validateStudioProject(project);
   if (!error.isEmpty()) {
     emit errorOccurred(error);
@@ -92,12 +97,20 @@ void StudioPlayback::setProject(const StudioProject &project) {
     return;
   }
   if (mediaChanged) {
+    // The visible frame may belong to a passage the command just deleted.
+    // Do not keep displaying it while the replacement source seek decodes.
+    // Ordinary playback cuts do not take this project-edit path.
+    preview_->clearFrame();
     for (auto &slot : slots_) {
-      slot.player->pause();
+      if (slot.loaded)
+        slot.player->pause();
       slot.clipId = 0;
       slot.frame = {};
     }
-    setPosition(qMin(position_, duration() - 1));
+    setPosition(
+        qMin(desiredPosition >= 0 ? desiredPosition : position_, duration()));
+  } else if (desiredPosition >= 0 && desiredPosition != position_) {
+    setPosition(desiredPosition);
   } else {
     preview_->setPosition(position_);
   }
@@ -108,7 +121,8 @@ void StudioPlayback::loadSlot(int index, const StudioFrame &frame) {
   const auto *asset = studioAsset(project_, frame.span.assetId);
   if (!asset)
     return;
-  slot.player->pause();
+  if (slot.loaded)
+    slot.player->pause();
   slot.error.clear();
   slot.clipId = frame.span.clipId;
   slot.frame = {};
@@ -155,7 +169,8 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
     return;
   preview_->invalidatePendingFrames();
   if (slots_[active_].clipId != frame->span.clipId) {
-    slots_[active_].player->pause();
+    if (slots_[active_].loaded)
+      slots_[active_].player->pause();
     const int incoming = 1 - active_;
     const bool preloaded = slots_[incoming].clipId == frame->span.clipId;
     active_ = incoming;
@@ -176,7 +191,7 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
   }
   updateAudio();
   if (slots_[active_].frame.isValid())
-    present(active_, slots_[active_].frame);
+    present(active_, slots_[active_].frame, true);
   if (state_ == QMediaPlayer::PlayingState && slots_[active_].loaded)
     slots_[active_].player->play();
   emit positionChanged(position_);
@@ -194,10 +209,18 @@ void StudioPlayback::preload() {
   updateAudio();
 }
 
-void StudioPlayback::present(int index, const QVideoFrame &frame) {
+void StudioPlayback::present(int index, const QVideoFrame &frame, bool cached) {
   if (!frame.isValid())
     return;
   auto &slot = slots_[index];
+  if (!slot.loaded)
+    return;
+  // Multimedia may have several queued frames when pause takes effect. Keep
+  // the first requested frame, not a later buffered frame, for paused seeks
+  // and incoming preloads; otherwise a cut can skip its opening frames.
+  if (!cached && !slot.awaitingSeek && slot.frame.isValid() &&
+      (index != active_ || state_ != QMediaPlayer::PlayingState))
+    return;
   const auto *span = spanFor(slot.clipId);
   if (!span)
     return;
@@ -275,7 +298,7 @@ void StudioPlayback::pause() {
   frameClock_.invalidate();
   setState(QMediaPlayer::PausedState);
   for (auto &slot : slots_)
-    if (!slot.priming)
+    if (slot.loaded && !slot.priming)
       slot.player->pause();
 }
 

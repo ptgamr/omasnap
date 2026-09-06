@@ -8,6 +8,168 @@
 #include <QTemporaryDir>
 #include <limits>
 
+namespace {
+bool cutChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject original;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 10000;
+  original.assets = {{1, QStringLiteral("untouched-source.mp4"), source}};
+  original.clips = {{11, 1, 0, 10000, 1}};
+  original.zoom.cues = {{1, 100, 600, 100, 100, {0.2, 0.3}, 2},
+                        {2, 1500, 2500, 200, 200, {0.4, 0.5}, 3},
+                        {3, 3500, 5000, 300, 300, {0.6, 0.7}, 2}};
+  original.trimInMs = 500;
+  original.trimOutMs = 9000;
+  auto edited = original;
+  const auto cut = studioDeleteRange(edited, 3000, 1000, 99);
+  if (!check(cut.changed && cut.fromMs == 1000 && cut.toMs == 3000 &&
+                 cut.removedMs == 2000 && studioDuration(edited) == 8000 &&
+                 edited.clips.size() == 2 &&
+                 edited.clips[0] == StudioClip{11, 1, 0, 1000, 1} &&
+                 edited.clips[1] == StudioClip{99, 1, 3000, 10000, 1} &&
+                 edited.assets == original.assets,
+             QStringLiteral("Interior reverse range cut did not preserve "
+                            "source/ranges/identity")))
+    return false;
+  if (!check(edited.zoom.cues.size() == 2 &&
+                 edited.zoom.cues[0] == original.zoom.cues[0] &&
+                 edited.zoom.cues[1].id == 3 &&
+                 edited.zoom.cues[1].startMs == 1500 &&
+                 edited.zoom.cues[1].endMs == 3000 &&
+                 edited.zoom.cues[1].target == original.zoom.cues[2].target &&
+                 edited.trimInMs == 500 && edited.trimOutMs == 7000,
+             QStringLiteral(
+                 "Ripple cut lost or mistimed attached zoom/review range")))
+    return false;
+  for (qint64 time = 0; time < studioDuration(edited); time += 17) {
+    const auto expected =
+        studioFrameAt(original, time < 1000 ? time : time + 2000);
+    const auto actual = studioFrameAt(edited, time);
+    if (!check(expected && actual && expected->sourceMs == actual->sourceMs,
+               QStringLiteral("Ripple cut retained removed source time")))
+      return false;
+  }
+  const auto unchanged = edited;
+  if (!check(!studioDeleteRange(edited, 500, 500, 100).changed &&
+                 edited == unchanged &&
+                 !studioDeleteRange(edited, 200, 400, 99).changed &&
+                 edited == unchanged && !studioSplitClip(edited, 0, 100) &&
+                 !studioSplitClip(edited, 1000, 100) && edited == unchanged,
+             QStringLiteral("No-op/duplicate identity changed the project")))
+    return false;
+  const auto second = studioDeleteRange(edited, 1500, 2000, 100);
+  if (!check(second.changed && studioDuration(edited) == 7500 &&
+                 edited.clips.size() == 3,
+             QStringLiteral("Repeated interior cut failed")))
+    return false;
+  StudioProject decoded;
+  if (!check(
+          decodeStudioProject(encodeStudioProject(edited), decoded).isEmpty() &&
+              decoded == edited,
+          QStringLiteral("Cut project did not round-trip")))
+    return false;
+
+  auto cross = original;
+  cross.zoom.cues.clear();
+  cross.clips = {
+      {11, 1, 0, 3000, 1}, {12, 1, 0, 4000, 1}, {13, 1, 6000, 9000, 1}};
+  const auto crossCut = studioDeleteRange(cross, 2500, 7500, 0);
+  if (!check(
+          crossCut.changed && crossCut.removedMs == 5000 &&
+              cross.clips.size() == 2 &&
+              cross.clips[0] == StudioClip{11, 1, 0, 2500, 1} &&
+              cross.clips[1] == StudioClip{13, 1, 6500, 9000, 1},
+          QStringLiteral(
+              "Cross-scene range cut lost surviving identities/source bounds")))
+    return false;
+  if (!check(studioDeleteClip(cross, 11).changed && cross.clips.size() == 1 &&
+                 cross.clips[0].id == 13 &&
+                 !studioDeleteClip(cross, 999).changed,
+             QStringLiteral("Explicit scene deletion removed wrong scene")))
+    return false;
+  auto bridge = original;
+  bridge.zoom.cues = {{55, 500, 4000, 400, 400, {0.3, 0.4}, 2}};
+  bridge.trimInMs = 1200;
+  bridge.trimOutMs = 1800;
+  if (!check(studioDeleteRange(bridge, 1000, 3000, 99).changed &&
+                 bridge.zoom.cues.size() == 1 && bridge.zoom.cues[0].id == 55 &&
+                 bridge.zoom.cues[0].startMs == 500 &&
+                 bridge.zoom.cues[0].endMs == 2000 && bridge.trimInMs == 0 &&
+                 bridge.trimOutMs == -1,
+             QStringLiteral(
+                 "Cut-spanning zoom or collapsed review range mapping failed")))
+    return false;
+  auto edges = original;
+  edges.zoom.cues.clear();
+  if (!check(studioDeleteRange(edges, -100, 1000, 0).changed &&
+                 edges.clips[0].inMs == 1000 &&
+                 studioDeleteRange(edges, 8000, 20000, 0).changed &&
+                 edges.clips[0].outMs == 9000,
+             QStringLiteral("Clamped edge cuts failed")))
+    return false;
+
+  StudioHistory history;
+  StudioEditState before;
+  before.project = original;
+  before.selectedClip = 11;
+  before.selectedCue = 2;
+  before.rangeIn = 0;
+  before.rangeOut = 10000;
+  before.positionMs = 1500;
+  history.reset(before);
+  auto after = before;
+  const auto all = studioDeleteClip(after.project, 11);
+  after.positionMs =
+      studioTimeAfterDelete(after.positionMs, all.fromMs, all.toMs);
+  after.rangeIn = after.rangeOut = -1;
+  after.selectedClip = after.selectedCue = 0;
+  history.push(after);
+  if (!check(all.changed && after.project.clips.isEmpty() &&
+                 after.project.zoom.cues.isEmpty() &&
+                 validateStudioProject(after.project).isEmpty() &&
+                 history.undo() && history.current() == before &&
+                 history.redo() && history.current() == after,
+             QStringLiteral("Final scene deletion is not exactly undoable")))
+    return false;
+
+  for (const double speed : {0.125, 0.5, 1.0, 2.0, 3.0, 8.0}) {
+    auto sped = original;
+    sped.zoom.cues.clear();
+    sped.trimInMs = 0;
+    sped.trimOutMs = -1;
+    sped.clips[0].speed = speed;
+    const qint64 duration = studioDuration(sped);
+    auto split = sped;
+    if (!check(studioSplitClip(split, duration / 3, 99) &&
+                   studioDuration(split) == duration &&
+                   split.clips[0].outMs == split.clips[1].inMs &&
+                   split.clips[1].id == 99 && split.assets == sped.assets,
+               QStringLiteral("Speed %1 split changed duration/source")
+                   .arg(speed)))
+      return false;
+    const auto fastCut =
+        studioDeleteRange(sped, duration / 3, duration * 2 / 3, 99);
+    if (!check(fastCut.changed &&
+                   duration - studioDuration(sped) == fastCut.removedMs &&
+                   fastCut.toMs - fastCut.fromMs == fastCut.removedMs &&
+                   qAbs(fastCut.fromMs - duration / 3) <= 34 &&
+                   qAbs(fastCut.toMs - duration * 2 / 3) <= 34 &&
+                   validateStudioProject(sped).isEmpty(),
+               QStringLiteral("Speed %1 cut drift or invalid effective bounds")
+                   .arg(speed)))
+      return false;
+  }
+  return true;
+}
+} // namespace
+
 bool runStudioProjectChecks(QString &error) {
   const auto check = [&](bool ok, const QString &message) {
     if (!ok)
@@ -173,5 +335,5 @@ bool runStudioProjectChecks(QString &error) {
                  loadStudioProject(file).project == empty,
              QStringLiteral("Saving empty project failed")))
     return false;
-  return true;
+  return cutChecks(error);
 }

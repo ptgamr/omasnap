@@ -41,3 +41,26 @@ Tests cover pure mapping and persistence, missing/empty projects, history,
 mixed-source export order/aspect/FPS, speed and VFR timestamps, audio length,
 and live controller seeks and cuts. Later UI milestones consume this model;
 they must not add a separate timing or persistence representation.
+
+## Range cuts and splits
+
+`studioSplitClip`, `studioDeleteRange`, and `studioDeleteClip` edit references,
+never source assets. Range deletion ripples project-time zoom cues and the
+review/export endpoints, drops removed cues, and retains surviving clip IDs.
+An interior deletion creates a fresh ID for the right remainder. The window's
+ID allocator is monotonic across undo branches. History retains the entire
+pre-edit document, selection/range, and playhead; an empty result is undoable.
+
+The model stores source endpoints in integer milliseconds. For retimed clips,
+split/cut endpoints snap to representable source positions that conserve total
+composition duration. A split too close to an edge or at an unrepresentable
+retimed boundary is refused instead of silently introducing timing drift.
+Cut results report effective endpoints and removed duration, which are also
+used to move the playhead. Ordinary 1x clips preserve requested millisecond cuts.
+
+Range selection is explicit (`B`); `V` selects clips/scrubs. Selection tools
+and their hover/range state are not video edits. Video deletion requires an
+explicit range or clip; a selected zoom consumes Delete without deleting video.
+Text fields retain their normal editing shortcuts. Composition changes clear
+stale decoded frames so removed material cannot remain in the editing preview
+while the next valid source frame is being prepared.

@@ -8,6 +8,7 @@
 #include <QSaveFile>
 #include <QSet>
 #include <QtMath>
+#include <algorithm>
 #include <cmath>
 
 namespace {
@@ -19,6 +20,68 @@ qint64 clipDuration(const StudioClip &clip) {
       clip.inMs < 0 || clip.outMs <= clip.inMs || clip.outMs > maxDuration)
     return 0;
   return qRound64(static_cast<double>(clip.outMs - clip.inMs) / clip.speed);
+}
+struct ClipSplit {
+  StudioClip left;
+  StudioClip right;
+  qint64 leftMs = 0;
+};
+std::optional<ClipSplit> splitAt(const StudioClip &clip, qint64 offset,
+                                 qint64 maxSnapMs) {
+  const qint64 duration = clipDuration(clip);
+  if (offset <= 0 || offset >= duration || clip.outMs - clip.inMs < 2)
+    return std::nullopt;
+  const qint64 centre =
+      clip.inMs + qRound64(static_cast<double>(offset) * clip.speed);
+  std::optional<ClipSplit> best;
+  const int radius = qCeil(clip.speed);
+  for (int delta = -radius; delta <= radius; ++delta) {
+    const qint64 boundary = centre + delta;
+    if (boundary <= clip.inMs || boundary >= clip.outMs)
+      continue;
+    StudioClip left = clip, right = clip;
+    left.outMs = boundary;
+    right.inMs = boundary;
+    const qint64 leftMs = clipDuration(left), rightMs = clipDuration(right);
+    if (leftMs <= 0 || rightMs <= 0 || leftMs + rightMs != duration ||
+        qAbs(leftMs - offset) > maxSnapMs)
+      continue;
+    if (!best || qAbs(leftMs - offset) < qAbs(best->leftMs - offset))
+      best = ClipSplit{left, right, leftMs};
+  }
+  return best;
+}
+qint64 frameMilliseconds(const StudioProject &p) {
+  return qCeil(1000.0 * p.fpsDenominator / p.fpsNumerator);
+}
+bool unusedClipId(const StudioProject &p, quint64 id) {
+  if (!id)
+    return false;
+  for (const auto &clip : p.clips)
+    if (clip.id == id)
+      return false;
+  return true;
+}
+/** Split temporary pieces without allocating identity: discarded middle pieces
+ * never need IDs, and only a surviving second occurrence gets a new one. */
+std::optional<qint64> splitPieces(QVector<StudioClip> &pieces, qint64 at,
+                                  qint64 maxSnapMs) {
+  qint64 start = 0;
+  for (qsizetype i = 0; i < pieces.size(); ++i) {
+    const qint64 end = start + clipDuration(pieces[i]);
+    if (at == start || at == end)
+      return at;
+    if (at > start && at < end) {
+      const auto split = splitAt(pieces[i], at - start, maxSnapMs);
+      if (!split)
+        return std::nullopt;
+      pieces[i] = split->left;
+      pieces.insert(i + 1, split->right);
+      return start + split->leftMs;
+    }
+    start = end;
+  }
+  return std::nullopt;
 }
 bool integer(const QJsonValue &value, qint64 low, qint64 high) {
   if (!value.isDouble())
@@ -307,6 +370,98 @@ QString saveStudioProject(const QString &path, const StudioProject &project) {
       !file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
       file.write(data) != data.size() || !file.commit())
     return QStringLiteral("Could not save project: %1").arg(file.errorString());
+  return {};
+}
+bool studioSplitClip(StudioProject &p, qint64 at, quint64 newId) {
+  if (!validateStudioProject(p).isEmpty() || !unusedClipId(p, newId) ||
+      p.clips.size() >= maxItems)
+    return false;
+  const auto spans = studioComposition(p);
+  for (qsizetype i = 0; i < spans.size(); ++i) {
+    if (at <= spans[i].startMs || at >= spans[i].endMs)
+      continue;
+    const auto split =
+        splitAt(p.clips[i], at - spans[i].startMs, frameMilliseconds(p));
+    if (!split)
+      return false;
+    p.clips[i] = split->left;
+    auto right = split->right;
+    right.id = newId;
+    p.clips.insert(i + 1, right);
+    return true;
+  }
+  return false;
+}
+qint64 studioTimeAfterDelete(qint64 time, qint64 from, qint64 to) {
+  if (to <= from || time <= from)
+    return time;
+  return time < to ? from : time - (to - from);
+}
+StudioCutResult studioDeleteRange(StudioProject &p, qint64 from, qint64 to,
+                                  quint64 remainderId) {
+  if (!validateStudioProject(p).isEmpty())
+    return {};
+  const qint64 duration = studioDuration(p);
+  if (from > to)
+    std::swap(from, to);
+  from = qBound<qint64>(0, from, duration);
+  to = qBound<qint64>(0, to, duration);
+  if (from == to)
+    return {};
+  QVector<StudioClip> pieces = p.clips;
+  const auto end = splitPieces(pieces, to, frameMilliseconds(p));
+  if (!end)
+    return {};
+  const auto start = splitPieces(pieces, from, frameMilliseconds(p));
+  if (!start || *start >= *end)
+    return {};
+  StudioProject edited = p;
+  edited.clips.clear();
+  qint64 position = 0;
+  QSet<quint64> ids;
+  for (auto clip : pieces) {
+    const qint64 pieceEnd = position + clipDuration(clip);
+    if (pieceEnd <= *start || position >= *end) {
+      if (ids.contains(clip.id)) {
+        if (!unusedClipId(p, remainderId) || ids.contains(remainderId))
+          return {};
+        clip.id = remainderId;
+      }
+      ids.insert(clip.id);
+      edited.clips.push_back(clip);
+    }
+    position = pieceEnd;
+  }
+  if (edited.clips.size() > maxItems)
+    return {};
+  const qint64 removed = duration - studioDuration(edited);
+  if (removed != *end - *start)
+    return {};
+  edited.zoom.cues.clear();
+  for (auto cue : p.zoom.cues) {
+    cue.startMs = studioTimeAfterDelete(cue.startMs, *start, *end);
+    cue.endMs = studioTimeAfterDelete(cue.endMs, *start, *end);
+    if (cue.endMs - cue.startMs >= kMinCueMs)
+      edited.zoom.cues.push_back(cue);
+  }
+  normalizeZoomTrack(edited.zoom, studioDuration(edited));
+  edited.trimInMs = studioTimeAfterDelete(p.trimInMs, *start, *end);
+  if (p.trimOutMs >= 0)
+    edited.trimOutMs = studioTimeAfterDelete(p.trimOutMs, *start, *end);
+  if (studioDuration(edited) == 0 ||
+      (edited.trimOutMs >= 0 && edited.trimOutMs <= edited.trimInMs)) {
+    edited.trimInMs = 0;
+    edited.trimOutMs = -1;
+  }
+  if (!validateStudioProject(edited).isEmpty())
+    return {};
+  p = edited;
+  return {true, *start, *end, removed};
+}
+StudioCutResult studioDeleteClip(StudioProject &p, quint64 id) {
+  for (const auto &span : studioComposition(p))
+    if (span.clipId == id)
+      return studioDeleteRange(p, span.startMs, span.endMs, 0);
   return {};
 }
 void StudioHistory::reset(const StudioEditState &state) {

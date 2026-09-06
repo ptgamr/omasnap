@@ -185,6 +185,14 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
                  << shot.pixelColor(shot.width() / 2, shot.height() / 2)
                  << playback.activePlayer()->position()
                  << playback.activePlayer()->mediaStatus();
+      const auto decoded =
+          playback.activePlayer()->videoSink()->videoFrame().toImage();
+      qWarning() << "decoder" << playback.activePlayer()->source()
+                 << decoded.size()
+                 << (decoded.isNull()
+                         ? QColor{}
+                         : decoded.pixelColor(decoded.width() / 2,
+                                              decoded.height() / 2));
     }
     return ok;
   };
@@ -206,5 +214,116 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
                "playing second hard cut did not present third-source pixels"))
     return false;
   playback.pause();
+  // A cut inside one source must not display a cached frame from the deleted
+  // passage, either immediately after the edit or when crossing the new cut.
+  const QString stripedPath = scratch.filePath(QStringLiteral("striped.mp4"));
+  const QStringList scenePaths{mixed.assets[0].path, mixed.assets[1].path,
+                               mixed.assets[2].path};
+  auto joined = QtConcurrent::run([scenePaths, stripedPath] {
+    QProcess encoder;
+    encoder.start(
+        QStringLiteral("ffmpeg"),
+        {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-i"),
+         scenePaths[0], QStringLiteral("-i"), scenePaths[1],
+         QStringLiteral("-i"), scenePaths[2], QStringLiteral("-filter_complex"),
+         QStringLiteral("[0:v]scale=320:180,setsar=1[v0];"
+                        "[1:v]scale=320:180,setsar=1[v1];"
+                        "[2:v]scale=320:180,setsar=1[v2];"
+                        "[v0][v1][v2]concat=n=3:v=1:a=0[out]"),
+         QStringLiteral("-map"), QStringLiteral("[out]"),
+         QStringLiteral("-c:v"), QStringLiteral("libx264"),
+         QStringLiteral("-preset"), QStringLiteral("ultrafast"), stripedPath});
+    return encoder.waitForFinished(10000) && encoder.exitCode() == 0;
+  });
+  if (!require(QTest::qWaitFor([&] { return joined.isFinished(); }, 12000) &&
+                   joined.result(),
+               "could not generate middle-cut playback fixture"))
+    return false;
+  StudioProject original;
+  original.canvas = {320, 180};
+  StudioAsset striped = asset;
+  striped.path = stripedPath;
+  striped.source.durationMs = 3000;
+  original.assets = {striped};
+  original.clips = {{1, 1, 0, 3000, 1.0}};
+  playback.setProject(original);
+  if (!require(seekAndCheck(1500, 1, false),
+               "uncut source did not show the green middle passage"))
+    return false;
+  StudioProject cut = original;
+  const auto removed = studioDeleteRange(cut, 1000, 2000, 99);
+  if (!require(
+          removed.changed && studioDuration(cut) == 2000,
+          "middle passage deletion did not create the expected composition"))
+    return false;
+  playback.setProject(cut);
+  if (!require(
+          !pixelsMatch(1, false),
+          "deleted passage remained visible while replacement seek decoded") ||
+      !require(QTest::qWaitFor([&] { return pixelsMatch(2, false); }, 4000),
+               "middle cut did not show mapped blue source frames") ||
+      !require(seekAndCheck(500, 0, false), "cut lost retained red opening") ||
+      !require(seekAndCheck(1000, 2, false),
+               "new cut boundary displayed deleted green") ||
+      !require(seekAndCheck(900, 0, false),
+               "reverse cut seek lost retained red"))
+    return false;
+  bool leaked = false;
+  playback.play();
+  const bool ended = QTest::qWaitFor(
+      [&] {
+        leaked = leaked || pixelsMatch(1, false);
+        return playback.position() == 2000;
+      },
+      5000);
+  if (!require(ended && !leaked,
+               "playing the edited source leaked removed frames or stalled"))
+    return false;
+  playback.pause();
+  playback.setProject(original);
+  if (!require(
+          seekAndCheck(1500, 1, false),
+          "restoring the pre-cut project did not restore the green passage"))
+    return false;
+  StudioProject nearColorBoundary = original;
+  nearColorBoundary.clips = {{1, 1, 0, 300, 1.0}, {99, 1, 970, 1500, 1.0}};
+  playback.setProject(nearColorBoundary, 0);
+  QTest::qWait(250);
+  if (!require(seekAndCheck(300, 0, false),
+               "incoming preload skipped its opening red frame"))
+    return false;
+  QTest::qWait(150);
+  if (!require(pixelsMatch(0, false),
+               "queued post-pause frames changed the paused cut frame"))
+    return false;
+
+  // Repeated composition changes can pause a decoder while its initial source
+  // is loading. Qt must finish restoring that pending state before we prime.
+  StudioPreview initialPreview;
+  initialPreview.resize(480, 320);
+  initialPreview.show();
+  StudioPlayback initial(&initialPreview);
+  StudioProject rapid = original;
+  initial.setProject(rapid);
+  initial.pause();
+  if (!require(studioSplitClip(rapid, 1000, 2), "first rapid split failed"))
+    return false;
+  initial.setProject(rapid, 1000);
+  initial.pause();
+  if (!require(studioSplitClip(rapid, 2000, 3), "second rapid split failed"))
+    return false;
+  initial.setProject(rapid, 1500);
+  if (!require(
+          QTest::qWaitFor(
+              [&] {
+                const auto shot = initialPreview.grab().toImage();
+                const auto color =
+                    shot.pixelColor(shot.width() / 2, shot.height() / 2);
+                return color.green() > 180 && color.red() < 80 &&
+                       color.blue() < 80;
+              },
+              4000),
+          "rapid initial splits left a paused decoder without a preview frame"))
+    return false;
   return failures.isEmpty();
 }

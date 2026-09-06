@@ -61,6 +61,153 @@ double audioEnergy(const QByteArray &pcm, double at) {
   }
   return std::sqrt(squares / static_cast<double>((end - begin) / 2));
 }
+
+// Inspect every output frame and audio sample, not just two representative
+// timestamps: a removed frame or brief audio burst at a cut is still a leak.
+bool removedPassageIsAbsent(const QString &ffmpeg, const QString &path,
+                            int expectedFrames, QString &error) {
+  QByteArray bytes;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-an", "-vf", "scale=1:1", "-pix_fmt",
+            "rgb24", "-f", "rawvideo", "-"},
+           bytes, error))
+    return false;
+  if (bytes.size() != expectedFrames * 3) {
+    error = QStringLiteral("Ripple export contains %1 frames, expected %2.")
+                .arg(bytes.size() / 3)
+                .arg(expectedFrames);
+    return false;
+  }
+  for (int frame = 0; frame < expectedFrames; ++frame) {
+    const auto r = static_cast<unsigned char>(bytes[frame * 3]);
+    const auto g = static_cast<unsigned char>(bytes[frame * 3 + 1]);
+    const auto b = static_cast<unsigned char>(bytes[frame * 3 + 2]);
+    if (g > 20 || (frame < expectedFrames / 2 ? r < 200 : b < 200)) {
+      error =
+          QStringLiteral("Deleted picture or wrong scene at output frame %1.")
+              .arg(frame);
+      return false;
+    }
+  }
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           bytes, error))
+    return false;
+  for (qsizetype i = 0; i + 1 < bytes.size(); i += 2) {
+    if (std::abs(static_cast<int>(
+            qFromLittleEndian<qint16>(bytes.constData() + i))) > 2) {
+      error = QStringLiteral("Deleted audio survives at output sample %1.")
+                  .arg(i / 2);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool runCutExportChecks(const QString &ffmpeg, const QTemporaryDir &scratch,
+                        QString &error) {
+  const QString sourcePath = scratch.filePath("cut-source.mkv");
+  const QString outputPath = scratch.filePath("cut-output.mp4");
+  QByteArray bytes;
+  if (!run(ffmpeg,
+           {"-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=320x180:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='if(between(t,1,1.99999),0.4*sin(2*PI*880*t),0)':s=48000:"
+            "d=3",
+            "-vf",
+            "drawbox=c=green:t=fill:enable='gte(t,1)*lt(t,2)',"
+            "drawbox=c=blue:t=fill:enable='gte(t,2)'",
+            "-t",
+            "3",
+            "-c:v",
+            "libx264",
+            "-g",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "pcm_s16le",
+            sourcePath},
+           bytes, error))
+    return false;
+  StudioProject project;
+  project.canvas = {320, 180};
+  StudioSource source;
+  source.size = project.canvas;
+  source.fpsNumerator = 30;
+  source.durationMs = 3000;
+  source.audioStreams = 1;
+  project.assets = {{1, sourcePath, source}};
+  project.clips = {{1, 1, 0, 3000, 1}};
+  StudioHistory history;
+  StudioEditState before;
+  before.project = project;
+  before.positionMs = 1500;
+  before.rangeIn = 1000;
+  before.rangeOut = 2000;
+  history.reset(before);
+  if (!studioDeleteRange(project, 1000, 2000, 99).changed) {
+    error = QStringLiteral("Interior ripple delete was rejected.");
+    return false;
+  }
+  StudioEditState after = before;
+  after.project = project;
+  history.push(after);
+  if (!exportProject(ffmpeg, project, outputPath, error) ||
+      !removedPassageIsAbsent(ffmpeg, outputPath, 60, error))
+    return false;
+  if (!history.undo() || history.current() != before ||
+      !exportProject(ffmpeg, history.current().project, outputPath, error)) {
+    if (error.isEmpty())
+      error = QStringLiteral("Undo did not restore the exact pre-cut project.");
+    return false;
+  }
+  const auto restored = sample(ffmpeg, outputPath, 1.5, error);
+  if (restored.isNull() || restored.pixelColor(160, 90).green() < 90 ||
+      !run(ffmpeg,
+           {"-v", "error", "-i", outputPath, "-vn", "-ac", "1", "-ar", "48000",
+            "-f", "s16le", "-"},
+           bytes, error) ||
+      audioEnergy(bytes, 1.5) < 0.1) {
+    if (error.isEmpty())
+      error = QStringLiteral(
+          "Undo export did not restore deleted picture and audio.");
+    return false;
+  }
+  if (!history.redo() || history.current() != after) {
+    error = QStringLiteral("Redo did not restore the ripple deletion.");
+    return false;
+  }
+  // One cut across two occurrences of the same source removes both middle
+  // tones and the scene boundary; surviving endpoints remain independent.
+  project = before.project;
+  project.clips.push_back({2, 1, 0, 3000, 1});
+  if (!studioDeleteRange(project, 500, 5500, 99).changed ||
+      !exportProject(ffmpeg, project, outputPath, error) ||
+      !removedPassageIsAbsent(ffmpeg, outputPath, 30, error)) {
+    if (error.isEmpty())
+      error = QStringLiteral("Cross-scene ripple deletion failed.");
+    return false;
+  }
+  if (!studioDeleteRange(project, 0, studioDuration(project), 100).changed ||
+      !project.clips.isEmpty() ||
+      !studioCompositionArguments(project, outputPath, error).isEmpty()) {
+    error = QStringLiteral(
+        "Deleting all remaining scenes did not produce an empty project.");
+    return false;
+  }
+  error.clear();
+  return true;
+}
 } // namespace
 
 bool runStudioCompositionChecks(QString &error) {
@@ -254,5 +401,5 @@ bool runStudioCompositionChecks(QString &error) {
                "large export graph was not bounded"))
     return false;
   error.clear();
-  return true;
+  return runCutExportChecks(ffmpeg, scratch, error);
 }

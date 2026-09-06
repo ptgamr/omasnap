@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
       "\n"
       "Space plays and pauses from any control. Left/Right step one frame; "
       "Shift+Left/Right seek five seconds. I/O set trim points, Z adds a zoom, "
+      "B selects a passage, V selects clips, S splits, Delete removes selection, "
       "Ctrl+Z undoes, and Ctrl+E exports. Press ? for all shortcuts.\n"
       "\n"
       "Source assets, clip ranges, zoom cues, and canvas styling are saved as "

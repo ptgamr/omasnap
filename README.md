@@ -300,7 +300,16 @@ speed, project-time zoom cues, and canvas settings in one non-destructive docume
 Open a video or its `.omasnap.json` project directly. Missing sources expose
 **Relink media**; empty projects remain valid. The first source defines the output
 canvas (rounded down to even dimensions) and FPS; other sources fit that canvas.
-Scene-import and cut controls follow in the next milestones.
+Scene import/reorder controls follow in the next milestone.
+
+**Cut passages.** Choose **Range** (`B`), drag over the video lane in either
+direction, adjust the range edges, and press Delete/Backspace. The gap closes
+in playback and export, including its audio. `V` returns to clip selection
+and scrubbing. `S` splits at the playhead; click a scene to select it, then
+Delete removes that scene. Undo restores the ranges, selection, and playhead,
+even after deleting the final scene. Buttons and a timeline context menu expose
+the same actions. Delete prioritizes a selected range, then the selected zoom
+or clip; it never removes video merely because the playhead is over it.
 
 **Playback.** A bounded pair of decoders reads the shared composition time map;
 video planes are prepared on a worker and rendered with OpenGL;
@@ -320,7 +329,7 @@ lands on the same thing in both.
 
 Limits worth knowing, all of them measured rather than guessed:
 
-- **40 zooms per clip.** The cap bounds ffmpeg expression complexity. The
+- **40 zooms per project.** The cap bounds ffmpeg expression complexity. The
   golden test verifies a complete track at the cap with ffmpeg itself.
 - **Project FPS is fixed.** Rational rates like 30000/1001 are preserved.
   Source timestamps (including VFR) are mapped into project time; export
@@ -349,7 +358,9 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | `Home` / `End` | Go to trim start / end |
 | `I` / `O` / `R` | Set trim start / end / reset trim |
 | `Z` | Add zoom at playhead |
-| `Delete` / `Backspace` | Remove selected zoom |
+| `V` / `B` | Select/scrub tool / range-selection tool |
+| `S` | Split scene at playhead |
+| `Delete` / `Backspace` | Delete selected range, clip, or zoom |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
 | `M` | Mute / unmute preview |
@@ -391,9 +402,9 @@ recorder is already running — it never signals a recorder it did not start.
 - **Coordinates are proven on 1× and 1.5× outputs only.** See
   [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
   what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
-- **Scene editing UI is still pending**: the shared multi-source project model,
-  playback, trim, manual zoom, canvas styling, undo/redo, and MP4 export exist.
-  Cut/import/transition controls, automatic pointer zoom, camera
+- **Scene import and transitions are still pending**: the shared multi-source
+  model, range cuts/splits, playback, trim, manual zoom, canvas styling,
+  undo/redo, and MP4 export exist. Import/transition controls, automatic pointer zoom, camera
   overlays, captions, and masks are not implemented; see
   [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
 - **`omasnap-studio` is optional at build time.** Configure with

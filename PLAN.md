@@ -30,14 +30,14 @@ Omascreen website + screenshots -------->  [TODO] Moments / Follow / Raw / Paced
                                                  click ripples, titles, grain,
                                                  vignettes, wipes / design tray
 
-Your workflow requirements ------------>  [TODO] Drag-select -> Delete -> Undo;
-                                                 import and reorder scene files
+Your workflow requirements ------------>  [DONE] Drag-select -> Delete -> Undo
+                                          [TODO] Import and reorder scene files
 
 Omasnap native implementation --------->  [DONE] GPU playback, basic keyboard
                                                  transport, single-source trim,
                                                  edit undo/save, MP4 export
 
-NEXT: 02 Range cuts -> 03 Scenes -> 04 Transitions
+NEXT: 03 Scenes -> 04 Transitions
 ```
 
 "Comes from" identifies the behavioral/design reference, **not copied code or
@@ -79,7 +79,7 @@ exists. The larger parity targets remain in the matrix below.
 |---|---|---|---|---|
 | **00** | **Quattro design foundation** | **Q + U** | **DONE** | `57e3700`; inherited palette/reload/fallback, square mono controls; approved to continue |
 | 01 | Project/composition model | B + U + N | DONE | Assets/clip instances, shared time map, project history/persistence, bounded playback and composition export; full and live checks pass |
-| 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | TODO | End trimming/zoom deletion exist; deleting an interior video passage does not |
+| 02 | Drag-range delete, split, ripple close, undo | U + B; O-web editing reference | DONE | Explicit range tool, handles, clip/zoom selection, split, delete, exact history; decoded audio/video and UI checks pass |
 | 03 | Import, combine, duplicate, reorder scenes | U | TODO | Multi-file composition is requested here, not verified in Bettershot's single-recording clip model |
 | 04 | Crossfade, fade through black, later wipes/slides | B-web + O-web + U | TODO | No scene transitions in current Studio |
 | 05 | Full timeline and keyboard workflow | B + U + N | PART | Transport/hotkeys/thumbnails landed; range tools, snapping, timeline zoom, waveforms still needed |
@@ -142,10 +142,9 @@ conventions. Establish that foundation before adding editing features.
 - Space transport, frame stepping, five-second seeking, trim/zoom commands,
   save/export commands, and shortcut help.
 
-**Not supported yet:** deleting an interior time range, importing several scenes
-into one project, reordering scenes, or transitions between them. Delete currently
-removes a selected zoom cue, not recorded video. The multi-source composition
-model is implemented; range-cut/import/transition UI remains next.
+**Not supported yet:** importing several scenes through the UI, reordering
+scenes, or transitions between them. Range cuts, splits, and selected-clip/zoom
+deletion now work on the shared composition model. Import/reorder is next.
 
 ## Reference findings and evidence boundaries
 
@@ -266,14 +265,14 @@ audio policy. Old zoom sidecars remain untouched and are not migrated.
 
 ### 02 — Drag-select a passage and Delete it
 
-- [ ] Add a visible range-selection tool: drag from start to end on the video
+- [x] Add a visible range-selection tool: drag from start to end on the video
   lane, then adjust either endpoint with handles.
-- [ ] Delete/Backspace removes the selected passage and closes the gap
+- [x] Delete/Backspace removes the selected passage and closes the gap
   (ripple delete), including a passage inside a clip or spanning several clips.
-- [ ] Support split at the playhead, select a clip, and delete the selected clip.
-- [ ] Undo restores the exact clip ranges, attached edits, selection, and
+- [x] Support split at the playhead, select a clip, and delete the selected clip.
+- [x] Undo restores the exact clip ranges, attached edits, selection, and
   playhead; redo reapplies the operation. Deleting the final clip is undoable.
-- [ ] Provide context-menu commands and visible buttons alongside shortcuts.
+- [x] Provide context-menu commands and visible buttons alongside shortcuts.
 
 Interaction proposal: `V` selects/scrubs; `B` enables range selection; `S` splits
 at the playhead; `Escape` clears the active selection/tool. A plain drag in range
@@ -285,6 +284,13 @@ Acceptance: cut a middle section, multiple sections, an edge section, and a
 cross-clip range; reverse-direction dragging works. Playback/export contain no
 removed frames or audio, and one undo restores each cut. Zero-length selections
 are harmless. Existing Space and zoom-deletion shortcuts remain reliable.
+
+Delivery: `feat(studio): add undoable timeline range cuts and splits`.
+Validated by full `make check` and Wayland tests. UI checks cover reverse
+selection, endpoint resizing, exact undo/redo selection/playhead restoration,
+split/delete, final-clip deletion, and text-field Delete isolation. Decoded
+export frames and audio contain no removed passage; playback clears stale
+deleted frames. Non-unit-speed cuts use explicit duration-conserving snapping.
 
 ### 03 — Import and combine scenes
 

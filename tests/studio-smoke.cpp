@@ -2,6 +2,7 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio-composition-smoke.hpp"
+#include "studio-cuts-ui-smoke.hpp"
 #include "studio-playback-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio-preview.hpp"
@@ -720,6 +721,8 @@ bool runStudioInteractionChecks(QString &error) {
   }
   const QString palettePath = scratch.filePath(QStringLiteral("colors.toml"));
   if (!runStudioPlaybackChecks(source, error))
+    return false;
+  if (!runStudioCutsUiChecks(source, error))
     return false;
   StudioWindow window(source, nullptr, palettePath);
   window.show();

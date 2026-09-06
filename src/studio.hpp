@@ -41,6 +41,18 @@ public:
   /** Whether cues can be moved or resized; off while an export runs. */
   void setCuesEditable(bool editable);
   void setThumbnails(QVector<QImage> thumbnails);
+  void setProject(const StudioProject *project) {
+    project_ = project;
+    update();
+  }
+  void setRangeMode(bool enabled);
+  void setRange(qint64 start, qint64 end);
+  void setSelectedClip(quint64 id);
+  void clearSelection();
+  [[nodiscard]] bool rangeMode() const { return rangeMode_; }
+  [[nodiscard]] qint64 rangeIn() const { return rangeIn_; }
+  [[nodiscard]] qint64 rangeOut() const { return rangeOut_; }
+  [[nodiscard]] quint64 selectedClip() const { return selectedClip_; }
   void setChrome(const StudioChrome &chrome) {
     chrome_ = chrome;
     update();
@@ -60,6 +72,9 @@ signals:
   void cueSelected(quint64 id);
   /** A cue was dragged or resized to a new span. */
   void cueMoved(quint64 id, qint64 startMs, qint64 endMs);
+  void selectionChanged();
+  void splitRequested();
+  void deleteRequested();
 
 protected:
   void leaveEvent(QEvent *event) override;
@@ -67,9 +82,21 @@ protected:
   void mousePressEvent(QMouseEvent *event) override;
   void mouseReleaseEvent(QMouseEvent *event) override;
   void paintEvent(QPaintEvent *event) override;
+  void contextMenuEvent(QContextMenuEvent *event) override;
 
 private:
-  enum class Grab { None, In, Out, Playhead, CueBody, CueStart, CueEnd };
+  enum class Grab {
+    None,
+    In,
+    Out,
+    Playhead,
+    CueBody,
+    CueStart,
+    CueEnd,
+    RangeStart,
+    RangeEnd,
+    RangeNew
+  };
 
   /** The trim bar's row. */
   [[nodiscard]] QRectF trackRect() const;
@@ -83,6 +110,12 @@ private:
   [[nodiscard]] quint64 cueAt(const QPointF &position, Grab *edge) const;
 
   const ZoomTrack *track_ = nullptr;
+  const StudioProject *project_ = nullptr;
+  bool rangeMode_ = false;
+  qint64 rangeIn_ = -1;
+  qint64 rangeOut_ = -1;
+  qint64 rangeAnchor_ = 0;
+  quint64 selectedClip_ = 0;
   qint64 duration_ = 0;
   qint64 position_ = 0;
   qint64 trimIn_ = 0;
@@ -155,10 +188,18 @@ private:
   [[nodiscard]] const ZoomCue *activeCue() const;
   void zoomChanged();
   void saveProject();
-  void applyProject(bool resetHistory = false);
+  void applyProject(bool resetHistory = false, qint64 position = -1);
   void relinkAsset();
   void refreshThumbnails();
   void captureCursor();
+  void splitAtPlayhead();
+  void deleteSelection();
+  void finishCompositionEdit(qint64 position);
+  quint64 nextClipId_ = 1;
+  class QPushButton *rangeButton_ = nullptr;
+  class QPushButton *selectButton_ = nullptr;
+  class QPushButton *splitButton_ = nullptr;
+  class QPushButton *deleteButton_ = nullptr;
   [[nodiscard]] StudioEditState editState() const;
 
   QString path_;

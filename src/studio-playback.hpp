@@ -20,7 +20,7 @@ class StudioPlayback final : public QObject {
   Q_OBJECT
 public:
   explicit StudioPlayback(StudioPreview *preview, QObject *parent = nullptr);
-  void setProject(const StudioProject &project);
+  void setProject(const StudioProject &project, qint64 desiredPosition = -1);
   void setPosition(qint64 milliseconds);
   [[nodiscard]] qint64 position() const { return position_; }
   [[nodiscard]] qint64 duration() const { return studioDuration(project_); }
@@ -60,7 +60,7 @@ private:
   void loadSlot(int index, const StudioFrame &frame);
   void seekSlot(int index, qint64 sourceMs);
   void preload();
-  void present(int index, const QVideoFrame &frame);
+  void present(int index, const QVideoFrame &frame, bool cached = false);
   void tick();
   void setState(QMediaPlayer::PlaybackState state);
   void updateAudio();

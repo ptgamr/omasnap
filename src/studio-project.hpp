@@ -89,6 +89,27 @@ struct StudioProjectLoad {
 [[nodiscard]] QString saveStudioProject(const QString &path,
                                         const StudioProject &project);
 
+/** Clip identity comes from the window's monotonic allocator, outside undo
+ * snapshots. A split never changes composition duration or zoom timing. */
+[[nodiscard]] bool studioSplitClip(StudioProject &, qint64 atMs,
+                                   quint64 newClipId);
+struct StudioCutResult {
+  bool changed = false;
+  qint64 fromMs = 0;
+  qint64 toMs = 0;
+  qint64 removedMs = 0;
+};
+/** Removes a passage and closes the gap. Effective boundaries may snap by at
+ * most one output frame to representable source milliseconds. Failure leaves
+ * the project untouched. remainderClipId is used only when both sides of one
+ * scene survive; it must then be nonzero and unused. */
+[[nodiscard]] StudioCutResult studioDeleteRange(StudioProject &, qint64 fromMs,
+                                                qint64 toMs,
+                                                quint64 remainderClipId);
+[[nodiscard]] StudioCutResult studioDeleteClip(StudioProject &, quint64 clipId);
+[[nodiscard]] qint64 studioTimeAfterDelete(qint64 timeMs, qint64 fromMs,
+                                           qint64 toMs);
+
 struct StudioEditState {
   StudioProject project;
   quint64 selectedClip = 0;
