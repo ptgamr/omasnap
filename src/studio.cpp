@@ -2306,6 +2306,47 @@ void StudioWindow::stepFrame(int direction) {
   seekTo(qRound64(static_cast<double>(index + direction) * frameMs));
 }
 
+void StudioWindow::extendRangeSelection(int direction) {
+  if (!playButton_->isEnabled() || !media_.usable())
+    return;
+  player_->pause();
+  // One-second steps: fast enough to hold across a passage, exact enough to
+  // land cut points; the timeline handles stay for frame precision.
+  constexpr qint64 kRangeStepMs = 1000;
+  const qint64 pos = player_->position();
+  const auto stepFrom = [&](qint64 ms) { return ms + direction * kRangeStepMs; };
+  qint64 anchor;
+  qint64 edge;
+  if (!timeline_->hasRange()) {
+    anchor = pos;
+    edge = stepFrom(pos);
+  } else if (pos <= timeline_->rangeIn()) {
+    // Parked on the start edge: move it exactly; the playhead is the edge.
+    anchor = timeline_->rangeOut();
+    edge = timeline_->rangeIn() + direction * kRangeStepMs;
+  } else if (pos >= timeline_->rangeOut() - 1) {
+    // Parked on the end edge (the shared seek bound keeps the playhead one
+    // millisecond inside): move the edge itself so steps stay exact.
+    anchor = timeline_->rangeIn();
+    edge = timeline_->rangeOut() + direction * kRangeStepMs;
+  } else if (direction > 0) {
+    // Inside the range: grow outward only, never shrink the far edge.
+    anchor = timeline_->rangeIn();
+    edge = qMax(timeline_->rangeOut(), stepFrom(pos));
+  } else {
+    anchor = timeline_->rangeOut();
+    edge = qMin(timeline_->rangeIn(), stepFrom(pos));
+  }
+  edge = qBound<qint64>(0, edge, timeline_->duration());
+  if (edge == anchor)
+    timeline_->clearSelection();
+  else
+    timeline_->setRange(anchor, edge);
+  // Parks the playhead on the moving edge; the shared seek bound keeps the
+  // exclusive range end one millisecond outside, as with mouse selection.
+  seekTo(edge);
+}
+
 void StudioWindow::keepSelection() {
   if (!keepButton_->isEnabled() || editGesture_)
     return;
@@ -2441,6 +2482,12 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
       else
         stepFrame(direction);
     };
+  } else if ((key == Qt::Key_Left || key == Qt::Key_Right) &&
+             mods == (Qt::ControlModifier | Qt::ShiftModifier)) {
+    repeat = true;
+    action = [this, key] {
+      extendRangeSelection(key == Qt::Key_Left ? -1 : 1);
+    };
   } else if (key == Qt::Key_Home && plain)
     action = [this] {
       player_->pause();
@@ -2543,6 +2590,7 @@ void StudioWindow::showShortcuts() {
                      "Right button + drag   Pan timeline\n"
                      "Left / Right          Previous / next frame\n"
                      "Shift + Left / Right  Back / forward 5 seconds\n"
+                     "Ctrl+Shift+Left/Right Select range in 1-second steps\n"
                      "Home / End            Selection or timeline start / end\n"
                      "Z                     Add zoom at playhead\n"
                      "S                     Split scene at playhead\n"

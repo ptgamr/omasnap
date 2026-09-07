@@ -161,6 +161,39 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   QTest::keyClick(&window, Qt::Key_Escape);
   if (!require(!timeline->hasRange(), "Escape did not clear the range"))
     return false;
+  // Keyboard range selection: Ctrl+Shift+arrows anchor at the playhead and
+  // extend or shrink the range one frame per press.
+  player->setPosition(2000);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 2000; }, 4000),
+               "playhead did not settle before keyboard selection"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(timeline->hasRange() && timeline->rangeIn() == 2000 &&
+                  timeline->rangeOut() == 3000,
+               "Ctrl+Shift+Right did not start a keyboard range"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(timeline->rangeIn() == 2000 && timeline->rangeOut() == 4000,
+               "Ctrl+Shift+Right did not extend the keyboard range"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(timeline->rangeIn() == 2000 && timeline->rangeOut() == 3000,
+               "Ctrl+Shift+Left did not shrink the keyboard range"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Escape);
+  if (!require(!timeline->hasRange(), "Escape did not clear the keyboard range"))
+    return false;
+  // The same chord inside a text field keeps its native word selection.
+  auto *keys = new QLineEdit(&window);
+  keys->setText("hello world");
+  keys->show();
+  keys->setFocus();
+  keys->setCursorPosition(0);
+  QTest::keyClick(keys, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(!timeline->hasRange() && player->duration() == 6000 &&
+                  keys->hasSelectedText(),
+               "range keys leaked from text editing"))
+    return false;
   player->setPosition(0);
   if (!require(player->position() == 0, "Escape did not release range seeking constraint")) return false;
   player->setPosition(2000);

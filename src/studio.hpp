@@ -203,6 +203,7 @@ private:
   void showShortcuts();
   void seekTo(qint64 milliseconds);
   void stepFrame(int direction);
+  void extendRangeSelection(int direction);
   void beginEdit();
   void endEdit();
   void rememberEdit();
