@@ -73,8 +73,8 @@ No settings UI, theme hook, shell process, or new package is needed.
 There are no Select/Range mode buttons: timeline gestures choose the operation.
 Split and Keep only selection are non-checkable actions on the left; Delete
 stays on the right. Their compact square buttons are 28 px with 18 px vector
-icons. Keyboard focus uses a
-dashed foreground border, distinct from a checked control's solid accent/fill.
+icons. Keyboard focus uses a solid accent border, matching sliders, tabs, and
+fields; a checked control keeps its solid accent border plus selected fill.
 Shift+drag selects a range directly on the timeline; no separate numeric range
 panel or preview transport is shown. The ordinary transport reviews the selection.
 Ctrl+drag paints a cached clip card at the pointer, not a second

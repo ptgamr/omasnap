@@ -160,14 +160,13 @@ QPushButton {
   border-radius: @radiuspx; padding: @paddingYpx @paddingXpx;
 }
 QPushButton:hover:enabled { background: @hover; border-color: @text; }
-QPushButton:focus:enabled { border-color: @text; border-style: dashed; }
+QPushButton:focus:enabled { border-color: @accent; border-style: solid; }
 QPushButton:checked:enabled { background: @selected; border-color: @accent; border-style: solid; font-weight: 600; }
 QPushButton:pressed:enabled { background: @pressed; border-color: @accent; }
 QPushButton:disabled { color: @muted; border-color: @selected; background: @background; }
 QPushButton#primary:enabled { background: @accent; color: @onAccent; border-color: @accent; font-weight: 600; }
 QPushButton#primary:hover:enabled, QPushButton#primary:focus:enabled { border-color: @text; }
 QPushButton#primary:pressed:enabled { background: @text; color: @background; }
-QPushButton#play { min-width: 40px; }
 QProgressBar { background: @surface; border: 1px solid @border; border-radius: @radiuspx; min-height: 20px; text-align: center; }
 QProgressBar::chunk { background: @accent; }
 QSlider { border: 1px solid transparent; }

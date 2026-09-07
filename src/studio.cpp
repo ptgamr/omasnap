@@ -59,7 +59,7 @@ namespace {
 constexpr int kTimelineHeight = 176;
 class TimelineActionButton final : public QPushButton {
 public:
-  enum class Symbol { Split, Delete, Keep };
+  enum class Symbol { Split, Delete, Keep, Play, Pause, SoundOn, SoundOff };
   TimelineActionButton(Symbol symbol, const QString &name, const QString &hint,
                        StudioTheme *theme, QWidget *parent)
       : QPushButton(parent), symbol_(symbol), theme_(theme) {
@@ -67,6 +67,13 @@ public:
     setToolTip(hint);
     setFixedSize(28, 28);
   }
+  void setSymbol(Symbol symbol) {
+    if (symbol_ != symbol) {
+      symbol_ = symbol;
+      update();
+    }
+  }
+  [[nodiscard]] Symbol symbol() const { return symbol_; }
 protected:
   void paintEvent(QPaintEvent *event) override {
     QPushButton::paintEvent(event);
@@ -74,8 +81,9 @@ protected:
     painter.setRenderHint(QPainter::Antialiasing);
     painter.translate((width() - 18) / 2.0, (height() - 18) / 2.0);
     painter.scale(18.0 / 24.0, 18.0 / 24.0);
-    painter.setPen(QPen(isEnabled() ? theme_->chrome().foreground : theme_->chrome().mutedText(),
-                        1.5, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
+    const QColor color = isEnabled() ? theme_->chrome().foreground
+                                     : theme_->chrome().mutedText();
+    painter.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
     painter.setBrush(Qt::NoBrush);
     if (symbol_ == Symbol::Split) {
       painter.drawRect(QRectF(2, 7, 6, 13));
@@ -89,6 +97,41 @@ protected:
       painter.drawRect(QRectF(6, 6, 12, 15));
       painter.drawLine(QPointF(10, 10), QPointF(10, 17));
       painter.drawLine(QPointF(14, 10), QPointF(14, 17));
+    } else if (symbol_ == Symbol::Play) {
+      QPainterPath triangle;
+      triangle.moveTo(8, 5);
+      triangle.lineTo(18, 12);
+      triangle.lineTo(8, 19);
+      triangle.closeSubpath();
+      painter.setBrush(color);
+      painter.setPen(Qt::NoPen);
+      painter.drawPath(triangle);
+    } else if (symbol_ == Symbol::Pause) {
+      painter.setBrush(color);
+      painter.setPen(Qt::NoPen);
+      painter.drawRect(QRectF(7, 5, 4, 14));
+      painter.drawRect(QRectF(13, 5, 4, 14));
+    } else if (symbol_ == Symbol::SoundOn || symbol_ == Symbol::SoundOff) {
+      QPainterPath speaker;
+      speaker.moveTo(4, 9);
+      speaker.lineTo(8, 9);
+      speaker.lineTo(13, 4);
+      speaker.lineTo(13, 20);
+      speaker.lineTo(8, 15);
+      speaker.lineTo(4, 15);
+      speaker.closeSubpath();
+      painter.setBrush(color);
+      painter.setPen(Qt::NoPen);
+      painter.drawPath(speaker);
+      painter.setBrush(Qt::NoBrush);
+      painter.setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      if (symbol_ == Symbol::SoundOn) {
+        painter.drawArc(QRectF(14, 8, 4, 8), -60 * 16, 120 * 16);
+        painter.drawArc(QRectF(14, 5, 8, 14), -60 * 16, 120 * 16);
+      } else {
+        painter.drawLine(QPointF(15, 9), QPointF(21, 15));
+        painter.drawLine(QPointF(21, 9), QPointF(15, 15));
+      }
     } else {
       painter.drawEllipse(QPointF(6, 6), 3, 3);
       painter.drawEllipse(QPointF(6, 18), 3, 3);
@@ -1131,8 +1174,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     result->setAccessibleName(hint);
     return result;
   };
-  playButton_ =
-      button(QStringLiteral("Play"), QStringLiteral("Play / pause · Space"));
+  playButton_ = new TimelineActionButton(
+      TimelineActionButton::Symbol::Play, QStringLiteral("Play / pause"),
+      QStringLiteral("Play / pause · Space"), theme_, this);
   playButton_->setObjectName(QStringLiteral("play"));
   addZoomButton_ = new QPushButton(QStringLiteral("Add zoom"), this);
   removeZoomButton_ = new QPushButton(QStringLiteral("Remove zoom"), this);
@@ -1370,32 +1414,16 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   timelineLayout->setContentsMargins(16, 12, 16, 8);
   auto *transport = new QHBoxLayout;
   transport->setSpacing(StudioChrome::gap);
-  auto *back =
-      button(QStringLiteral("|‹"), QStringLiteral("Go to selection or timeline start · Home"));
-  auto *forward =
-      button(QStringLiteral("›|"), QStringLiteral("Go to selection or timeline end · End"));
-  auto *previous =
-      button(QStringLiteral("‹"), QStringLiteral("Previous frame · Left"));
-  auto *next =
-      button(QStringLiteral("›"), QStringLiteral("Next frame · Right"));
   transport->addWidget(timeLabel_);
   transport->addStretch();
-  transport->addWidget(back);
-  transport->addWidget(previous);
   transport->addWidget(playButton_);
-  transport->addWidget(next);
-  transport->addWidget(forward);
   transport->addStretch();
-  auto *volume = new QSlider(Qt::Horizontal, timelinePanel);
-  volume->setRange(0, 100);
-  volume->setValue(100);
-  volume->setFixedWidth(72);
-  volume->setToolTip(QStringLiteral("Preview volume"));
-  auto *mute = button(QStringLiteral("Mute"),
-                      QStringLiteral("Mute / unmute preview · M"));
+  auto *mute = new TimelineActionButton(
+      TimelineActionButton::Symbol::SoundOn, QStringLiteral("Mute preview"),
+      QStringLiteral("Mute / unmute preview · M"), theme_, timelinePanel);
+  mute->setObjectName(QStringLiteral("mutePreview"));
   mute->setCheckable(true);
   transport->addWidget(mute);
-  transport->addWidget(volume);
   timelineLayout->addLayout(transport);
   auto *editTools = new QHBoxLayout;
   auto *timelineViewport = new TimelineViewport(timeline_);
@@ -1415,6 +1443,35 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   editTools->addStretch();
   editTools->addWidget(deleteButton_);
   timelineLayout->addLayout(editTools);
+  // Tab follows the visual layout, not widget creation order: header, then
+  // transport and edit tools, then the inspector pages.
+  QWidget::setTabOrder(undoButton_, redoButton_);
+  QWidget::setTabOrder(redoButton_, help);
+  QWidget::setTabOrder(help, inspectorToggle);
+  QWidget::setTabOrder(inspectorToggle, exportButton_);
+  QWidget::setTabOrder(exportButton_, relinkButton_);
+  QWidget::setTabOrder(relinkButton_, playButton_);
+  QWidget::setTabOrder(playButton_, mute);
+  QWidget::setTabOrder(mute, splitButton_);
+  QWidget::setTabOrder(splitButton_, keepButton_);
+  QWidget::setTabOrder(keepButton_, deleteButton_);
+  QWidget::setTabOrder(deleteButton_, addZoomButton_);
+  QWidget::setTabOrder(addZoomButton_, removeZoomButton_);
+  QWidget::setTabOrder(removeZoomButton_, zoomSlider_);
+  QWidget::setTabOrder(zoomSlider_, easeIn_);
+  QWidget::setTabOrder(easeIn_, easeOut_);
+  QWidget::setTabOrder(easeOut_, importButton_);
+  QWidget::setTabOrder(importButton_, sceneIn_);
+  QWidget::setTabOrder(sceneIn_, sceneOut_);
+  QWidget::setTabOrder(sceneOut_, duplicateButton_);
+  QWidget::setTabOrder(duplicateButton_, earlierButton_);
+  QWidget::setTabOrder(earlierButton_, laterButton_);
+  QWidget::setTabOrder(laterButton_, transitionType_);
+  QWidget::setTabOrder(transitionType_, transitionDuration_);
+  QWidget::setTabOrder(transitionDuration_, background_);
+  QWidget::setTabOrder(background_, padding_);
+  QWidget::setTabOrder(padding_, radius_);
+  QWidget::setTabOrder(radius_, resetStyle);
   connect(splitButton_, &QPushButton::clicked, this,
           &StudioWindow::splitAtPlayhead);
   connect(deleteButton_, &QPushButton::clicked, this,
@@ -1482,21 +1539,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::toggleInspector);
   connect(undoButton_, &QPushButton::clicked, this, &StudioWindow::undoEdit);
   connect(redoButton_, &QPushButton::clicked, this, &StudioWindow::redoEdit);
-  connect(back, &QPushButton::clicked, this, [this] {
-    player_->pause();
-    seekTo(timeline_->hasRange() ? timeline_->rangeIn() : timeline_->trimIn());
-  });
-  connect(forward, &QPushButton::clicked, this, [this] {
-    player_->pause();
-    seekTo(timeline_->hasRange() ? timeline_->rangeOut() - 1 : timeline_->trimOut());
-  });
-  connect(previous, &QPushButton::clicked, this, [this] { stepFrame(-1); });
-  connect(next, &QPushButton::clicked, this, [this] { stepFrame(1); });
-  connect(volume, &QSlider::valueChanged, this, [this](int value) {
-    audio_->setVolume(static_cast<float>(value) / 100.0F);
-  });
   connect(mute, &QPushButton::toggled, audio_, &QAudioOutput::setMuted);
-  connect(audio_, &QAudioOutput::mutedChanged, mute, &QPushButton::setChecked);
+  connect(audio_, &QAudioOutput::mutedChanged, this,
+          [mute](bool muted) {
+            mute->setChecked(muted);
+            mute->setSymbol(muted ? TimelineActionButton::Symbol::SoundOff
+                                  : TimelineActionButton::Symbol::SoundOn);
+          });
   connect(easeIn_, &QSpinBox::valueChanged, this,
           [this](int ms) { setSelectedZoomTiming(true, ms); });
   connect(easeOut_, &QSpinBox::valueChanged, this,
@@ -2100,9 +2149,13 @@ void StudioWindow::refreshControls() {
   const bool exporting = export_ || relinking_ || importing_;
   refreshSceneControls();
   const qint64 duration = timeline_->duration();
-  playButton_->setText(player_->playbackState() == QMediaPlayer::PlayingState
-                           ? QStringLiteral("Pause")
-                           : QStringLiteral("Play"));
+  const bool playing = player_->playbackState() == QMediaPlayer::PlayingState;
+  if (auto *play = static_cast<TimelineActionButton *>(playButton_)) {
+    play->setSymbol(playing ? TimelineActionButton::Symbol::Pause
+                            : TimelineActionButton::Symbol::Play);
+    play->setToolTip(playing ? QStringLiteral("Pause · Space")
+                             : QStringLiteral("Play · Space"));
+  }
   playButton_->setEnabled(!mediaFailed_ && duration > 0);
   keepButton_->setEnabled(!exporting && timeline_->hasRange() && !mediaFailed_);
   keepButton_->setVisible(timeline_->hasRange());
