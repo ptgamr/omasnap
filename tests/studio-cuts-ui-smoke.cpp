@@ -2,6 +2,7 @@
 #include "studio-playback.hpp"
 #include "studio.hpp"
 #include <QFile>
+#include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
@@ -50,6 +51,47 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   if (!require(from >= 1490 && from <= 1510 && to >= 2990,
                "range endpoint could not be adjusted"))
     return false;
+  QPushButton *selectTool = nullptr, *rangeTool = nullptr, *split = nullptr;
+  for (auto *button : window.findChildren<QPushButton *>()) {
+    if (button->text() == QStringLiteral("Select · V")) selectTool = button;
+    if (button->text() == QStringLiteral("Range · B")) rangeTool = button;
+    if (button->text() == QStringLiteral("Split at playhead · S")) split = button;
+  }
+  if (!require(selectTool && rangeTool && split && !split->isCheckable(),
+               "timeline actions are missing or presented as modes"))
+    return false;
+  selectTool->setFocus();
+  QTest::keyClick(selectTool, Qt::Key_B);
+  if (!require(!selectTool->isChecked() && rangeTool->isChecked(),
+               "B left both timeline tools checked")) return false;
+  QTest::keyClick(&window, Qt::Key_BracketLeft);
+  if (!require(player->position() == from, "selection start shortcut missed boundary")) return false;
+  QTest::keyClick(&window, Qt::Key_BracketRight);
+  if (!require(player->position() == to - 1, "selection end preview went outside selection")) return false;
+  timeline->setTrim(0, 2000);
+  QTest::keyClick(&window, Qt::Key_Space, Qt::ShiftModifier);
+  if (!require(QTest::qWaitFor([&] {
+        return player->playbackState() == QMediaPlayer::PausedState && player->position() == to - 1;
+      }, 6000), "selected range did not play once and stop inside its end")) return false;
+  if (!require(timeline->trimIn() == 0 && timeline->trimOut() == 2000,
+               "range preview changed the export range")) return false;
+  timeline->setTrim(0, 6000);
+  timeline->setRange(5500, 6000);
+  QTest::keyClick(&window, Qt::Key_Space, Qt::ShiftModifier);
+  if (!require(QTest::qWaitFor([&] {
+        return player->playbackState() == QMediaPlayer::PausedState && player->position() == 5999;
+      }, 4000), "range preview at project EOF did not settle inside the selection")) return false;
+  timeline->setRange(from, to);
+  auto *startField = window.findChild<QDoubleSpinBox *>("rangeStart");
+  auto *endField = window.findChild<QDoubleSpinBox *>("rangeEnd");
+  if (!require(startField && endField, "precise range fields missing")) return false;
+  startField->setValue(1.750);
+  startField->editingFinished();
+  if (!require(timeline->rangeIn() == 1750, "precise range start edit failed")) return false;
+  timeline->setRange(from, to);
+  player->setPosition(0);
+  if (!require(!split->isEnabled(), "split action enabled at scene start")) return false;
+  player->setPosition(5000);
   QTest::keyClick(&window, Qt::Key_Delete);
   if (!require(player->duration() == 6000 - (to - from) &&
                    timeline->rangeIn() == -1,

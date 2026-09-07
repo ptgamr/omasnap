@@ -65,6 +65,15 @@ Text fields retain their normal editing shortcuts. Composition changes clear
 stale decoded frames so removed material cannot remain in the editing preview
 while the next valid source frame is being prepared.
 
+Selection review is independent of the persisted export range. Start/end fields
+edit selection milliseconds (displayed as decimal seconds), `[` seeks its start,
+and `]` seeks end minus one millisecond because selections are half-open.
+Shift+Space plays the selection once and stops inside that same end, including
+when it coincides with project EOF or extends past the export range. Ordinary
+Space, a new scrub, or a changed selection cancels bounded selection playback.
+Ruler scrubbing snaps within seven pixels of selection boundaries; Alt bypasses
+snapping. These selection/transport changes do not create project edits.
+
 ## Scene arrangement
 
 Import batches are probed on a worker and published atomically: one invalid

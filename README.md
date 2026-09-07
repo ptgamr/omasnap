@@ -313,6 +313,11 @@ to append. An invalid import batch leaves the project unchanged.
 
 **Arrange scenes.** In Select mode (`V`), click and drag the video lane or ruler
 to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.
+The clip follows your pointer while dragging, with a placeholder at its old
+position and an insertion marker at the destination. Release to commit one
+undoable move; Escape cancels. Select and Range are exclusive tools on the left;
+Split at playhead and Delete are actions on the right. A dashed focus outline
+does not mean a tool is active; the active tool has a solid accent border/fill.
 Drag a selected scene's edges to trim it, or use the
 Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
 Earlier/Later offer precise reorder buttons. Each operation is undoable.
@@ -338,7 +343,13 @@ are not migrated, and original recordings remain untouched.
 
 **Cut passages.** Choose **Range** (`B`), drag over the video lane in either
 direction, adjust the range edges, and press Delete/Backspace. The gap closes
-in playback and export, including its audio. `V` returns to clip selection
+in playback and export, including its audio. Before deleting, use **Go to start**
+(`[`), **Go to end** (`]`), or **Play range** (`Shift+Space`) to review it.
+Play range starts at the selection start and stops on the last instant inside
+the selection; it does not change the export range. Space remains normal
+play/pause. Start/End fields accept precise seconds with millisecond precision.
+Scrubbing on the ruler snaps near selection boundaries; hold Alt to bypass it.
+`V` returns to clip selection
 and scrubbing. `S` splits at the playhead; click a scene to select it, then
 Delete removes that scene. Undo restores the ranges, selection, and playhead,
 even after deleting the final scene. Buttons and a timeline context menu expose
@@ -395,6 +406,8 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / pause |
+| `Shift+Space` | Play the selected range once |
+| `[` / `]` | Preview selection start / last instant inside selection |
 | `Ctrl+O` | Add scene files (also available in the Clip inspector) |
 | `Ctrl+D` | Duplicate the selected scene |
 | `T` | Edit the selected scene's transition to its next neighbor |

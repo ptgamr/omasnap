@@ -70,6 +70,14 @@ No settings UI, theme hook, shell process, or new package is needed.
 - Existing and future dialogs/menus must inherit the same resolved stylesheet.
   New controls must not introduce fixed accent colors or arbitrary rounding.
 
+Timeline tools (Select/Range) are exclusive checked buttons on the left;
+Split/Delete are non-checkable actions on the right. Keyboard focus uses a
+dashed foreground border, distinct from a checked tool's solid accent/fill.
+Selection controls reserve their layout space so drawing a range never shifts
+the timeline under the pointer. Numeric range boundaries share themed square
+input styling. Ctrl+drag paints a cached clip card at the pointer, not a second
+decoder or a project edit per mouse move; dropping commits one history entry.
+
 ## Verification
 
 `tests/studio-theme-smoke.cpp` covers role precedence, ANSI alternatives,

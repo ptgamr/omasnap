@@ -149,6 +149,13 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
                     point(14500));
   QTest::mouseMove(timeline, point(28500), 40);
+  QTest::qWait(30);
+  const auto dragged = timeline->grab().toImage();
+  const QPoint sourcePixel = (QPointF(point(14500)) * dragged.devicePixelRatio()).toPoint();
+  if (!require(timeline->cursor().shape() == Qt::ClosedHandCursor &&
+                   dragged.pixelColor(sourcePixel) == theme->chrome().background,
+               "reorder drag did not lift the source clip into a moving preview"))
+    return false;
   QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ControlModifier,
                       point(28500));
   if (!require(player->duration() == 29000 && timeline->selectedClip() == 5,

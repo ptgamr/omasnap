@@ -9,6 +9,7 @@
 
 #include <QFutureWatcher>
 #include <QImage>
+#include <QPixmap>
 #include <QSet>
 #include <QSize>
 #include <QString>
@@ -128,6 +129,9 @@ private:
   qint64 rangeAnchor_ = 0;
   quint64 selectedClip_ = 0;
   QPointF scenePress_;
+  QPointF sceneDragOffset_;
+  QRectF draggedSceneRect_;
+  QPixmap draggedScenePreview_;
   bool reorderGesture_ = false;
   StudioClip grabbedScene_;
   qint64 sceneStartMs_ = 0;
@@ -194,6 +198,9 @@ private:
   void setSelectedZoomTiming(bool easeIn, int milliseconds);
   void styleChanged();
   void togglePlayback();
+  void playRange();
+  void goToRangeBoundary(bool end);
+  void refreshSplitAction();
   void seekBy(qint64 milliseconds);
   void setTrimIn();
   void setTrimOut();
@@ -250,6 +257,12 @@ private:
   class QPushButton *selectButton_ = nullptr;
   class QPushButton *splitButton_ = nullptr;
   class QPushButton *deleteButton_ = nullptr;
+  QWidget *rangeControls_ = nullptr;
+  class QDoubleSpinBox *rangeStart_ = nullptr;
+  class QDoubleSpinBox *rangeEnd_ = nullptr;
+  class QLabel *rangeDuration_ = nullptr;
+  class QPushButton *playRangeButton_ = nullptr;
+  qint64 rangePlaybackEnd_ = -1;
   [[nodiscard]] StudioEditState editState() const;
 
   QString path_;

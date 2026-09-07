@@ -159,9 +159,9 @@ QPushButton {
   background: @surface; border: @borderWidthpx solid @border;
   border-radius: @radiuspx; padding: @paddingYpx @paddingXpx;
 }
-QPushButton:checked { background: @selected; border-color: @accent; }
 QPushButton:hover:enabled { background: @hover; border-color: @text; }
-QPushButton:focus:enabled { background: @hover; border-color: @accent; }
+QPushButton:focus:enabled { border-color: @text; border-style: dashed; }
+QPushButton:checked:enabled { background: @selected; border-color: @accent; border-style: solid; font-weight: 600; }
 QPushButton:pressed:enabled { background: @pressed; border-color: @accent; }
 QPushButton:disabled { color: @muted; border-color: @selected; background: @background; }
 QPushButton#primary:enabled { background: @accent; color: @onAccent; border-color: @accent; font-weight: 600; }
@@ -177,10 +177,10 @@ QSlider::handle:horizontal { background: @accent; border: 1px solid @accent; wid
 QSlider::handle:horizontal:hover, QSlider::handle:horizontal:focus { border-color: @text; background: @text; }
 QSlider::handle:horizontal:disabled, QSlider::sub-page:horizontal:disabled { background: @selected; border-color: @border; }
 QSlider:focus { border: 1px solid @accent; }
-QSpinBox, QComboBox, QLineEdit { background: @surface; color: @text; border: 1px solid @border; border-radius: @radiuspx; padding: 6px; selection-background-color: @selected; selection-color: @text; }
-QSpinBox:focus, QComboBox:focus, QLineEdit:focus { background: @hover; border-color: @accent; }
-QSpinBox:disabled, QComboBox:disabled { color: @muted; border-color: @selected; }
-QSpinBox QLineEdit { background: transparent; border: 0; padding: 0; }
+QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit { background: @surface; color: @text; border: 1px solid @border; border-radius: @radiuspx; padding: 6px; selection-background-color: @selected; selection-color: @text; }
+QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus { background: @hover; border-color: @accent; }
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled { color: @muted; border-color: @selected; }
+QSpinBox QLineEdit, QDoubleSpinBox QLineEdit { background: transparent; border: 0; padding: 0; }
 QComboBox::drop-down { width: 18px; border: 0; }
 QComboBox::down-arrow { image: none; width: 0; height: 0; border: 0; }
 QWidget#studioComboPopup { background: @background; border: 1px solid @border; }
