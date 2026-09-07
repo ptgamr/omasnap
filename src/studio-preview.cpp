@@ -158,12 +158,11 @@ void StudioPreview::clearFrame() {
   refreshSurface();
 }
 
-void StudioPreview::invalidatePendingFrames() {
-  for (auto &slot : preparations_) {
-    ++slot.generation;
-    slot.pending = {};
-    slot.pendingPosition.reset();
-  }
+void StudioPreview::invalidatePendingFrames(int index) {
+  auto &slot = preparations_[index];
+  ++slot.generation;
+  slot.pending = {};
+  slot.pendingPosition.reset();
 }
 
 void StudioPreview::preparePendingFrame(int index) {

@@ -43,7 +43,7 @@ public:
                       double progress, qint64 timelineMs);
   void setCanvasSize(const QSize &size);
   void clearFrame();
-  void invalidatePendingFrames();
+  void invalidatePendingFrames(int slot);
   void setCanvasInset(int inset);
   void setStyle(const StudioStyle &style);
   void setChrome(const StudioChrome &chrome);

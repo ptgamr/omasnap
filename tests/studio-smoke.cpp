@@ -32,15 +32,19 @@
 #include <QPushButton>
 #include <QSaveFile>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThreadPool>
+#include <QtConcurrentRun>
 
 #include <QPainter>
 #include <QTransform>
 
+#include <atomic>
 #include <cmath>
 #include <limits>
 
@@ -1014,6 +1018,187 @@ bool runStudioExportUiChecks(const QString &fixture, QString &error) {
       QStringLiteral("export left partial files or modified existing media"));
 }
 
+bool runMultiClipReadinessChecks(const QString &source, QString &error) {
+  StudioProject project;
+  project.assets = {{1, source, probeStudioSource(source)}};
+  project.canvas = {320, 180};
+  project.clips = {{1, 1, 0, 3000, 1}, {2, 1, 3000, 6000, 1}};
+  project.transitions = {{1, 2, StudioTransitionKind::Crossfade, 500}};
+  StudioPreview preview;
+  preview.setFixedSize(480, 320);
+  preview.show();
+  StudioPlayback player(&preview);
+  player.setProject(project, 0);
+  if (!check(QTest::qWaitFor(
+                 [&] {
+                   return !player.seekPending() && preview.videoSlotReady(0) &&
+                          preview.videoSlotReady(1);
+                 },
+                 10000),
+             error, QStringLiteral("multi-clip sources did not load")))
+    return false;
+  auto *pool = QThreadPool::globalInstance();
+  const int threads = pool->maxThreadCount();
+  pool->setMaxThreadCount(1);
+  QSemaphore gate;
+  std::atomic_bool blocked = false;
+  auto blocker = QtConcurrent::run([&] {
+    blocked.store(true);
+    gate.acquire();
+  });
+  const auto restore = qScopeGuard([&] {
+    gate.release();
+    blocker.waitForFinished();
+    pool->setMaxThreadCount(threads);
+  });
+  if (!check(QTest::qWaitFor([&] { return blocked.load(); }, 5000), error,
+             QStringLiteral("could not delay multi-clip preparations")))
+    return false;
+  // Reuse already-loaded sources: initial media loading itself also uses Qt's
+  // pool, so blocking it before loading would test the loader, not preparation.
+  project.clips[0].id = 11;
+  project.clips[1].id = 22;
+  project.transitions = {{11, 22, StudioTransitionKind::Crossfade, 500}};
+  player.setProject(project, 0);
+  const auto decoders = player.findChildren<QMediaPlayer *>();
+  if (!check(QTest::qWaitFor(
+                 [&] {
+                   for (const auto *decoder : decoders)
+                     if (!decoder->videoSink()->videoFrame().isValid() ||
+                         decoder->playbackState() == QMediaPlayer::PlayingState)
+                       return false;
+                   return true;
+                 },
+                 5000),
+             error,
+             QStringLiteral(
+                 "multi-clip decoders did not accept their prime frames")))
+    return false;
+  // The incoming decoded frame is waiting on the worker. A seek on the
+  // outgoing clip must not invalidate that unrelated preload's generation.
+  player.setPosition(500);
+  gate.release();
+  blocker.waitForFinished();
+  pool->setMaxThreadCount(threads);
+  if (!check(QTest::qWaitFor(
+                 [&] {
+                   return !player.seekPending() && preview.videoSlotReady(0) &&
+                          preview.videoSlotReady(1);
+                 },
+                 5000),
+             error,
+             QStringLiteral("outgoing seek stranded the incoming preparation")))
+    return false;
+  // Appending a scene leaves the active clip/range/asset unchanged.
+  project.clips.push_back({3, 1, 0, 1000, 1});
+  player.setProject(project, 500);
+  const auto shot = preview.grab().toImage();
+  if (!check(!shot.isNull() &&
+                 shot.pixelColor(shot.width() / 2, shot.height() / 2).red() >
+                     180,
+             error,
+             QStringLiteral("appending a clip blanked an unchanged preview")))
+    return false;
+  player.play();
+  if (!check(QTest::qWaitFor([&] { return player.position() > 3200; }, 5000),
+             error,
+             QStringLiteral("playback froze at the preloaded transition")))
+    return false;
+  player.pause();
+  project.clips = {{2, 1, 3000, 6000, 1}};
+  project.transitions.clear();
+  player.setProject(project, 500);
+  return check(
+      QTest::qWaitFor(
+          [&] {
+            if (player.seekPending())
+              return false;
+            for (const auto *decoder : decoders)
+              if (decoder->playbackState() == QMediaPlayer::PlayingState)
+                return false;
+            return true;
+          },
+          5000),
+      error,
+      QStringLiteral("an unused decoder kept running after a project edit"));
+}
+
+bool runResponsiveScrubChecks(const QString &source, QString &error) {
+  StudioWindow window(source);
+  window.show();
+  auto *timeline = window.findChild<StudioTimeline *>();
+  auto *player = window.findChild<StudioPlayback *>();
+  auto *preview = window.findChild<StudioPreview *>();
+  if (!check(QTest::qWaitFor(
+                 [&] {
+                   return player->duration() == 6000 && !player->seekPending();
+                 },
+                 10000),
+             error, QStringLiteral("scrub fixture did not prepare")))
+    return false;
+  QSignalSpy requests(player, &StudioPlayback::positionChanged);
+  QSignalSpy prepared(preview, &StudioPreview::videoFrameReady);
+  // Deliberately delay frame preparation beyond the 35 ms mouse timer.
+  // New pointer positions must not invalidate the one in-flight frame.
+  auto *pool = QThreadPool::globalInstance();
+  const int originalThreads = pool->maxThreadCount();
+  pool->setMaxThreadCount(1);
+  QSemaphore gate;
+  std::atomic_bool blocked = false;
+  auto blocker = QtConcurrent::run([&] {
+    blocked.store(true);
+    gate.acquire();
+  });
+  const auto restore = qScopeGuard([&] {
+    gate.release();
+    blocker.waitForFinished();
+    pool->setMaxThreadCount(originalThreads);
+  });
+  if (!check(QTest::qWaitFor([&] { return blocked.load(); }, 5000), error,
+             QStringLiteral("could not delay scrub preparation")))
+    return false;
+  const auto point = [&](qint64 ms) {
+    return QPoint(64 + qRound((timeline->width() - 80) * ms / 6000.0), 60);
+  };
+  QTest::mousePress(timeline, Qt::LeftButton, {}, point(1000));
+  for (int i = 0; i < 12; ++i) {
+    QTest::mouseMove(timeline, point(1100 + i * 100));
+    QTest::qWait(20);
+  }
+  if (!check(requests.size() == 1 && prepared.isEmpty() &&
+                 (preview->videoSlotReady(0) || preview->videoSlotReady(1)),
+             error,
+             QStringLiteral(
+                 "dragging restarted pending decoding or blanked the preview")))
+    return false;
+  if (!check(QTest::qWaitFor([&] { return requests.size() >= 2; }, 1800), error,
+             QStringLiteral(
+                 "a stalled seek permanently blocked the latest drag target")))
+    return false;
+  gate.release();
+  blocker.waitForFinished();
+  pool->setMaxThreadCount(originalThreads);
+  // Continue moving with the button held, in both directions: prepared video
+  // must advance before release, not just the timeline's seek signals.
+  for (int i = 0; i < 60; ++i) {
+    QTest::mouseMove(timeline, point(1000 + (i % 20) * 150));
+    QTest::qWait(20);
+  }
+  if (!check(prepared.size() >= 3, error,
+             QStringLiteral("video frames did not update while dragging")))
+    return false;
+  QTest::mouseRelease(timeline, Qt::LeftButton, {}, point(4500));
+  return check(
+      QTest::qWaitFor(
+          [&] {
+            return qAbs(player->position() - 4500) < 30 &&
+                   !player->seekPending();
+          },
+          10000),
+      error,
+      QStringLiteral("scrubbing did not settle on the release position"));
+}
+
 bool runStudioInteractionChecks(QString &error) {
   const QString ffmpeg =
       QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
@@ -1031,6 +1216,10 @@ bool runStudioInteractionChecks(QString &error) {
     return false;
   }
   const QString palettePath = scratch.filePath(QStringLiteral("colors.toml"));
+  if (!runMultiClipReadinessChecks(source, error))
+    return false;
+  if (!runResponsiveScrubChecks(source, error))
+    return false;
   if (!runStudioExportUiChecks(source, error))
     return false;
   if (!runStudioPlaybackChecks(source, error))

@@ -22,8 +22,15 @@ public:
   explicit StudioPlayback(StudioPreview *preview, QObject *parent = nullptr);
   void setProject(const StudioProject &project, qint64 desiredPosition = -1);
   void setPosition(qint64 milliseconds);
+  /** Interactive seeks are serialized by the window until preparation finishes.
+   */
+  void scrubTo(qint64 milliseconds);
+  [[nodiscard]] bool seekPending() const;
+  [[nodiscard]] bool canScrub() const;
   [[nodiscard]] qint64 position() const { return position_; }
-  [[nodiscard]] qint64 duration() const { return studioDuration(project_); }
+  [[nodiscard]] qint64 duration() const {
+    return spans_.isEmpty() ? 0 : spans_.last().endMs;
+  }
   void play();
   void pause();
   void stop();
@@ -49,6 +56,7 @@ private:
     QVideoSink *sink = nullptr;
     QAudioOutput *audio = nullptr;
     quint64 clipId = 0;
+    quint64 loadGeneration = 0;
     QString path;
     QString error;
     qint64 seekMs = 0;
@@ -58,7 +66,8 @@ private:
     QVideoFrame frame;
   };
   void loadSlot(int index, const StudioFrame &frame);
-  void seekSlot(int index, qint64 sourceMs);
+  void seekSlot(int index, qint64 sourceMs, bool retainFrame = false);
+  void seekPosition(qint64 milliseconds, bool retainFrame);
   void preload();
   void present(int index, const QVideoFrame &frame, bool cached = false);
   void tick();
@@ -69,6 +78,7 @@ private:
   void synchronize();
   [[nodiscard]] const StudioSpan *nextSpan() const;
   [[nodiscard]] bool contributing(int index) const;
+  [[nodiscard]] const std::optional<StudioBlend> &currentBlend() const;
   [[nodiscard]] const StudioSpan *spanFor(quint64 clipId) const;
   StudioPreview *preview_;
   StudioProject project_;
@@ -77,10 +87,14 @@ private:
   QAudioOutput *audio_;
   QTimer timer_;
   QElapsedTimer frameClock_;
+  QElapsedTimer seekClock_;
+  mutable qint64 blendTime_ = -1;
+  mutable std::optional<StudioBlend> blend_;
   qint64 frameClockPosition_ = 0;
   int active_ = 0;
   qint64 position_ = 0;
   double rate_ = 1.0;
   bool waiting_ = false;
+  std::array<bool, 2> prepared_{};
   QMediaPlayer::PlaybackState state_ = QMediaPlayer::StoppedState;
 };

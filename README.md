@@ -316,6 +316,9 @@ to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.
 Drag a selected scene's edges to trim it, or use the
 Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
 Earlier/Later offer precise reorder buttons. Each operation is undoable.
+Playback reuses prepared frames at hard cuts and keeps an unchanged preview
+visible when adding or duplicating scenes. Seeking back to a cached clip checks
+its actual frame timestamp; background thumbnail decoding uses bounded threads.
 Zooms follow scene content, and duplicates have independent edits. Structural
 scene edits reset the project export range to include the whole composition.
 `I`/`O`/`R` still set/reset that project-wide range, not individual scene trims.

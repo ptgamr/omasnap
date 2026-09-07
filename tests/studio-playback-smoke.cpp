@@ -278,6 +278,79 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
   striped.source.durationMs = 3000;
   original.assets = {striped};
   original.clips = {{1, 1, 0, 3000, 1.0}};
+  // A parked decoder may have played beyond its original preload/seek target.
+  // Revisit that target after another clip: compare pixels, not just the clock.
+  StudioProject duplicates = original;
+  duplicates.clips = {
+      {1, 1, 0, 3000, 1.0}, {2, 1, 0, 3000, 1.0}, {3, 1, 0, 3000, 1.0}};
+  playback.setProject(duplicates, 3800);
+  if (!require(QTest::qWaitFor([&] { return pixelsMatch(0, false); }, 4000),
+               "duplicate middle clip did not seek to red"))
+    return false;
+  playback.play();
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     return playback.position() > 4200 && pixelsMatch(1, false);
+                   },
+                   4000),
+               "duplicate middle clip did not play into green"))
+    return false;
+  playback.pause();
+  if (!require(seekAndCheck(300, 0, false),
+               "return to first duplicate went blank") ||
+      !require(seekAndCheck(3800, 0, false),
+               "revisited duplicate reused its old playback frame"))
+    return false;
+  // Match the reported three-scene failure: while the middle duplicate plays,
+  // its other decoder preloads a DIFFERENT file. Seeking back must replace
+  // that file and seek after the new source actually finishes loading. Qt
+  // reports LoadedMedia for the old source while stopping it during replacement.
+  duplicates.assets.append(mixed.assets[1]);
+  duplicates.clips[2] = {3, 2, 0, 1000, 1.0};
+  playback.setProject(duplicates, 4400);
+  if (!require(QTest::qWaitFor([&] {
+                 return !playback.seekPending() && preview.videoSlotReady(0) &&
+                        preview.videoSlotReady(1);
+               }, 4000), "mixed-source duplicate preloads did not settle"))
+    return false;
+  playback.play();
+  if (!require(QTest::qWaitFor([&] { return playback.position() > 4600; }, 3000),
+               "middle duplicate did not advance before backward seek"))
+    return false;
+  playback.pause();
+  playback.scrubTo(2300);
+  auto *reloadedSink = playback.activePlayer()->videoSink();
+  QSignalSpy reloadedFrames(reloadedSink, &QVideoSink::videoFrameChanged);
+  if (!require(QTest::qWaitFor([&] {
+                 for (const auto &args : reloadedFrames)
+                   if (args[0].value<QVideoFrame>().isValid())
+                     return true;
+                 return false;
+               }, 4000), "backward source replacement produced no frame"))
+    return false;
+  QVideoFrame firstReloaded;
+  for (const auto &args : reloadedFrames) {
+    const auto frame = args[0].value<QVideoFrame>();
+    if (frame.isValid()) {
+      firstReloaded = frame;
+      break;
+    }
+  }
+  // Qt may deliver the frame ending exactly at the target first. That is a
+  // correctly dispatched seek too; distinguish it from decoding from zero.
+  if (!require(firstReloaded.startTime() >= 2200000 &&
+                   firstReloaded.startTime() <= 2400000,
+               "source replacement decoded from zero instead of seek target") ||
+      !require(QTest::qWaitFor([&] {
+                 return !playback.seekPending() && pixelsMatch(2, false);
+               }, 4000), "paused backward seek left the preview blank"))
+    return false;
+  // A backend can report a decode error without changing BufferedMedia.
+  // Reloading that same file must not leave loaded=false forever.
+  for (auto *decoder : playback.findChildren<QMediaPlayer *>())
+    decoder->errorOccurred(QMediaPlayer::ResourceError,
+                           QStringLiteral("simulated mid-file decode failure"));
+  failures.clear();
   playback.setProject(original);
   if (!require(seekAndCheck(1500, 1, false),
                "uncut source did not show the green middle passage"))

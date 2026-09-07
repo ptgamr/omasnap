@@ -4,6 +4,14 @@
 #include <QUrl>
 #include <cmath>
 
+namespace {
+bool containsTime(const QVideoFrame &frame, qint64 milliseconds) {
+  return frame.isValid() && frame.startTime() >= 0 &&
+         frame.startTime() <= milliseconds * 1000 &&
+         frame.endTime() > milliseconds * 1000;
+}
+} // namespace
+
 StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
     : QObject(parent), preview_(preview), audio_(new QAudioOutput(this)) {
   for (int index = 0; index < 2; ++index) {
@@ -18,16 +26,28 @@ StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
     connect(slot.player, &QMediaPlayer::mediaStatusChanged, this,
             [this, index](QMediaPlayer::MediaStatus status) {
               auto &current = slots_[index];
+              if (status == QMediaPlayer::LoadingMedia) {
+                // Replacing a source can synchronously report LoadedMedia
+                // while stopping the OLD source, before LoadingMedia for the
+                // new one. Retire that callback: seeking during LoadingMedia
+                // is ignored by the backend, leaving a nonzero seek decoding
+                // from zero with every frame rejected until it catches up.
+                current.loaded = false;
+                ++current.loadGeneration;
+                return;
+              }
               // LoadedMedia also occurs during seeks; prime once per source,
               // not once per status event, or each seek queues another seek.
               if (status == QMediaPlayer::LoadedMedia && !current.loaded) {
                 current.loaded = true;
+                const quint64 generation = current.loadGeneration;
                 // Loading completion can restore a pause requested while the
                 // source was loading. Start the seek after that callback has
                 // returned, or Qt can override play() before producing a frame.
-                QTimer::singleShot(0, this, [this, index] {
+                QTimer::singleShot(0, this, [this, index, generation] {
                   auto &loaded = slots_[index];
-                  if (!loaded.loaded || !loaded.awaitingSeek)
+                  if (!loaded.loaded || !loaded.awaitingSeek ||
+                      loaded.loadGeneration != generation)
                     return;
                   seekSlot(index, loaded.seekMs);
                   if (index == active_)
@@ -53,8 +73,10 @@ StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
   connect(audio_, &QAudioOutput::volumeChanged, this,
           [this] { updateAudio(); });
   connect(audio_, &QAudioOutput::mutedChanged, this, [this] { updateAudio(); });
-  connect(preview_, &StudioPreview::videoFrameReady, this,
-          [this](int) { synchronize(); });
+  connect(preview_, &StudioPreview::videoFrameReady, this, [this](int index) {
+    prepared_[index] = true;
+    synchronize();
+  });
   timer_.setInterval(10);
   timer_.setTimerType(Qt::PreciseTimer);
   connect(&timer_, &QTimer::timeout, this, &StudioPlayback::tick);
@@ -82,8 +104,32 @@ void StudioPlayback::setProject(const StudioProject &project,
   const bool mediaChanged = project_.clips != project.clips ||
                             project_.assets != project.assets ||
                             project_.transitions != project.transitions;
+  const qint64 target = desiredPosition >= 0 ? desiredPosition : position_;
+  const auto before = studioFrameAt(project_, position_);
+  const auto after = studioFrameAt(project, target);
+  const auto clip = [](const StudioProject &p,
+                       quint64 id) -> const StudioClip * {
+    for (const auto &item : p.clips)
+      if (item.id == id)
+        return &item;
+    return nullptr;
+  };
+  bool keepCurrent = false;
+  if (before && after && before->span.clipId == after->span.clipId &&
+      before->sourceMs == after->sourceMs && !currentBlend() &&
+      !studioBlendAt(project, target) && prepared_[active_] &&
+      slots_[active_].loaded && slots_[active_].error.isEmpty() &&
+      preview_->videoSlotReady(active_) && slots_[active_].frame.isValid()) {
+    const auto *oldAsset = studioAsset(project_, before->span.assetId);
+    const auto *newAsset = studioAsset(project, after->span.assetId);
+    const auto *oldClip = clip(project_, before->span.clipId);
+    const auto *newClip = clip(project, after->span.clipId);
+    keepCurrent = oldAsset && newAsset && *oldAsset == *newAsset && oldClip &&
+                  newClip && *oldClip == *newClip;
+  }
   project_ = project;
   spans_ = studioComposition(project_);
+  blendTime_ = -1;
   preview_->setTrack(&project_.zoom);
   preview_->setStyle(project_.style);
   preview_->setCanvasSize(project_.canvas);
@@ -91,6 +137,7 @@ void StudioPlayback::setProject(const StudioProject &project,
   if (spans_.isEmpty()) {
     stop();
     for (auto &slot : slots_) {
+      ++slot.loadGeneration;
       slot.clipId = 0;
       slot.path.clear();
       slot.frame = {};
@@ -103,12 +150,28 @@ void StudioPlayback::setProject(const StudioProject &project,
     // The visible frame may belong to a passage the command just deleted.
     // Do not keep displaying it while the replacement source seek decodes.
     // Ordinary playback cuts do not take this project-edit path.
-    preview_->clearFrame();
-    for (auto &slot : slots_) {
-      if (slot.loaded)
-        slot.player->pause();
+    for (int index = 0; index < 2; ++index) {
+      if (keepCurrent && index == active_)
+        continue;
+      auto &slot = slots_[index];
+      ++slot.loadGeneration;
+      slot.player->pause();
       slot.clipId = 0;
       slot.frame = {};
+      slot.priming = false;
+      slot.awaitingSeek = false;
+      prepared_[index] = false;
+      preview_->clearVideoSlot(index);
+    }
+    if (keepCurrent) {
+      position_ = target;
+      frameClockPosition_ = target;
+      frameClock_.restart();
+      refreshComposition();
+      preload();
+      synchronize();
+      emit positionChanged(position_);
+      return;
     }
     setPosition(
         qMin(desiredPosition >= 0 ? desiredPosition : position_, duration()));
@@ -120,12 +183,15 @@ void StudioPlayback::setProject(const StudioProject &project,
 }
 
 void StudioPlayback::loadSlot(int index, const StudioFrame &frame) {
+  prepared_[index] = false;
   auto &slot = slots_[index];
+  ++slot.loadGeneration;
   const auto *asset = studioAsset(project_, frame.span.assetId);
   if (!asset)
     return;
   if (slot.loaded)
     slot.player->pause();
+  const bool failed = !slot.error.isEmpty();
   slot.error.clear();
   slot.clipId = frame.span.clipId;
   slot.frame = {};
@@ -134,12 +200,15 @@ void StudioPlayback::loadSlot(int index, const StudioFrame &frame) {
   slot.seekMs = frame.sourceMs;
   slot.awaitingSeek = true;
   slot.player->setPlaybackRate(frame.span.speed * rate_);
-  if (slot.path != asset->path ||
+  const bool needsReload =
+      failed || (!slot.loaded &&
+                 slot.player->mediaStatus() != QMediaPlayer::LoadingMedia);
+  if (slot.path != asset->path || needsReload ||
       slot.player->mediaStatus() == QMediaPlayer::NoMedia ||
       slot.player->mediaStatus() == QMediaPlayer::InvalidMedia) {
     slot.loaded = false;
     slot.path = asset->path;
-    if (slot.player->mediaStatus() == QMediaPlayer::InvalidMedia)
+    if (slot.player->source() == QUrl::fromLocalFile(slot.path))
       slot.player->setSource({});
     slot.player->setSource(QUrl::fromLocalFile(slot.path));
   } else {
@@ -147,24 +216,59 @@ void StudioPlayback::loadSlot(int index, const StudioFrame &frame) {
   }
 }
 
-void StudioPlayback::seekSlot(int index, qint64 sourceMs) {
+void StudioPlayback::seekSlot(int index, qint64 sourceMs, bool retainFrame) {
   auto &slot = slots_[index];
   slot.seekMs = sourceMs;
   slot.awaitingSeek = true;
   slot.frame = {};
-  preview_->clearVideoSlot(index);
+  prepared_[index] = false;
+  if (!retainFrame)
+    preview_->clearVideoSlot(index);
+  else
+    preview_->invalidatePendingFrames(index);
   if (slot.loaded) {
-    slot.player->setPosition(sourceMs);
     slot.priming = true;
     updateAudio();
-    slot.player->play();
+    slot.player->setPosition(sourceMs);
+    if (slot.priming)
+      slot.player->play();
   }
 }
 
 void StudioPlayback::setPosition(qint64 milliseconds) {
+  seekPosition(milliseconds, false);
+}
+
+void StudioPlayback::scrubTo(qint64 milliseconds) {
+  seekPosition(milliseconds, true);
+}
+
+bool StudioPlayback::seekPending() const {
+  if (spans_.isEmpty())
+    return false;
+  for (int index = 0; index < 2; ++index)
+    if (contributing(index) && slots_[index].error.isEmpty() &&
+        (slots_[index].awaitingSeek || !prepared_[index]))
+      return true;
+  return false;
+}
+
+bool StudioPlayback::canScrub() const {
+  // A lost/failed frame must not permanently lock out the latest user target.
+  // Normal seeks finish first; a stalled one can be superseded after one
+  // second.
+  return !seekPending() ||
+         (seekClock_.isValid() && seekClock_.elapsed() >= 1000);
+}
+
+void StudioPlayback::seekPosition(qint64 milliseconds, bool retainFrame) {
+  seekClock_.start();
+  const qint64 target = qBound<qint64>(0, milliseconds, duration());
+  retainFrame =
+      retainFrame && !currentBlend() && !studioBlendAt(project_, target);
   frameClock_.invalidate();
   waiting_ = state_ == QMediaPlayer::PlayingState;
-  position_ = qBound<qint64>(0, milliseconds, duration());
+  position_ = target;
   if (position_ == duration() && state_ == QMediaPlayer::PlayingState)
     pause();
   if (spans_.isEmpty()) {
@@ -174,7 +278,6 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
   const auto frame = studioFrameAt(project_, qMin(position_, duration() - 1));
   if (!frame)
     return;
-  preview_->invalidatePendingFrames();
   if (slots_[active_].clipId != frame->span.clipId) {
     if (slots_[active_].loaded)
       slots_[active_].player->pause();
@@ -183,15 +286,17 @@ void StudioPlayback::setPosition(qint64 milliseconds) {
     active_ = incoming;
     if (!preloaded)
       loadSlot(active_, *frame);
-    else if (qAbs(slots_[active_].seekMs - frame->sourceMs) > 1)
+    // seekMs records a request, not where this decoder stopped after playing.
+    // Reusing it can show a later frame (or skip the requested clip entirely).
+    else if (!containsTime(slots_[active_].frame, frame->sourceMs))
       seekSlot(active_, frame->sourceMs);
     if (const auto *asset = studioAsset(project_, frame->span.assetId))
       preview_->setRotation(asset->source.rotation);
     emit activeClipChanged(frame->span.clipId);
   } else {
-    seekSlot(active_, frame->sourceMs);
+    seekSlot(active_, frame->sourceMs, retainFrame);
   }
-  const auto blend = studioBlendAt(project_, qMin(position_, duration() - 1));
+  const auto blend = currentBlend();
   if (blend) {
     const int other = 1 - active_;
     if (slots_[other].clipId != blend->incoming.span.clipId)
@@ -227,6 +332,14 @@ void StudioPlayback::preload() {
   const int other = 1 - active_;
   if (next && slots_[other].clipId != next->clipId)
     loadSlot(other, StudioFrame{*next, next->inMs});
+  else if (!next) {
+    // A previous project or seek may have left this decoder priming. It is
+    // not contributing and has no next clip to prepare; do not decode to EOF.
+    auto &unused = slots_[other];
+    unused.awaitingSeek = false;
+    unused.priming = false;
+    unused.player->pause();
+  }
   updateAudio();
 }
 
@@ -253,9 +366,9 @@ void StudioPlayback::present(int index, const QVideoFrame &frame, bool cached) {
   if (slot.awaitingSeek &&
       (endMs <= slot.seekMs || sourceMs > slot.seekMs + 100))
     return;
-  slot.awaitingSeek = false;
   if (endMs <= span->inMs || sourceMs >= span->outMs)
     return;
+  slot.awaitingSeek = false;
   slot.frame = frame;
   if (slot.priming) {
     slot.priming = false;
@@ -321,8 +434,11 @@ void StudioPlayback::tick() {
 
 void StudioPlayback::finishSpan(const StudioSpan &span) {
   const auto *next = nextSpan();
-  if (next && next->startMs < span.endMs &&
+  if (next && next->startMs <= span.endMs &&
       slots_[1 - active_].clipId == next->clipId &&
+      !slots_[1 - active_].awaitingSeek && prepared_[1 - active_] &&
+      (next->startMs < span.endMs ||
+       containsTime(slots_[1 - active_].frame, next->inMs)) &&
       preview_->videoSlotReady(1 - active_)) {
     const qint64 boundary = span.endMs;
     slots_[active_].player->pause();
@@ -340,15 +456,23 @@ void StudioPlayback::finishSpan(const StudioSpan &span) {
   }
 }
 
+const std::optional<StudioBlend> &StudioPlayback::currentBlend() const {
+  if (blendTime_ != position_) {
+    blend_ = studioBlendAt(project_, position_);
+    blendTime_ = position_;
+  }
+  return blend_;
+}
+
 bool StudioPlayback::contributing(int index) const {
   if (index == active_)
     return true;
-  const auto blend = studioBlendAt(project_, position_);
+  const auto &blend = currentBlend();
   return blend && slots_[index].clipId == blend->incoming.span.clipId;
 }
 
 void StudioPlayback::refreshComposition() {
-  const auto blend = studioBlendAt(project_, position_);
+  const auto &blend = currentBlend();
   preview_->setComposition(active_, blend ? 1 - active_ : -1,
                            blend ? blend->kind
                                  : StudioTransitionKind::Crossfade,
@@ -370,8 +494,8 @@ void StudioPlayback::synchronize() {
   const bool wasWaiting = waiting_;
   waiting_ = false;
   for (int i = 0; i < 2; ++i)
-    if (contributing(i) &&
-        (slots_[i].awaitingSeek || !preview_->videoSlotReady(i)))
+    if (contributing(i) && (slots_[i].awaitingSeek || !prepared_[i] ||
+                            !preview_->videoSlotReady(i)))
       waiting_ = true;
   if (waiting_)
     frameClock_.invalidate();
@@ -439,7 +563,7 @@ void StudioPlayback::setPlaybackRate(double rate) {
 }
 
 void StudioPlayback::updateAudio() {
-  const auto blend = studioBlendAt(project_, position_);
+  const auto &blend = currentBlend();
   for (int i = 0; i < 2; ++i) {
     const double gain = blend ? (i == active_ ? blend->outgoingAudioGain
                                               : blend->incomingAudioGain)

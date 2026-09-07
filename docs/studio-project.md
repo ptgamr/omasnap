@@ -76,6 +76,31 @@ Undoing an import removes references only; it never deletes a media file.
 
 In Select mode, plain dragging on scene bodies or the ruler scrubs continuously.
 Ctrl+drag reorders scene bodies; selected scene edges still trim.
+Drag seeks keep one latest pending target and wait for the current frame's
+decode/preparation to finish before dispatching another. Same-clip scrubbing
+retains the last prepared picture while waiting. A stalled seek can be
+superseded after one second so mouse seeking cannot remain locked out. Only
+the affected decoder's preparation is invalidated; unrelated preloads survive.
+Playback and scrubbing both wait for the newly prepared frame, not merely a
+retained older picture. Cached clip reuse checks actual frame timestamps.
+
+Composition edits preserve the visible frame only when its clip, source asset,
+source range, speed, and mapped source position remain unchanged, its decoder
+is healthy, and neither position is in a transition. Other edits still clear
+stale material. Unused
+decoders are paused and their priming state is retired. Prepared hard cuts
+reuse the incoming frame without an extra seek/copy. Playback caches duration
+and the current blend lookup; thumbnail decode/filter threads are bounded.
+Deferred source-ready callbacks are scoped to their load generation. Reusing a
+slot for a different source retires callbacks when LoadingMedia begins: Qt can
+report LoadedMedia for the old source while stopping it, and a seek dispatched
+before the replacement finishes loading would otherwise decode from zero.
+Regression coverage checks the first decoded timestamp after a paused backward
+seek from a duplicate whose next scene preloads a different source.
+Reusing a decoder after a backend error reloads its source, even if Qt's media status
+still says BufferedMedia. Regression checks cover stale cached timestamps,
+delayed incoming preparations, stalled-scrub recovery, unchanged-frame retention,
+inactive decoder parking, and same-source error recovery.
 The Clip inspector offers source in/out
 milliseconds, Duplicate, Earlier, and Later as precise alternatives. I/O/R
 continue to control the project-wide review/export range, not the selected scene.

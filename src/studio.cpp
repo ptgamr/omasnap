@@ -1337,7 +1337,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           });
   connect(player_, &StudioPlayback::positionChanged, this,
           [this](qint64 position) {
-            timeline_->setPosition(position);
+            if (pendingSeek_ < 0)
+              timeline_->setPosition(position);
             // Not the preview: its clock comes from the frame being painted,
             // and two writers with no ordering between them meant whichever
             // signal arrived last decided the crop.
@@ -1386,9 +1387,15 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   scrubTimer_->setInterval(35);
   connect(scrubTimer_, &QTimer::timeout, this, [this] {
     if (pendingSeek_ >= 0) {
+      // Do not restart decoding faster than it can produce a prepared frame.
+      // Keep one latest target while the in-flight seek completes.
+      if (!player_->canScrub()) {
+        scrubTimer_->start();
+        return;
+      }
       const qint64 position = pendingSeek_;
       pendingSeek_ = -1;
-      seekTo(position);
+      player_->scrubTo(position);
     }
   });
   // Probe and deserialize on a worker. The original media is never modified.
@@ -1748,7 +1755,9 @@ void StudioWindow::refreshThumbnails() {
       process.start(
           ffmpeg,
           {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-ss"),
-           studioTimecode(frame->sourceMs), QStringLiteral("-i"), asset->path,
+           studioTimecode(frame->sourceMs), QStringLiteral("-threads"),
+           QStringLiteral("1"), QStringLiteral("-filter_threads"),
+           QStringLiteral("1"), QStringLiteral("-i"), asset->path,
            QStringLiteral("-frames:v"), QStringLiteral("1"),
            QStringLiteral("-vf"),
            QStringLiteral("scale=160:90:force_original_aspect_ratio=decrease,"
@@ -1977,7 +1986,6 @@ void StudioWindow::seekBy(qint64 milliseconds) {
 void StudioWindow::seekTo(qint64 milliseconds) {
   scrubTimer_->stop();
   pendingSeek_ = -1;
-  preview_->invalidatePendingFrames();
   player_->setPosition(qBound<qint64>(0, milliseconds, timeline_->duration()));
 }
 
