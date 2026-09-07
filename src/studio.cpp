@@ -2317,14 +2317,19 @@ void StudioWindow::extendRangeSelection(int direction) {
   const auto stepFrom = [&](qint64 ms) { return ms + direction * kRangeStepMs; };
   qint64 anchor;
   qint64 edge;
+  // A range of one millisecond or less parks the playhead on both edges at
+  // once; there the key direction picks the moving edge, otherwise extending
+  // outward at a project boundary would clear the selection.
+  const bool degenerate = timeline_->hasRange() &&
+                          timeline_->rangeOut() - timeline_->rangeIn() <= 1;
   if (!timeline_->hasRange()) {
     anchor = pos;
     edge = stepFrom(pos);
-  } else if (pos <= timeline_->rangeIn()) {
+  } else if (pos <= timeline_->rangeIn() && (direction < 0 || !degenerate)) {
     // Parked on the start edge: move it exactly; the playhead is the edge.
     anchor = timeline_->rangeOut();
     edge = timeline_->rangeIn() + direction * kRangeStepMs;
-  } else if (pos >= timeline_->rangeOut() - 1) {
+  } else if (pos >= timeline_->rangeOut() - 1 && (direction > 0 || !degenerate)) {
     // Parked on the end edge (the shared seek bound keeps the playhead one
     // millisecond inside): move the edge itself so steps stay exact.
     anchor = timeline_->rangeIn();

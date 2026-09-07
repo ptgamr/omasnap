@@ -183,6 +183,26 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   QTest::keyClick(&window, Qt::Key_Escape);
   if (!require(!timeline->hasRange(), "Escape did not clear the keyboard range"))
     return false;
+  // Degenerate ranges at project boundaries: extending outward is a no-op,
+  // not a selection clear.
+  timeline->setRange(5999, 6000);
+  player->setPosition(5999);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 5999; }, 4000),
+               "playhead did not settle at the project end"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(timeline->hasRange() && timeline->rangeIn() == 5999 &&
+                  timeline->rangeOut() == 6000,
+               "outward key at the project end cleared the range"))
+    return false;
+  timeline->setRange(0, 1);
+  player->setPosition(0);
+  QTest::keyClick(&window, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(timeline->hasRange() && timeline->rangeIn() == 0 &&
+                  timeline->rangeOut() == 1,
+               "outward key at the project start cleared the range"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Escape);
   // The same chord inside a text field keeps its native word selection.
   auto *keys = new QLineEdit(&window);
   keys->setText("hello world");
