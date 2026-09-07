@@ -168,6 +168,8 @@ QPushButton#primary:enabled { background: @accent; color: @onAccent; border-colo
 QPushButton#primary:hover:enabled, QPushButton#primary:focus:enabled { border-color: @text; }
 QPushButton#primary:pressed:enabled { background: @text; color: @background; }
 QPushButton#play { min-width: 40px; }
+QProgressBar { background: @surface; border: 1px solid @border; border-radius: @radiuspx; min-height: 20px; text-align: center; }
+QProgressBar::chunk { background: @accent; }
 QSlider { border: 1px solid transparent; }
 QSlider::groove:horizontal { height: 3px; background: @border; border-radius: @radiuspx; }
 QSlider::sub-page:horizontal { background: @accent; }

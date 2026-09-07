@@ -68,6 +68,7 @@ no user-visible benefit.
 | `omarchy-notification-send` | Capture- and recording-finished notifications | No — falls back silently if absent (checked with `command -v` semantics via failed `QProcess::startDetached`) |
 | `gpu-screen-recorder` | The encoder behind `--record`, owned as one exact child with a private control socket | Only for recording; absent gives one actionable message and no recording |
 | `ffmpeg` | Remuxing the Matroska master to MP4 after a recording, and Studio composition export | No for recording (the `.mkv` is kept as-is); yes for a Studio export |
+| `xdg-open` | Studio's completed-export Open video / Open folder actions, launched on a worker | Optional; exported files can always be opened manually |
 
 Each of these is invoked through the same small `runProcess`/
 `QProcess::startDetached` helpers in `src/capture.cpp`, from a background

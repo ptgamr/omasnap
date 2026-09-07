@@ -28,6 +28,7 @@ set(STUDIO_SOURCES
   studio-video.cpp studio-video.hpp
   studio.cpp studio.hpp
   studio-scenes.cpp studio-transitions.cpp
+  studio-export.cpp studio-export.hpp
   studio-preview.cpp studio-preview.hpp
   zoom-track.cpp zoom-track.hpp
   overlay-chrome.cpp overlay-chrome.hpp

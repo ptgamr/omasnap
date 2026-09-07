@@ -3,6 +3,7 @@
  *  and drag behaviour. */
 #include "studio-composition-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
+#include "studio-export.hpp"
 #include "studio-playback-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio-preview.hpp"
@@ -24,10 +25,13 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QMediaPlayer>
 #include <QProcess>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSaveFile>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QStandardPaths>
@@ -819,6 +823,151 @@ bool runDirectionalPreviewChecks(QString &error) {
   return true;
 }
 
+bool runStudioExportUiChecks(const QString &fixture, QString &error) {
+  QTemporaryDir scratch;
+  const QString source =
+      scratch.filePath(QStringLiteral("recording with spaces.mp4"));
+  if (!QFile::copy(fixture, source))
+    return check(false, error, QStringLiteral("could not copy export fixture"));
+  StudioProject project;
+  project.assets = {{1, source, probeStudioSource(source)}};
+  project.clips = {{1, 1, 0, 6000, 1.0}};
+  project.canvas = {320, 180};
+  project.trimInMs = 1000;
+  project.trimOutMs = 3000;
+  const StudioProject original = project;
+  QWidget parent;
+  parent.setStyleSheet(StudioChrome{}.styleSheet());
+  parent.show();
+  const QString destination = studioExportPath(source);
+  // Success is persistent, accurate, and offers explicit open actions.
+  {
+    StudioExportDialog dialog(project, source, &parent);
+    dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+    QSignalSpy finished(&dialog, &StudioExportDialog::exportFinished);
+    auto *progress = dialog.findChild<QProgressBar *>("exportProgress");
+    QSignalSpy values(progress, &QProgressBar::valueChanged);
+    dialog.open();
+    if (!check(dialog.windowModality() == Qt::WindowModal &&
+                   QTest::qWaitFor([&] { return !finished.isEmpty(); }, 30000),
+               error, QStringLiteral("export modal did not finish")))
+      return false;
+    bool actualProgress = false;
+    for (const auto &value : values)
+      actualProgress |= value[0].toInt() > 0 && value[0].toInt() < 100;
+    if (!check(
+            !finished[0][1].toBool() && dialog.isVisible() &&
+                progress->value() == 100 && actualProgress &&
+                dialog.findChild<QLabel *>("exportPath")->text() ==
+                    destination &&
+                dialog.findChild<QPushButton *>("exportOpen")->isVisible() &&
+                dialog.findChild<QPushButton *>("exportFolder")->isVisible() &&
+                QFileInfo(destination).size() > 0 &&
+                qAbs(probeStudioSource(destination).durationMs - 2000) < 100,
+            error,
+            QStringLiteral("export completion/progress/path/range is wrong: %1")
+                .arg(dialog.findChild<QLabel *>("exportDetail")->text())))
+      return false;
+    // Exercise both launch actions without opening a real desktop application.
+    QFile opener(scratch.filePath(QStringLiteral("xdg-open")));
+    const QByteArray script(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$OMASNAP_EXPORT_OPEN_TEST\"\n");
+    if (!opener.open(QIODevice::WriteOnly) ||
+        opener.write(script) != script.size())
+      return check(false, error,
+                   QStringLiteral("could not create test opener"));
+    opener.close();
+    if (!opener.setPermissions(QFileDevice::ReadOwner |
+                               QFileDevice::WriteOwner | QFileDevice::ExeOwner))
+      return false;
+    const QByteArray oldPath = qgetenv("PATH");
+    const QByteArray oldCapture = qgetenv("OMASNAP_EXPORT_OPEN_TEST");
+    const auto restoreEnvironment = qScopeGuard([&] {
+      if (oldPath.isNull())
+        qunsetenv("PATH");
+      else
+        qputenv("PATH", oldPath);
+      if (oldCapture.isNull())
+        qunsetenv("OMASNAP_EXPORT_OPEN_TEST");
+      else
+        qputenv("OMASNAP_EXPORT_OPEN_TEST", oldCapture);
+    });
+    const QString capture = scratch.filePath(QStringLiteral("opened-paths"));
+    qputenv("PATH", scratch.path().toLocal8Bit() + ':' + oldPath);
+    qputenv("OMASNAP_EXPORT_OPEN_TEST", capture.toLocal8Bit());
+    QByteArray expected;
+    for (const auto &action : {qMakePair("exportOpen", destination),
+                               qMakePair("exportFolder", scratch.path())}) {
+      auto *button = dialog.findChild<QPushButton *>(action.first);
+      button->click();
+      expected += action.second.toUtf8() + '\n';
+      if (!check(QTest::qWaitFor(
+                     [&] {
+                       QFile captured(capture);
+                       return button->isEnabled() &&
+                              captured.open(QIODevice::ReadOnly) &&
+                              captured.readAll() == expected;
+                     },
+                     5000),
+                 error,
+                 QStringLiteral(
+                     "Open action did not launch the exact saved path")))
+        return false;
+    }
+    QTest::keyClick(&dialog, Qt::Key_Escape);
+    if (!check(!dialog.isVisible(), error,
+               QStringLiteral("Escape did not close finished export")))
+      return false;
+  }
+  const qint64 savedSize = QFileInfo(destination).size();
+  // Escape requests cancellation, waits for cleanup, and preserves prior
+  // output.
+  {
+    StudioExportDialog dialog(project, source, &parent);
+    dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+    QSignalSpy finished(&dialog, &StudioExportDialog::exportFinished);
+    dialog.open();
+    QTest::keyClick(&dialog, Qt::Key_Escape);
+    if (!check(
+            dialog.isVisible() &&
+                QTest::qWaitFor([&] { return !finished.isEmpty(); }, 10000) &&
+                dialog.findChild<QLabel *>("exportHeading")->text() ==
+                    "Export cancelled" &&
+                !dialog.findChild<QPushButton *>("exportOpen")->isVisible(),
+            error,
+            QStringLiteral(
+                "export cancellation did not retain its result modal")))
+      return false;
+  }
+  // Invalid media reports failure rather than a misleading completion or Open.
+  project.assets[0].path = scratch.filePath(QStringLiteral("missing.mp4"));
+  {
+    StudioExportDialog dialog(project, source, &parent);
+    dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+    QSignalSpy finished(&dialog, &StudioExportDialog::exportFinished);
+    dialog.open();
+    if (!check(
+            QTest::qWaitFor([&] { return !finished.isEmpty(); }, 10000) &&
+                finished[0][1].toBool() && dialog.isVisible() &&
+                dialog.findChild<QLabel *>("exportHeading")->text() ==
+                    "Export failed" &&
+                !dialog.findChild<QPushButton *>("exportOpen")->isVisible() &&
+                !dialog.findChild<QLabel *>("exportDetail")->text().isEmpty(),
+            error, QStringLiteral("failed export did not explain the failure")))
+      return false;
+  }
+  return check(
+      QFileInfo(destination).size() == savedSize &&
+          !QFileInfo::exists(studioExportPath(source)) &&
+          QDir(scratch.path())
+              .entryList({".omasnap-export-*"}, QDir::Files | QDir::Hidden)
+              .isEmpty() &&
+          original.assets[0].path == source &&
+          QFileInfo(source).size() == QFileInfo(fixture).size(),
+      error,
+      QStringLiteral("export left partial files or modified existing media"));
+}
+
 bool runStudioInteractionChecks(QString &error) {
   const QString ffmpeg =
       QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
@@ -836,6 +985,8 @@ bool runStudioInteractionChecks(QString &error) {
     return false;
   }
   const QString palettePath = scratch.filePath(QStringLiteral("colors.toml"));
+  if (!runStudioExportUiChecks(source, error))
+    return false;
   if (!runStudioPlaybackChecks(source, error))
     return false;
   if (!runStudioCutsUiChecks(source, error))

@@ -257,11 +257,6 @@ private:
   StudioPreview *preview_ = nullptr;
   StudioTimeline *timeline_ = nullptr;
   bool export_ = false;
-  struct ExportResult {
-    QString destination;
-    QString error;
-  };
-  QFutureWatcher<ExportResult> exportWatcher_;
   ZoomTrack zoom_;
   StudioStyle style_;
   StudioSource media_;

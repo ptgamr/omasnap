@@ -3,6 +3,7 @@
 
 #include "overlay-chrome.hpp"
 #include "studio-composition.hpp"
+#include "studio-export.hpp"
 #include "studio-playback.hpp"
 #include "studio-preview.hpp"
 
@@ -1448,17 +1449,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       close();
     }
   });
-  connect(&exportWatcher_, &QFutureWatcher<ExportResult>::finished, this,
-          [this] {
-            export_ = false;
-            const auto result = exportWatcher_.result();
-            setStatus(result.error.isEmpty()
-                          ? QStringLiteral("Saved %1")
-                                .arg(QFileInfo(result.destination).fileName())
-                          : result.error,
-                      !result.error.isEmpty());
-            refreshControls();
-          });
   refreshControls();
 }
 
@@ -2092,39 +2082,15 @@ void StudioWindow::startExport() {
   if (!exportButton_->isEnabled() || export_ || editGesture_)
     return;
   export_ = true;
-  const StudioProject snapshot = project_;
-  const QString sourcePath = path_;
-  exportWatcher_.setFuture(QtConcurrent::run([snapshot, sourcePath] {
-    ExportResult result;
-    const QString ffmpeg =
-        QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
-    if (ffmpeg.isEmpty()) {
-      result.error = QStringLiteral("ffmpeg is not installed");
-      return result;
-    }
-    result.destination = studioExportPath(sourcePath);
-    const auto arguments =
-        studioCompositionArguments(snapshot, result.destination, result.error);
-    if (arguments.isEmpty())
-      return result;
-    QProcess process;
-    process.start(ffmpeg, arguments);
-    if (!process.waitForFinished(3600000)) {
-      process.kill();
-      process.waitForFinished(1000);
-      result.error = QStringLiteral("Export timed out or could not start");
-    } else if (process.exitStatus() != QProcess::NormalExit ||
-               process.exitCode() != 0)
-      result.error = QStringLiteral("Export failed: %1")
-                         .arg(QString::fromUtf8(process.readAllStandardError())
-                                  .right(1000));
-    if (!result.error.isEmpty())
-      QFile::remove(result.destination);
-    else
-      QFile::setPermissions(result.destination,
-                            QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-    return result;
-  }));
+  player_->pause();
+  auto *dialog = new StudioExportDialog(project_, path_, this);
+  connect(dialog, &StudioExportDialog::exportFinished, this,
+          [this](const QString &message, bool failed) {
+            export_ = false;
+            setStatus(message, failed);
+            refreshControls();
+          });
+  dialog->open();
   setStatus(QStringLiteral("Exporting…"));
   refreshControls();
 }

@@ -346,6 +346,13 @@ video planes are prepared on a worker and rendered with OpenGL;
 only the newest pending frame is retained. Scrub requests are coalesced.
 Source probing, thumbnail generation, and saving edits also run off the UI thread.
 
+Export (`Ctrl+E`) opens a modal with encoding progress and a Cancel button
+(also `Esc`). On completion it shows the full saved path, with **Open video**
+and **Open folder** actions through `xdg-open`. The result stays visible until
+you close it; errors stay visible too. Exports are saved beside the source
+as `-trim.mp4` (numbered when needed). Partial exports are cleaned up on cancel
+or failure, and existing videos are never overwritten.
+
 What you see is what you get: the preview and the export are driven by the same
 model, and a golden test renders the same frames both ways across seven
 scenarios — one cue, adjacent cues, overlapping cues, a cue shorter than its own

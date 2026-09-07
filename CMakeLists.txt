@@ -231,6 +231,7 @@ qt_add_executable(omasnap-studio-smoke
   src/studio.cpp
   src/studio-scenes.cpp
   src/studio-transitions.cpp
+  src/studio-export.cpp src/studio-export.hpp
   src/studio.hpp
   src/studio-preview.cpp
   src/studio-preview.hpp
@@ -270,6 +271,7 @@ qt_add_executable(omasnap-studio
   src/studio.cpp
   src/studio-scenes.cpp
   src/studio-transitions.cpp
+  src/studio-export.cpp src/studio-export.hpp
   src/studio.hpp
   src/studio-preview.cpp
   src/studio-preview.hpp
