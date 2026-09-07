@@ -22,12 +22,13 @@ class QVideoSink;
 class StudioPreview;
 class StudioPlayback;
 
-/**
- * The trim band under the video: the whole recording as one bar, the kept
- * range lit, the playhead on top. Dragging the handles trims, dragging
- * anywhere else scrubs -- there is no separate scrollbar, because at this
- * size a second one would be a smaller target for the same job.
- */
+struct StudioThumbnail {
+  QString path;
+  qint64 sourceMs = 0;
+  QImage image;
+};
+
+/** Composition timeline with source-keyed thumbnail tiles and modeless gestures. */
 class StudioTimeline final : public QWidget {
   Q_OBJECT
 public:
@@ -41,7 +42,9 @@ public:
   void setSelectedCue(quint64 id);
   /** Whether cues can be moved or resized; off while an export runs. */
   void setCuesEditable(bool editable);
-  void setThumbnails(QVector<QImage> thumbnails);
+  void cacheThumbnail(StudioThumbnail thumbnail);
+  [[nodiscard]] QVector<StudioThumbnail> missingThumbnails() const;
+  void setThumbnailViewport(const QRectF &viewport);
   void setProject(const StudioProject *project) {
     project_ = project;
     update();
@@ -67,6 +70,7 @@ public:
   [[nodiscard]] QSize sizeHint() const override;
 
 signals:
+  void thumbnailViewChanged();
   void editStarted();
   void editFinished();
   void scrubbed(qint64 milliseconds);
@@ -95,8 +99,6 @@ protected:
 private:
   enum class Grab {
     None,
-    In,
-    Out,
     Playhead,
     CueBody,
     CueStart,
@@ -150,7 +152,19 @@ private:
   Grab grabbed_ = Grab::None;
   Grab hovered_ = Grab::None;
   bool cuesEditable_ = true;
-  QVector<QImage> thumbnails_;
+  struct ThumbnailTile {
+    QRectF rect;
+    QRectF clip;
+    QString path;
+    qint64 sourceMs;
+    qint64 inMs;
+    qint64 outMs;
+  };
+  [[nodiscard]] QVector<ThumbnailTile> thumbnailTiles(const QRectF &region) const;
+  [[nodiscard]] const QImage *thumbnailFor(const ThumbnailTile &tile) const;
+  void paintThumbnails(QPainter &painter, const QRectF &region) const;
+  QVector<StudioThumbnail> thumbnails_;
+  QRectF thumbnailViewport_;
   StudioChrome chrome_;
 };
 
@@ -201,9 +215,7 @@ private:
   [[nodiscard]] qint64 boundedSeek(qint64 milliseconds) const;
   void refreshSplitAction();
   void seekBy(qint64 milliseconds);
-  void setTrimIn();
-  void setTrimOut();
-  void resetTrim();
+  void keepSelection();
   void startExport();
   void setStatus(const QString &status, bool error = false);
   void refreshControls();
@@ -277,7 +289,7 @@ private:
   class QLabel *timeLabel_ = nullptr;
   class QPushButton *playButton_ = nullptr;
   class QPushButton *exportButton_ = nullptr;
-  class QPushButton *resetButton_ = nullptr;
+  class QPushButton *keepButton_ = nullptr;
   class QPushButton *addZoomButton_ = nullptr;
   class QPushButton *removeZoomButton_ = nullptr;
   class QSlider *zoomSlider_ = nullptr;
@@ -309,10 +321,9 @@ private:
   };
   QFutureWatcher<LoadedSource> loadWatcher_;
   QFutureWatcher<QString> saveWatcher_;
-  QFutureWatcher<QVector<QImage>> thumbnailWatcher_;
-  StudioProject thumbnailProject_;
-  bool thumbnailPending_ = false;
-  bool thumbnailsStarted_ = false;
+  QFutureWatcher<StudioThumbnail> thumbnailWatcher_;
+  bool thumbnailBusy_ = false;
+  class QTimer *thumbnailTimer_ = nullptr;
   bool saving_ = false;
   bool savePending_ = false;
   bool mediaFailed_ = false;

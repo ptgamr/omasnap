@@ -323,9 +323,19 @@ Earlier/Later offer precise reorder buttons. Each operation is undoable.
 Playback reuses prepared frames at hard cuts and keeps an unchanged preview
 visible when adding or duplicating scenes. Seeking back to a cached clip checks
 its actual frame timestamp; background thumbnail decoding uses bounded threads.
+Each clip has fixed-shape thumbnail tiles, shared through a source-time cache.
+Resizing retains reusable thumbnails; zooming requests finer visible samples
+without stretching the existing images or clearing the strip.
 Zooms follow scene content, and duplicates have independent edits. Structural
-scene edits reset the project export range to include the whole composition.
-`I`/`O`/`R` still set/reset that project-wide range, not individual scene trims.
+scene edits remain non-destructive. Studio exports the entire edited composition;
+there are no separate export handles or I/O/R trim shortcuts.
+
+**Timeline magnification.** **Scroll**
+over the timeline to zoom around the pointer (up to 16×). **Right-click + drag**
+to pan, or drag the horizontal scrollbar, which appears only when needed.
+Scroll out fully to fit the entire timeline. A right-click without dragging opens
+the context menu. This changes only the editing view, not
+the video's camera zoom, playback position, or saved project.
 
 **Transitions.** Click a timeline boundary badge (`+`, `F`, `B`, `W`, or `S`), or
 select a scene and press `T`. Choose Hard cut, Crossfade, Fade through black,
@@ -347,9 +357,10 @@ dragging now scrub only inside the selection. **Play/Space** plays and pauses
 within it, stopping at its end; press Play again there to replay from the start.
 **Home/End** jump to its first/last instant, and frame/five-second steps stay
 inside it too. **Escape** clears the selection and restores unrestricted seeking.
-The selection never changes the export range. Delete/Backspace removes it and
+Selecting alone never changes the export. The **scissors** button (Keep only selection) removes
+everything outside the range in one undoable edit. Delete/Backspace removes it and
 closes the gap in video and audio. Ctrl+Z restores the cut.
-`S` splits at the playhead; click a scene to select it, then
+The **split marker** button or `S` splits at the playhead; Ctrl+click a scene to select it, then
 Delete removes that scene. Undo restores the ranges, selection, and playhead,
 even after deleting the final scene. Buttons and a timeline context menu expose
 the same actions. Delete prioritizes a selected range, then the selected zoom
@@ -411,8 +422,10 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | `T` | Edit the selected scene's transition to its next neighbor |
 | `Left` / `Right` | Previous / next frame |
 | `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
-| `Home` / `End` | Go to selection start / last instant, or trim start / end |
-| `I` / `O` / `R` | Set trim start / end / reset trim |
+| `Home` / `End` | Go to selection start / last instant, or timeline start / end |
+| Scroll over timeline | Zoom timeline around pointer |
+| Right-click + drag | Pan timeline |
+| `Ctrl` + click a clip | Select clip without seeking |
 | `Z` | Add zoom at playhead |
 | `S` | Split scene at playhead |
 | `Delete` / `Backspace` | Delete selected range, clip, or zoom |

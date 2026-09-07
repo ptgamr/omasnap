@@ -138,7 +138,7 @@ void StudioWindow::refreshSceneControls() {
   earlierButton_->setEnabled(editable && index > 0);
   laterButton_->setEnabled(editable && index + 1 < project_.clips.size());
   if (!selected || !asset) {
-    sceneLabel_->setText(QStringLiteral("Select a scene on the video lane"));
+    sceneLabel_->setText(QStringLiteral("Ctrl+click a clip to see its filename and details"));
     return;
   }
   sceneLabel_->setText(

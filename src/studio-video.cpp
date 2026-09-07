@@ -205,6 +205,10 @@ void StudioVideoSurface::paintGL() {
     drawFrame(secondary, secondaryOpacity, true);
   program_.release();
   glActiveTexture(GL_TEXTURE0);
+  // Video planes use tightly packed rows, but Qt's glyph atlas uploads use
+  // the default four-byte row alignment. Leaking alignment 1 into QPainter
+  // scrambles glyphs whose padded row stride differs from their width.
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
   if (overlay) {
     QPainter painter(this);
     overlay(painter);

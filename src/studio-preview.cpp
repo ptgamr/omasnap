@@ -444,8 +444,10 @@ void StudioPreview::paintOverlay(QPainter &painter) const {
   }
 
   if (pickable_ && drawn.contains(hover_)) {
+    QColor hintBackground = chrome_.background;
+    hintBackground.setAlphaF(0.5);
     painter.fillRect(drawn.adjusted(0, drawn.height() - 26, 0, 0),
-                     chrome_.background);
+                     hintBackground);
     painter.setPen(chrome_.foreground);
     painter.setFont(font());
     painter.drawText(drawn.adjusted(0, 0, -10, -8),

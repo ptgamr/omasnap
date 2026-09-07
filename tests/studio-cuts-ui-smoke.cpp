@@ -1,9 +1,14 @@
 #include "studio-cuts-ui-smoke.hpp"
 #include "studio-playback.hpp"
 #include "studio.hpp"
+#include <QApplication>
 #include <QFile>
 #include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QWheelEvent>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -26,6 +31,43 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
           "cut UI source did not load"))
     return false;
   player->setPosition(5000);
+  auto *viewport = window.findChild<QScrollArea *>("timelineViewport");
+  const int fitWidth = timeline->width();
+  if (!require(!window.findChild<QPushButton *>("timelineZoomIn") &&
+                   !window.findChild<QPushButton *>("timelineZoomOut") &&
+                   !window.findChild<QPushButton *>("timelineZoomFit") &&
+                   !viewport->horizontalScrollBar()->isVisible(),
+               "obsolete zoom controls or unnecessary scrollbar remain")) return false;
+  const QPoint anchor(200, 60);
+  const double before = double(anchor.x() - 64) / (timeline->width() - 80);
+  QWheelEvent wheel(anchor, viewport->viewport()->mapToGlobal(anchor), QPoint(), QPoint(0, 120),
+                    Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(viewport->viewport(), &wheel);
+  const double after = double(viewport->horizontalScrollBar()->value() + anchor.x() - 64) /
+                       (timeline->width() - 80);
+  if (!require(timeline->width() > fitWidth && qAbs(before - after) < 0.002,
+               "plain wheel did not zoom around the pointer")) return false;
+  if (!require(QTest::qWaitFor([&] { return viewport->horizontalScrollBar()->isVisible(); }),
+               "zoomed timeline scrollbar did not appear")) return false;
+  const int beforePan = viewport->horizontalScrollBar()->value();
+  QTest::mousePress(timeline, Qt::RightButton, Qt::NoModifier, QPoint(300, 60));
+  QTest::mouseMove(timeline, QPoint(260, 60));
+  QTest::mouseRelease(timeline, Qt::RightButton, Qt::NoModifier, QPoint(260, 60));
+  if (!require(viewport->horizontalScrollBar()->value() > beforePan &&
+                   player->position() == 5000 && !timeline->hasRange(),
+               "right-drag did not pan without changing transport or selection")) return false;
+  for (auto *menu : timeline->findChildren<QMenu *>())
+    if (!require(!menu->isVisible(), "right-drag opened a context menu")) return false;
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, QPoint(300, 60));
+  auto *menu = timeline->findChild<QMenu *>();
+  if (!require(menu && menu->isVisible(), "right-click no longer opens the context menu")) return false;
+  menu->close();
+  QWheelEvent zoomOut(anchor, viewport->viewport()->mapToGlobal(anchor), QPoint(), QPoint(0, -1200),
+                      Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+  QApplication::sendEvent(viewport->viewport(), &zoomOut);
+  if (!require(QTest::qWaitFor([&] { return !viewport->horizontalScrollBar()->isVisible(); }) &&
+                   timeline->width() == fitWidth && viewport->horizontalScrollBar()->value() == 0,
+               "zooming out did not fit the timeline and hide its scrollbar")) return false;
   const auto point = [&](qint64 ms) {
     return QPoint(64 + qRound((timeline->width() - 80) * ms / 6000.0), 60);
   };
@@ -54,11 +96,16 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   for (auto *button : window.findChildren<QPushButton *>()) {
     if (button->text() == QStringLiteral("Select · V")) selectTool = button;
     if (button->text() == QStringLiteral("Range · B")) rangeTool = button;
-    if (button->text() == QStringLiteral("Split at playhead · S")) split = button;
+    if (button->objectName() == QStringLiteral("splitAtPlayhead")) split = button;
   }
   if (!require(!selectTool && !rangeTool && split && !split->isCheckable(),
                "obsolete mode buttons remain or split action is missing"))
     return false;
+  for (const auto *name : {"splitAtPlayhead", "deleteSelection", "keepSelection"}) {
+    auto *action = window.findChild<QPushButton *>(name);
+    if (!require(action && action->text().isEmpty() && !action->accessibleName().isEmpty() &&
+                     !action->toolTip().isEmpty(), "icon action lost its accessible name or tooltip")) return false;
+  }
   if (!require(player->position() == from && player->playbackState() == QMediaPlayer::PausedState,
                "range gesture did not park the playhead at its start")) return false;
   QTest::keyClick(&window, Qt::Key_End);
@@ -143,6 +190,13 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
   QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(3000));
+  if (!require(timeline->selectedClip() == 0, "plain click selected a clip")) return false;
+  if (!require(QTest::qWaitFor([&] { return qAbs(player->position() - 3000) < 20; }, 4000),
+               "plain click did not finish seeking")) return false;
+  const qint64 beforeSelect = player->position();
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::ControlModifier, point(3000));
+  if (!require(timeline->selectedClip() != 0 && player->position() == beforeSelect,
+               "Ctrl+click did not select without seeking")) return false;
   QTest::qWait(60);
   QTest::keyClick(&window, Qt::Key_Backspace);
   if (!require(player->duration() == 0,
@@ -160,6 +214,14 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
   if (!require(player->duration() == 6000 && player->position() < 6000 && !timeline->hasRange(),
                "old range constrained undo into a shorter project")) return false;
+  timeline->setRange(1000, 4000);
+  auto *keep = window.findChild<QPushButton *>("keepSelection");
+  QTest::mouseClick(keep, Qt::LeftButton);
+  if (!require(player->duration() == 3000 && player->position() == 0 && !timeline->hasRange(),
+               "Keep only selection did not trim both sides")) return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 6000 && timeline->rangeIn() == 1000 && timeline->rangeOut() == 4000,
+               "Keep only selection was not one undo step")) return false;
   // Editing a text field must not delete video or split scenes.
   auto *text = new QLineEdit(&window);
   text->setText("test");

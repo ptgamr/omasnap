@@ -71,12 +71,26 @@ No settings UI, theme hook, shell process, or new package is needed.
   New controls must not introduce fixed accent colors or arbitrary rounding.
 
 There are no Select/Range mode buttons: timeline gestures choose the operation.
-Split/Delete are non-checkable actions on the right. Keyboard focus uses a
+Split and Keep only selection are non-checkable actions on the left; Delete
+stays on the right. Their compact square buttons are 28 px with 18 px vector
+icons. Keyboard focus uses a
 dashed foreground border, distinct from a checked control's solid accent/fill.
 Shift+drag selects a range directly on the timeline; no separate numeric range
 panel or preview transport is shown. The ordinary transport reviews the selection.
 Ctrl+drag paints a cached clip card at the pointer, not a second
 decoder or a project edit per mouse move; dropping commits one history entry.
+There are no export-range handles. Keep only selection appears with a range
+as a scissors icon; Split uses a playhead between two clip halves and Delete
+uses a trash can. These are native scalable vectors in square buttons with
+theme colors, descriptive tooltips, and accessible names, without an SVG dependency.
+Keep only selection trims both sides as one undoable edit. Plain scrolling magnifies the editing
+view, without zoom buttons; right-button dragging pans. The square, theme-colored
+horizontal scrollbar appears only when needed. Timeline magnification is
+independent of video camera zoom.
+Timeline clips and their drag previews show thumbnails without filenames.
+Ctrl+click selects a clip; its filename remains in the Clip inspector.
+Clip selection uses an outline and edge handles, not a fill over thumbnails.
+The removed export-range controls do not tint the thumbnail strip.
 
 ## Verification
 

@@ -193,6 +193,11 @@ QTabBar::tab:hover { background: @hover; color: @text; }
 QTabBar:focus { border: 1px solid @accent; }
 QScrollArea { border: 0; background: transparent; }
 QScrollBar:vertical { background: @background; width: 8px; }
+QScrollBar:horizontal { background: @background; height: 10px; }
+QScrollBar::handle:horizontal { background: @border; border-radius: @radiuspx; min-width: 24px; }
+QScrollBar::handle:horizontal:hover { background: @accent; }
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: @background; }
 QScrollBar::handle:vertical { background: @border; border-radius: @radiuspx; min-height: 24px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: @background; }

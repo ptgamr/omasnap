@@ -7,7 +7,9 @@ The ordered composition has a separate clock. `studioComposition`,
 export; repeated uses of an asset remain distinct instances.
 
 The document also owns global project-time zoom cues, output dimensions/FPS,
-canvas styling, and an optional review/export range. The first source chooses
+canvas styling, and range fields used by the export engine. Studio normalizes
+these fields to the full composition when applying a project; there are no
+separate export-range controls. The first source chooses
 the output shape (even dimensions) and rational FPS. Each source fits a black
 project canvas before global zoom and styling. Preview follows source frame
 timestamps; export retimes then normalizes to the fixed project FPS.
@@ -85,6 +87,7 @@ Imports, ordering, duplicates, and source-edge trims share project history.
 Undoing an import removes references only; it never deletes a media file.
 
 Plain dragging on scene bodies or the ruler scrubs continuously.
+Plain clicks seek without selecting clips. Ctrl+click selects without seeking;
 Ctrl+drag reorders scene bodies; selected scene edges still trim.
 Drag seeks keep one latest pending target and wait for the current frame's
 decode/preparation to finish before dispatching another. Same-clip scrubbing
@@ -112,10 +115,34 @@ still says BufferedMedia. Regression checks cover stale cached timestamps,
 delayed incoming preparations, stalled-scrub recovery, unchanged-frame retention,
 inactive decoder parking, and same-source error recovery.
 The Clip inspector offers source in/out
-milliseconds, Duplicate, Earlier, and Later as precise alternatives. I/O/R
-continue to control the project-wide review/export range, not the selected scene.
-Structural scene edits reset that range to the full composition so newly added
-material is not silently excluded from export.
+milliseconds, Duplicate, Earlier, and Later as precise alternatives.
+Keep only selection cuts the tail then the head on a project copy and publishes
+both cuts as one undo step. A refused boundary leaves the document unchanged.
+Studio exports the full edited composition; selection alone only bounds playback.
+
+Timeline magnification is a view-only scroll area (1–16×), controlled by
+pointer-anchored plain scrolling, with no zoom buttons. The horizontal scrollbar
+appears only when the timeline exceeds the viewport. All gestures and drops retain the same full-timeline
+coordinate mapping. Right-button dragging or the horizontal scrollbar pans;
+a right-click without dragging retains the context menu. Zooming does not
+seek or re-decode playback video, change camera cues, or enter project history.
+
+Thumbnail tiles are per clip and remain 16:9 at every timeline magnification.
+Each tile samples its clip's source range/speed, independently of composition
+ordering. A source-path/time cache shares frames between duplicate clips and
+survives trims, moves, and zoom changes. While finer samples load, the nearest
+cached frame inside the retained source range stays visible; discarded frames
+and other assets are never used as fallbacks. Partial tiles are clipped rather
+than stretched. Transitions retain each contributing clip's thumbnail strip.
+
+Zoom, pan, and viewport resize debounce requests for the visible area by 120 ms.
+One bounded FFmpeg process runs on a worker at a time, publishing each image
+individually. No thumbnail strip is cleared when an edit starts, and no new
+decode is dispatched during a clip-edit gesture. Source times are quantized to
+100 ms and clamped inside the source range. The cache holds at most 512 160×90
+images (about 28 MiB), with at most 256 unique visible requests; failed samples
+are remembered to avoid retry loops. Thumbnail refinement is independent of
+the video playback decoder.
 
 Zooms follow retained scene content through source time. Duplicates receive new
 cue IDs; moved fragments keep an original ID on the first surviving original

@@ -16,6 +16,7 @@
 #include "zoom-track.hpp"
 
 #include <QApplication>
+#include <cstdio>
 #include <QAudioOutput>
 #include <QComboBox>
 #include <QDebug>
@@ -27,6 +28,8 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMediaPlayer>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
@@ -197,14 +200,13 @@ bool runTimelineChecks(QString &error) {
              error, QStringLiteral("scrubbing landed at the wrong time")))
     return false;
 
-  // Dragging the in handle past the out handle would invert the range; it
-  // stops short instead.
+  // The outer edges scrub now; there are no separate export trim handles.
   QSignalSpy trimmed(&timeline, &StudioTimeline::trimChanged);
   QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(64, 58));
   QTest::mouseMove(&timeline, QPoint(600, 58));
   QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(600, 58));
-  if (!check(!trimmed.isEmpty(), error,
-             QStringLiteral("dragging the in handle changed nothing")))
+  if (!check(trimmed.isEmpty(), error,
+             QStringLiteral("timeline edge still changed the export range")))
     return false;
   if (!check(timeline.trimIn() < timeline.trimOut(), error,
              QStringLiteral("the trim handles crossed")))
@@ -238,15 +240,15 @@ bool runTimelineChecks(QString &error) {
                      {{320, 180}, 30, 1, 0, false, 60000, 0}}};
   project.clips = {{1, 1, 0, 30000, 1.0}, {2, 1, 30000, 60000, 1.0}};
   timeline.setProject(&project);
-  QVector<QImage> thumbnails;
+  qint64 sampleTime = 0;
   for (const QColor &color : {QColor(Qt::red), QColor(Qt::green),
                               QColor(Qt::blue), QColor(Qt::yellow)}) {
-    QImage thumbnail(32, 18, QImage::Format_RGB32);
+    QImage thumbnail(160, 90, QImage::Format_RGB32);
     thumbnail.fill(color);
-    thumbnails.push_back(thumbnail);
+    timeline.cacheThumbnail({QStringLiteral("recording.mp4"), sampleTime, thumbnail});
+    sampleTime += 15000;
   }
-  timeline.setThumbnails(thumbnails);
-  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(130, 58));
+  QTest::mouseClick(&timeline, Qt::LeftButton, Qt::ControlModifier, QPoint(130, 58));
   const QImage selected = timeline.grab().toImage();
   const qreal dpr = selected.devicePixelRatio();
   const QColor red = selected.pixelColor(qRound(90 * dpr), qRound(75 * dpr));
@@ -274,6 +276,56 @@ bool runTimelineChecks(QString &error) {
              QStringLiteral(
                  "scrub release lost its final position or moved a scene")))
     return false;
+
+  // Per-source caches survive composition edits. Fixed-width tiles repeat
+  // while finer samples are pending, rather than stretching or going blank.
+  StudioTimeline tiled;
+  tiled.setFixedSize(400, 176);
+  StudioProject clips = project;
+  clips.assets[0].path = QStringLiteral("first.mp4");
+  auto secondAsset = clips.assets[0];
+  secondAsset.id = 2;
+  secondAsset.path = QStringLiteral("second.mp4");
+  clips.assets.push_back(secondAsset);
+  clips.clips[1].assetId = 2;
+  tiled.setProject(&clips);
+  tiled.setDuration(60000);
+  tiled.show();
+  QImage stripes(160, 90, QImage::Format_RGB32);
+  stripes.fill(Qt::red);
+  { QPainter paint(&stripes); paint.fillRect(QRect(80, 0, 80, 90), Qt::green); }
+  QImage blue(160, 90, QImage::Format_RGB32);
+  blue.fill(Qt::blue);
+  const auto initialRequests = tiled.missingThumbnails();
+  for (auto request : initialRequests) {
+    request.image = request.path == QStringLiteral("first.mp4") ? stripes : blue;
+    tiled.cacheThumbnail(request);
+  }
+  if (!check(!initialRequests.isEmpty() && tiled.missingThumbnails().isEmpty(), error,
+             QStringLiteral("thumbnail cache did not satisfy source-time requests"))) return false;
+  const auto pixels = [&] { return tiled.grab().toImage(); };
+  const auto sample = [](const QImage &shot, int x) {
+    return shot.pixelColor(qRound(x * shot.devicePixelRatio()), qRound(65 * shot.devicePixelRatio()));
+  };
+  const auto beforeEdit = pixels();
+  if (!check(sample(beforeEdit, 84).red() > 240 && sample(beforeEdit, 124).green() > 240 &&
+                 sample(beforeEdit, 164).red() > 240 && sample(beforeEdit, 250).blue() > 240,
+             error, QStringLiteral("per-clip thumbnail tiles stretched or used another asset"))) return false;
+  clips.clips[0].inMs = 5000;
+  tiled.setDuration(55000);
+  if (!check(sample(pixels(), 84).red() > 240, error,
+             QStringLiteral("resizing a clip cleared reusable source thumbnails"))) return false;
+  tiled.setFixedWidth(800);
+  tiled.setThumbnailViewport(QRectF(0, 0, 400, 176));
+  const auto finer = tiled.missingThumbnails();
+  const auto zoomed = pixels();
+  if (!check(!finer.isEmpty() && finer.size() <= 8 && sample(zoomed, 84).red() > 240 &&
+                 sample(zoomed, 124).green() > 240 && sample(zoomed, 164).red() > 240,
+             error, QStringLiteral("timeline zoom stretched tiles, blanked cache, or failed to request finer samples"))) return false;
+  for (const auto &request : finer)
+    tiled.cacheThumbnail(request); // Failed samples must not spin in a retry loop.
+  if (!check(tiled.missingThumbnails().isEmpty(), error,
+             QStringLiteral("failed thumbnail samples are retried indefinitely"))) return false;
 
   return true;
 }
@@ -304,8 +356,8 @@ int main(int argc, char **argv) {
                 {"zoom export agreement", runZoomExportGoldenChecks}};
   for (const auto &check : checks) {
     if (!check.run(error)) {
-      qWarning().noquote() << QStringLiteral("studio %1 smoke failed: %2")
-                                  .arg(QString::fromLatin1(check.name), error);
+      // Test failures must remain visible even if desktop Qt logging is disabled.
+      std::fprintf(stderr, "studio %s smoke failed: %s\n", check.name, qPrintable(error));
       return EXIT_FAILURE;
     }
   }
@@ -715,6 +767,18 @@ bool runGpuPreviewChecks(QString &error) {
     return false;
   surface.drawn = surface.rect();
   surface.canvas = surface.rect();
+  bool overlayCalled = false;
+  bool overlayAlignmentValid = true;
+  surface.overlay = [&](QPainter &painter) {
+    GLint alignment = 0;
+    QOpenGLContext::currentContext()->functions()->glGetIntegerv(
+        GL_UNPACK_ALIGNMENT, &alignment);
+    overlayCalled = true;
+    overlayAlignmentValid = overlayAlignmentValid && alignment == 4;
+    painter.setPen(Qt::white);
+    painter.drawText(QRect(10, 10, 300, 30), Qt::AlignLeft,
+                     QStringLiteral("click to aim the zoom"));
+  };
   for (const auto pixelFormat :
        {QVideoFrameFormat::Format_YUV420P, QVideoFrameFormat::Format_NV12}) {
     QVideoFrameFormat format(QSize(318, 180), pixelFormat);
@@ -736,6 +800,9 @@ bool runGpuPreviewChecks(QString &error) {
     frame.unmap();
     surface.setFrame(prepareStudioVideoFrame(frame));
     const QImage shot = surface.grabFramebuffer();
+    if (!check(overlayCalled && overlayAlignmentValid, error,
+               QStringLiteral("Video upload leaked row alignment into the text overlay")))
+      return false;
     const QColor center = shot.pixelColor(shot.width() / 2, shot.height() / 2);
     if (!check(center.red() > 245 && center.green() < 8 && center.blue() < 8,
                error,
@@ -1325,7 +1392,6 @@ bool runStudioInteractionChecks(QString &error) {
     return false;
   QTest::keyClick(padding, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
   QTest::keyClick(&window, Qt::Key_Right, Qt::ShiftModifier);
-  QTest::keyClick(&window, Qt::Key_O);
   // Closing while a debounced write is pending waits asynchronously for the
   // final edit to be committed. Reopening restores trim, zoom, and canvas.
   window.close();
@@ -1336,7 +1402,7 @@ bool runStudioInteractionChecks(QString &error) {
       loadStudioProject(source + QStringLiteral(".omasnap.json"));
   if (!check(saved.error.isEmpty() && saved.project.zoom.cues.size() == 1 &&
                  saved.project.style.padding == 8 &&
-                 saved.project.trimOutMs == 5000,
+                 saved.project.trimOutMs == -1,
              error,
              QStringLiteral(
                  "saved project does not match the last visible state")))
@@ -1353,7 +1419,7 @@ bool runStudioInteractionChecks(QString &error) {
                      return transport->duration() == 6000 &&
                             canvas->value() == 8 &&
                             reopened.findChild<StudioTimeline *>()->trimOut() ==
-                                5000;
+                                6000;
                    },
                    5000),
                error,
