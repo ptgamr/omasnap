@@ -46,13 +46,12 @@ public:
     project_ = project;
     update();
   }
-  void setRangeMode(bool enabled);
   void setRange(qint64 start, qint64 end);
   void setSelectedClip(quint64 id);
   void clearSelection();
-  [[nodiscard]] bool rangeMode() const { return rangeMode_; }
   [[nodiscard]] qint64 rangeIn() const { return rangeIn_; }
   [[nodiscard]] qint64 rangeOut() const { return rangeOut_; }
+  [[nodiscard]] bool hasRange() const { return rangeIn_ >= 0 && rangeOut_ > rangeIn_; }
   [[nodiscard]] quint64 selectedClip() const { return selectedClip_; }
   /** Drop location in the ordered scene list; zero means append. */
   [[nodiscard]] quint64 insertionBefore(qreal x) const;
@@ -77,6 +76,8 @@ signals:
   /** A cue was dragged or resized to a new span. */
   void cueMoved(quint64 id, qint64 startMs, qint64 endMs);
   void selectionChanged();
+  void rangeSelected();
+  void rangeSelectionStarted();
   void splitRequested();
   void deleteRequested();
   void sceneMoveRequested(quint64 id, quint64 before);
@@ -123,7 +124,6 @@ private:
 
   const ZoomTrack *track_ = nullptr;
   const StudioProject *project_ = nullptr;
-  bool rangeMode_ = false;
   qint64 rangeIn_ = -1;
   qint64 rangeOut_ = -1;
   qint64 rangeAnchor_ = 0;
@@ -198,8 +198,7 @@ private:
   void setSelectedZoomTiming(bool easeIn, int milliseconds);
   void styleChanged();
   void togglePlayback();
-  void playRange();
-  void goToRangeBoundary(bool end);
+  [[nodiscard]] qint64 boundedSeek(qint64 milliseconds) const;
   void refreshSplitAction();
   void seekBy(qint64 milliseconds);
   void setTrimIn();
@@ -253,16 +252,8 @@ private:
   class QSpinBox *sceneIn_ = nullptr;
   class QSpinBox *sceneOut_ = nullptr;
   quint64 nextClipId_ = 1;
-  class QPushButton *rangeButton_ = nullptr;
-  class QPushButton *selectButton_ = nullptr;
   class QPushButton *splitButton_ = nullptr;
   class QPushButton *deleteButton_ = nullptr;
-  QWidget *rangeControls_ = nullptr;
-  class QDoubleSpinBox *rangeStart_ = nullptr;
-  class QDoubleSpinBox *rangeEnd_ = nullptr;
-  class QLabel *rangeDuration_ = nullptr;
-  class QPushButton *playRangeButton_ = nullptr;
-  qint64 rangePlaybackEnd_ = -1;
   [[nodiscard]] StudioEditState editState() const;
 
   QString path_;

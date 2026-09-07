@@ -58,21 +58,22 @@ retimed boundary is refused instead of silently introducing timing drift.
 Cut results report effective endpoints and removed duration, which are also
 used to move the playhead. Ordinary 1x clips preserve requested millisecond cuts.
 
-Range selection is explicit (`B`); `V` selects clips/scrubs. Selection tools
+Shift+drag selects a range; plain dragging scrubs. Selection gestures
 and their hover/range state are not video edits. Video deletion requires an
 explicit range or clip; a selected zoom consumes Delete without deleting video.
 Text fields retain their normal editing shortcuts. Composition changes clear
 stale decoded frames so removed material cannot remain in the editing preview
 while the next valid source frame is being prepared.
 
-Selection review is independent of the persisted export range. Start/end fields
-edit selection milliseconds (displayed as decimal seconds), `[` seeks its start,
-and `]` seeks end minus one millisecond because selections are half-open.
-Shift+Space plays the selection once and stops inside that same end, including
-when it coincides with project EOF or extends past the export range. Ordinary
-Space, a new scrub, or a changed selection cancels bounded selection playback.
-Ruler scrubbing snaps within seven pixels of selection boundaries; Alt bypasses
-snapping. These selection/transport changes do not create project edits.
+Selection review is independent of the persisted export range. Shift+drag on
+the ruler or video lane selects in either direction; release parks the paused
+playhead at its start. Plain scrubbing preserves the selection. All timeline
+seeks and normal Play/Space stay within its half-open interval, including frame
+steps, Home/End, project EOF, and passages outside the export range. Playback
+stops at end minus one millisecond; Play there restarts at the selection start.
+Escape clears the selection and restores unrestricted seeking. Range gestures
+cancel pending scrubs so an older request cannot overwrite the selected start.
+Selection/transport changes do not create project edits.
 
 ## Scene arrangement
 
@@ -83,7 +84,7 @@ initial project's canvas/FPS remain fixed, including after deleting all clips.
 Imports, ordering, duplicates, and source-edge trims share project history.
 Undoing an import removes references only; it never deletes a media file.
 
-In Select mode, plain dragging on scene bodies or the ruler scrubs continuously.
+Plain dragging on scene bodies or the ruler scrubs continuously.
 Ctrl+drag reorders scene bodies; selected scene edges still trim.
 Drag seeks keep one latest pending target and wait for the current frame's
 decode/preparation to finish before dispatching another. Same-clip scrubbing

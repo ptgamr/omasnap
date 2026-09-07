@@ -96,7 +96,6 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 5400 && timeline->selectedClip() == 1,
                "Split inside a blend unexpectedly changed the project"))
     return false;
-  QTest::keyClick(&window, Qt::Key_B);
   timeline->setRange(2600, 2800);
   QTest::keyClick(&window, Qt::Key_Delete);
   if (!require(player->duration() == 5400 && timeline->rangeIn() == 2600,

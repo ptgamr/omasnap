@@ -311,13 +311,12 @@ Use **Add scenes** in the Clip inspector or `Ctrl+O` to import more recordings.
 Drop local video files onto a marked timeline boundary to insert, or elsewhere
 to append. An invalid import batch leaves the project unchanged.
 
-**Arrange scenes.** In Select mode (`V`), click and drag the video lane or ruler
+**Arrange scenes.** Click and drag the video lane or ruler
 to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.
 The clip follows your pointer while dragging, with a placeholder at its old
 position and an insertion marker at the destination. Release to commit one
-undoable move; Escape cancels. Select and Range are exclusive tools on the left;
-Split at playhead and Delete are actions on the right. A dashed focus outline
-does not mean a tool is active; the active tool has a solid accent border/fill.
+undoable move; Escape cancels. There are no Select/Range modes or buttons;
+Split at playhead and Delete are actions on the right.
 Drag a selected scene's edges to trim it, or use the
 Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
 Earlier/Later offer precise reorder buttons. Each operation is undoable.
@@ -341,16 +340,16 @@ transitions it removes or shortens. Remove a transition before range-cutting
 or splitting inside its overlap. Projects now use schema 2; older project files
 are not migrated, and original recordings remain untouched.
 
-**Cut passages.** Choose **Range** (`B`), drag over the video lane in either
-direction, adjust the range edges, and press Delete/Backspace. The gap closes
-in playback and export, including its audio. Before deleting, use **Go to start**
-(`[`), **Go to end** (`]`), or **Play range** (`Shift+Space`) to review it.
-Play range starts at the selection start and stops on the last instant inside
-the selection; it does not change the export range. Space remains normal
-play/pause. Start/End fields accept precise seconds with millisecond precision.
-Scrubbing on the ruler snaps near selection boundaries; hold Alt to bypass it.
-`V` returns to clip selection
-and scrubbing. `S` splits at the playhead; click a scene to select it, then
+**Cut passages.** **Shift+drag** over the video lane or ruler in either direction
+to select a range. Release to place the paused
+playhead at its start. Drag the range edges to adjust it; normal clicking and
+dragging now scrub only inside the selection. **Play/Space** plays and pauses
+within it, stopping at its end; press Play again there to replay from the start.
+**Home/End** jump to its first/last instant, and frame/five-second steps stay
+inside it too. **Escape** clears the selection and restores unrestricted seeking.
+The selection never changes the export range. Delete/Backspace removes it and
+closes the gap in video and audio. Ctrl+Z restores the cut.
+`S` splits at the playhead; click a scene to select it, then
 Delete removes that scene. Undo restores the ranges, selection, and playhead,
 even after deleting the final scene. Buttons and a timeline context menu expose
 the same actions. Delete prioritizes a selected range, then the selected zoom
@@ -406,17 +405,15 @@ fields retain their editing shortcuts; Space still transports from numeric field
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / pause |
-| `Shift+Space` | Play the selected range once |
-| `[` / `]` | Preview selection start / last instant inside selection |
+| `Shift+drag` | Select a range and place the playhead at its start |
 | `Ctrl+O` | Add scene files (also available in the Clip inspector) |
 | `Ctrl+D` | Duplicate the selected scene |
 | `T` | Edit the selected scene's transition to its next neighbor |
 | `Left` / `Right` | Previous / next frame |
 | `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
-| `Home` / `End` | Go to trim start / end |
+| `Home` / `End` | Go to selection start / last instant, or trim start / end |
 | `I` / `O` / `R` | Set trim start / end / reset trim |
 | `Z` | Add zoom at playhead |
-| `V` / `B` | Select/scrub tool / range-selection tool |
 | `S` | Split scene at playhead |
 | `Delete` / `Backspace` | Delete selected range, clip, or zoom |
 | `Ctrl+Z` | Undo |

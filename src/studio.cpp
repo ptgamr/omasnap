@@ -10,13 +10,11 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QAudioOutput>
-#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDir>
-#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -292,16 +290,6 @@ void StudioTimeline::setSelectedCue(quint64 id) {
   update();
 }
 
-void StudioTimeline::setRangeMode(bool enabled) {
-  rangeMode_ = enabled;
-  grabbed_ = Grab::None;
-  draggedScenePreview_ = {};
-  showInsertion(0, false);
-  unsetCursor();
-  update();
-  emit selectionChanged();
-}
-
 void StudioTimeline::setRange(qint64 start, qint64 end) {
   if (start < 0 || end < 0)
     rangeIn_ = rangeOut_ = -1;
@@ -325,6 +313,10 @@ void StudioTimeline::setSelectedClip(quint64 id) {
 }
 
 void StudioTimeline::clearSelection() {
+  grabbed_ = Grab::None;
+  draggedScenePreview_ = {};
+  showInsertion(0, false);
+  unsetCursor();
   selected_ = selectedClip_ = 0;
   rangeIn_ = rangeOut_ = -1;
   update();
@@ -348,15 +340,11 @@ void StudioTimeline::showInsertion(quint64 before, bool visible) {
 void StudioTimeline::contextMenuEvent(QContextMenuEvent *event) {
   auto *menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose);
-  auto *select = menu->addAction(QStringLiteral("Select / scrub  ·  V"));
-  auto *range = menu->addAction(QStringLiteral("Select passage  ·  B"));
   auto *split = menu->addAction(QStringLiteral("Split at playhead  ·  S"));
   auto *remove = menu->addAction(QStringLiteral("Delete selection"));
   split->setEnabled(cuesEditable_ && duration_ > 0);
   remove->setEnabled(cuesEditable_ &&
                      (rangeOut_ > rangeIn_ || selectedClip_ || selected_));
-  connect(select, &QAction::triggered, this, [this] { setRangeMode(false); });
-  connect(range, &QAction::triggered, this, [this] { setRangeMode(true); });
   connect(split, &QAction::triggered, this, &StudioTimeline::splitRequested);
   connect(remove, &QAction::triggered, this, &StudioTimeline::deleteRequested);
   menu->popup(event->globalPos());
@@ -434,14 +422,14 @@ StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {
     return Grab::None;
   if (!cuesEditable_)
     return Grab::Playhead;
-  if (trackRect().contains(position) && rangeMode_) {
+  if (trackRect().contains(position) && hasRange()) {
     if (rangeIn_ >= 0 &&
         std::abs(position.x() - xForTime(rangeIn_)) <= kGrabSlack)
       return Grab::RangeStart;
     if (rangeOut_ > rangeIn_ &&
         std::abs(position.x() - xForTime(rangeOut_)) <= kGrabSlack)
       return Grab::RangeEnd;
-    return Grab::RangeNew;
+    return Grab::Playhead;
   }
   if (trackRect().contains(position) && selectedClip_ && project_)
     for (const auto &span : studioComposition(*project_))
@@ -474,7 +462,9 @@ void StudioTimeline::setDuration(qint64 milliseconds) {
 }
 
 void StudioTimeline::setPosition(qint64 milliseconds) {
-  const qint64 clamped = qBound<qint64>(0, milliseconds, duration_);
+  const qint64 clamped = hasRange()
+      ? qBound(rangeIn_, milliseconds, rangeOut_ - 1)
+      : qBound<qint64>(0, milliseconds, duration_);
   if (clamped == position_)
     return;
   position_ = clamped;
@@ -505,7 +495,9 @@ void StudioTimeline::leaveEvent(QEvent *event) {
 void StudioTimeline::mousePressEvent(QMouseEvent *event) {
   if (event->button() != Qt::LeftButton || duration_ <= 0)
     return;
-  if (project_ && cuesEditable_ && !rangeMode_) {
+  const bool shiftRange = cuesEditable_ && event->modifiers().testFlag(Qt::ShiftModifier) &&
+                          event->position().y() < cueLaneRect().top();
+  if (project_ && cuesEditable_ && !hasRange() && !shiftRange) {
     const auto spans = studioComposition(*project_);
     for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i)
       if (transitionRect(spans[i], spans[i + 1]).contains(event->position())) {
@@ -516,13 +508,17 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
   }
   emit editStarted();
   grabbed_ = grabAt(event->position());
+  if (shiftRange)
+    grabbed_ = Grab::RangeNew;
+  if (grabbed_ == Grab::RangeNew || grabbed_ == Grab::RangeStart || grabbed_ == Grab::RangeEnd)
+    emit rangeSelectionStarted();
   scenePress_ = event->position();
   sceneDragOffset_ = {};
   draggedScenePreview_ = {};
   reorderGesture_ = event->modifiers().testFlag(Qt::ControlModifier);
   sceneDurationMs_ = duration_;
   grabbedScene_ = {};
-  if (project_ && trackRect().contains(event->position()) && !rangeMode_) {
+  if (project_ && trackRect().contains(event->position())) {
     quint64 id = selectedClip_;
     if (grabbed_ == Grab::Playhead)
       if (const auto frame = studioFrameAt(
@@ -558,7 +554,7 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
     emit cueSelected(cue);
     return; // A cue lane click never moves the playhead.
   }
-  if (grabbed_ == Grab::Playhead && project_ &&
+  if (grabbed_ == Grab::Playhead && project_ && !hasRange() &&
       trackRect().contains(event->position())) {
     if (const auto frame = studioFrameAt(
             *project_, qMin(duration_ - 1, timeForX(event->position().x()))))
@@ -714,6 +710,9 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
 void StudioTimeline::mouseReleaseEvent(QMouseEvent *event) {
   if (event->button() != Qt::LeftButton)
     return;
+  const bool selectingRange = grabbed_ == Grab::RangeNew || grabbed_ == Grab::RangeStart || grabbed_ == Grab::RangeEnd;
+  if (selectingRange)
+    mouseMoveEvent(event);
   if (grabbed_ == Grab::Playhead &&
       timeForX(event->position().x()) != position_)
     mouseMoveEvent(event);
@@ -725,6 +724,10 @@ void StudioTimeline::mouseReleaseEvent(QMouseEvent *event) {
   draggedScenePreview_ = {};
   unsetCursor();
   emit editFinished();
+  if (selectingRange && hasRange()) {
+    setPosition(rangeIn_);
+    emit rangeSelected();
+  }
 }
 
 void StudioTimeline::paintEvent(QPaintEvent *) {
@@ -798,7 +801,7 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
       painter.drawText(scene.adjusted(8, 0, -8, 0), Qt::AlignVCenter,
                        asset ? QFileInfo(asset->path).fileName()
                              : QStringLiteral("Missing source"));
-      if (span.clipId == selectedClip_ && !rangeMode_) {
+      if (span.clipId == selectedClip_) {
         painter.fillRect(QRectF(scene.left(), scene.top(), 3, scene.height()),
                          chrome_.accent);
         painter.fillRect(
@@ -846,7 +849,7 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
   paintHandle(inX, Grab::In);
   paintHandle(outX, Grab::Out);
 
-  if (project_ && !rangeMode_) {
+  if (project_) {
     painter.setFont(chromeMonoFont(9));
     const auto spans = studioComposition(*project_);
     QHash<quint64, const StudioTransition *> transitions;
@@ -1227,91 +1230,29 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   transport->addWidget(volume);
   timelineLayout->addLayout(transport);
   auto *editTools = new QHBoxLayout;
-  selectButton_ = button(QStringLiteral("Select · V"),
-                         QStringLiteral("Select a clip or scrub the timeline"));
-  rangeButton_ =
-      button(QStringLiteral("Range · B"),
-             QStringLiteral("Drag a passage, then Delete to close the gap"));
   splitButton_ = button(QStringLiteral("Split at playhead · S"),
                         QStringLiteral("Split the scene at the playhead"));
   deleteButton_ =
       button(QStringLiteral("Delete"),
              QStringLiteral("Delete the selected range, clip, or zoom"));
-  selectButton_->setCheckable(true);
-  rangeButton_->setCheckable(true);
-  selectButton_->setChecked(true);
-  auto *toolGroup = new QButtonGroup(this);
-  toolGroup->addButton(selectButton_);
-  toolGroup->addButton(rangeButton_);
-  toolGroup->setExclusive(true);
-  editTools->addWidget(selectButton_);
-  editTools->addWidget(rangeButton_);
   editTools->addStretch();
   editTools->addWidget(splitButton_);
   editTools->addWidget(deleteButton_);
   timelineLayout->addLayout(editTools);
-  rangeControls_ = new QWidget(timelinePanel);
-  rangeControls_->setObjectName(QStringLiteral("rangeControls"));
-  auto *rangeRows = new QVBoxLayout(rangeControls_);
-  rangeRows->setContentsMargins(0, 0, 0, 0);
-  auto *rangeLayout = new QHBoxLayout;
-  rangeRows->addLayout(rangeLayout);
-  rangeStart_ = new QDoubleSpinBox(rangeControls_);
-  rangeEnd_ = new QDoubleSpinBox(rangeControls_);
-  rangeStart_->setObjectName(QStringLiteral("rangeStart"));
-  rangeEnd_->setObjectName(QStringLiteral("rangeEnd"));
-  for (auto *field : {rangeStart_, rangeEnd_}) {
-    field->setDecimals(3);
-    field->setSuffix(QStringLiteral(" s"));
-    field->setKeyboardTracking(false);
-    field->setButtonSymbols(QAbstractSpinBox::NoButtons);
-    field->setMinimumWidth(108);
-  }
-  rangeStart_->setAccessibleName(QStringLiteral("Selection start in seconds"));
-  rangeEnd_->setAccessibleName(QStringLiteral("Selection end in seconds"));
-  rangeLayout->addWidget(new QLabel(QStringLiteral("Start"), rangeControls_));
-  rangeLayout->addWidget(rangeStart_);
-  rangeLayout->addWidget(new QLabel(QStringLiteral("End"), rangeControls_));
-  rangeLayout->addWidget(rangeEnd_);
-  rangeDuration_ = new QLabel(rangeControls_);
-  rangeLayout->addWidget(rangeDuration_);
-  rangeLayout->addStretch();
-  auto *rangeHome = button(QStringLiteral("Go to start"), QStringLiteral("Go to selection start · ["));
-  playRangeButton_ = button(QStringLiteral("Play range"), QStringLiteral("Play selection once · Shift+Space"));
-  auto *rangeLast = button(QStringLiteral("Go to end"), QStringLiteral("Preview the last instant inside the selection · ]"));
-  auto *rangeActions = new QHBoxLayout;
-  rangeRows->addLayout(rangeActions);
-  rangeActions->addWidget(rangeHome);
-  rangeActions->addWidget(playRangeButton_);
-  rangeActions->addWidget(rangeLast);
-  rangeActions->addStretch();
-  timelineLayout->addWidget(rangeControls_);
-  connect(rangeHome, &QPushButton::clicked, this, [this] { goToRangeBoundary(false); });
-  connect(rangeLast, &QPushButton::clicked, this, [this] { goToRangeBoundary(true); });
-  connect(playRangeButton_, &QPushButton::clicked, this, &StudioWindow::playRange);
-  connect(rangeStart_, &QDoubleSpinBox::editingFinished, this, [this] {
-    if (!rangeControls_->isEnabled()) return;
-    timeline_->setRange(qMin(qRound64(rangeStart_->value() * 1000), timeline_->rangeOut() - 1), timeline_->rangeOut());
-  });
-  connect(rangeEnd_, &QDoubleSpinBox::editingFinished, this, [this] {
-    if (!rangeControls_->isEnabled()) return;
-    timeline_->setRange(timeline_->rangeIn(), qMax(qRound64(rangeEnd_->value() * 1000), timeline_->rangeIn() + 1));
-  });
-  connect(selectButton_, &QPushButton::clicked, this,
-          [this] { timeline_->setRangeMode(false); });
-  connect(rangeButton_, &QPushButton::clicked, this,
-          [this] { timeline_->setRangeMode(true); });
   connect(splitButton_, &QPushButton::clicked, this,
           &StudioWindow::splitAtPlayhead);
   connect(deleteButton_, &QPushButton::clicked, this,
           &StudioWindow::deleteSelection);
   connect(timeline_, &StudioTimeline::selectionChanged, this,
           &StudioWindow::refreshControls);
-  connect(timeline_, &StudioTimeline::selectionChanged, this, [this] {
-    if (rangePlaybackEnd_ >= 0) {
-      rangePlaybackEnd_ = -1;
-      player_->pause();
-    }
+  connect(timeline_, &StudioTimeline::rangeSelected, this, [this] {
+    player_->pause();
+    seekTo(timeline_->rangeIn());
+  });
+  connect(timeline_, &StudioTimeline::rangeSelectionStarted, this, [this] {
+    player_->pause();
+    scrubTimer_->stop();
+    pendingSeek_ = -1;
   });
   connect(timeline_, &StudioTimeline::sceneMoveRequested, this,
           &StudioWindow::moveScene);
@@ -1324,8 +1265,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   timelineLayout->addWidget(timeline_);
   auto *footer = new QHBoxLayout;
   auto *legend =
-      new QLabel(QStringLiteral("SPACE  Play / pause     ← →  Frame     SHIFT "
-                                "+ ← →  5 seconds     Z  Add zoom"),
+      new QLabel(QStringLiteral("SPACE  Play / pause     SHIFT+DRAG  Range     ESC  Clear"),
                  timelinePanel);
   shortcutLegend_ = legend;
   legend->setFont(chromeMonoFont(10));
@@ -1368,11 +1308,11 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   connect(redoButton_, &QPushButton::clicked, this, &StudioWindow::redoEdit);
   connect(back, &QPushButton::clicked, this, [this] {
     player_->pause();
-    seekTo(timeline_->trimIn());
+    seekTo(timeline_->hasRange() ? timeline_->rangeIn() : timeline_->trimIn());
   });
   connect(forward, &QPushButton::clicked, this, [this] {
     player_->pause();
-    seekTo(timeline_->trimOut());
+    seekTo(timeline_->hasRange() ? timeline_->rangeOut() - 1 : timeline_->trimOut());
   });
   connect(previous, &QPushButton::clicked, this, [this] { stepFrame(-1); });
   connect(next, &QPushButton::clicked, this, [this] { stepFrame(1); });
@@ -1434,9 +1374,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
 
   connect(timeline_, &StudioTimeline::scrubbed, this,
           [this](qint64 milliseconds) {
-            rangePlaybackEnd_ = -1;
             player_->pause();
-            pendingSeek_ = milliseconds;
+            pendingSeek_ = boundedSeek(milliseconds);
             refreshSplitAction();
             if (!scrubTimer_->isActive())
               scrubTimer_->start();
@@ -1462,14 +1401,15 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             // signal arrived last decided the crop.
             // Playback stops at the out point: the trim is what is being
             // reviewed, so playing past it would be reviewing the wrong cut.
-            const qint64 stop = rangePlaybackEnd_ >= 0
-                                    ? rangePlaybackEnd_ : timeline_->trimOut();
-            if ((player_->playbackState() == QMediaPlayer::PlayingState || rangePlaybackEnd_ >= 0) &&
-                position >= stop && timeline_->duration() > 0) {
-              const bool selectedRange = rangePlaybackEnd_ >= 0;
-              rangePlaybackEnd_ = -1;
+            const bool range = timeline_->hasRange();
+            const qint64 stop = range ? timeline_->rangeOut() : timeline_->trimOut();
+            if (range && (position < timeline_->rangeIn() || position >= stop)) {
               player_->pause();
-              player_->setPosition(selectedRange ? qMax<qint64>(0, stop - 1) : stop);
+              player_->setPosition(boundedSeek(position));
+            } else if (!range && player_->playbackState() == QMediaPlayer::PlayingState &&
+                       position >= stop && timeline_->duration() > 0) {
+              player_->pause();
+              player_->setPosition(stop);
             }
             refreshSplitAction();
             // Scene/transition inspectors depend on edits and selection, not
@@ -1518,7 +1458,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       }
       const qint64 position = pendingSeek_;
       pendingSeek_ = -1;
-      player_->scrubTo(position);
+      player_->scrubTo(boundedSeek(position));
     }
   });
   // Probe and deserialize on a worker. The original media is never modified.
@@ -1713,7 +1653,6 @@ void StudioWindow::captureCursor() {
 }
 
 void StudioWindow::beginEdit() {
-  rangePlaybackEnd_ = -1;
   captureCursor();
   gestureProject_ = project_;
   editGesture_ = true;
@@ -1777,13 +1716,17 @@ void StudioWindow::redoEdit() {
 
 void StudioWindow::restoreEdit() {
   const auto state = history_.current();
+  // The outgoing selection belongs to the old composition and must not
+  // constrain restoration into a shorter or differently arranged project.
+  timeline_->clearSelection();
   project_ = state.project;
   applyProject(false, state.positionMs);
-  timeline_->clearSelection();
   timeline_->setSelectedCue(state.selectedCue);
   timeline_->setSelectedClip(state.selectedClip);
   if (state.rangeIn >= 0)
     timeline_->setRange(state.rangeIn, state.rangeOut);
+  if (timeline_->hasRange())
+    seekTo(state.positionMs);
   saveTimer_->start();
   refreshControls();
 }
@@ -2025,10 +1968,6 @@ void StudioWindow::refreshControls() {
   // them.
   const bool editable =
       duration > 0 && !mediaFailed_ && !exporting && media_.usable();
-  selectButton_->setChecked(!timeline_->rangeMode());
-  rangeButton_->setChecked(timeline_->rangeMode());
-  selectButton_->setEnabled(!exporting);
-  rangeButton_->setEnabled(editable);
   splitButton_->setEnabled(editable);
   refreshSplitAction();
   deleteButton_->setEnabled(
@@ -2037,23 +1976,6 @@ void StudioWindow::refreshControls() {
   deleteButton_->setToolTip(deleteButton_->isEnabled()
       ? QStringLiteral("Delete the selected range, clip, or zoom · Delete")
       : QStringLiteral("Select a clip, zoom, or range to delete"));
-  const bool selectedRange = timeline_->rangeIn() >= 0 && timeline_->rangeOut() > timeline_->rangeIn();
-  // Reserve the row while drawing: appearing/disappearing controls must not
-  // move the timeline under a held pointer.
-  rangeControls_->setEnabled(editable && selectedRange);
-  if (selectedRange) {
-    const QSignalBlocker quietStart(rangeStart_), quietEnd(rangeEnd_);
-    rangeStart_->setRange(0, static_cast<double>(timeline_->rangeOut() - 1) / 1000);
-    rangeEnd_->setRange(static_cast<double>(timeline_->rangeIn() + 1) / 1000,
-                        static_cast<double>(duration) / 1000);
-    if (!rangeStart_->hasFocus())
-      rangeStart_->setValue(static_cast<double>(timeline_->rangeIn()) / 1000);
-    if (!rangeEnd_->hasFocus())
-      rangeEnd_->setValue(static_cast<double>(timeline_->rangeOut()) / 1000);
-    rangeDuration_->setText(QStringLiteral("Duration %1").arg(studioTimecode(timeline_->rangeOut() - timeline_->rangeIn()).mid(3)));
-  } else {
-    rangeDuration_->setText(QStringLiteral("Select a range with B"));
-  }
   background_->setEnabled(editable);
   padding_->setEnabled(editable);
   radius_->setEnabled(editable);
@@ -2111,7 +2033,6 @@ void StudioWindow::refreshControls() {
 }
 
 void StudioWindow::togglePlayback() {
-  rangePlaybackEnd_ = -1;
   if (pendingSeek_ >= 0)
     seekTo(pendingSeek_);
   if (player_->playbackState() == QMediaPlayer::PlayingState) {
@@ -2119,9 +2040,10 @@ void StudioWindow::togglePlayback() {
     return;
   }
   // Starting outside the kept range would play material the export drops.
-  if (player_->position() < timeline_->trimIn() ||
-      player_->position() >= timeline_->trimOut())
-    seekTo(timeline_->trimIn());
+  const qint64 start = timeline_->hasRange() ? timeline_->rangeIn() : timeline_->trimIn();
+  const qint64 end = timeline_->hasRange() ? timeline_->rangeOut() - 1 : timeline_->trimOut();
+  if (player_->position() < start || player_->position() >= end)
+    seekTo(start);
   player_->play();
 }
 
@@ -2130,28 +2052,15 @@ void StudioWindow::seekBy(qint64 milliseconds) {
 }
 
 void StudioWindow::seekTo(qint64 milliseconds) {
-  rangePlaybackEnd_ = -1;
   scrubTimer_->stop();
   pendingSeek_ = -1;
-  player_->setPosition(qBound<qint64>(0, milliseconds, timeline_->duration()));
+  player_->setPosition(boundedSeek(milliseconds));
 }
 
-void StudioWindow::goToRangeBoundary(bool end) {
-  if (!rangeControls_->isEnabled() || timeline_->rangeIn() < 0 ||
-      timeline_->rangeOut() <= timeline_->rangeIn())
-    return;
-  player_->pause();
-  seekTo(end ? timeline_->rangeOut() - 1 : timeline_->rangeIn());
-}
-
-void StudioWindow::playRange() {
-  if (!rangeControls_->isEnabled() || timeline_->rangeIn() < 0 ||
-      timeline_->rangeOut() <= timeline_->rangeIn())
-    return;
-  player_->pause();
-  seekTo(timeline_->rangeIn());
-  rangePlaybackEnd_ = timeline_->rangeOut();
-  player_->play();
+qint64 StudioWindow::boundedSeek(qint64 milliseconds) const {
+  if (timeline_->hasRange())
+    return qBound(timeline_->rangeIn(), milliseconds, timeline_->rangeOut() - 1);
+  return qBound<qint64>(0, milliseconds, timeline_->duration());
 }
 
 void StudioWindow::refreshSplitAction() {
@@ -2309,12 +2218,6 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
       if (playButton_->isEnabled())
         togglePlayback();
     };
-  else if (key == Qt::Key_Space && shift)
-    action = [this] { playRange(); };
-  else if (key == Qt::Key_BracketLeft && plain)
-    action = [this] { goToRangeBoundary(false); };
-  else if (key == Qt::Key_BracketRight && plain)
-    action = [this] { goToRangeBoundary(true); };
   else if ((key == Qt::Key_Left || key == Qt::Key_Right) && (plain || shift)) {
     repeat = true;
     action = [this, key, shift] {
@@ -2330,12 +2233,12 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
   } else if (key == Qt::Key_Home && plain)
     action = [this] {
       player_->pause();
-      seekTo(timeline_->trimIn());
+      seekTo(timeline_->hasRange() ? timeline_->rangeIn() : timeline_->trimIn());
     };
   else if (key == Qt::Key_End && plain)
     action = [this] {
       player_->pause();
-      seekTo(timeline_->trimOut());
+      seekTo(timeline_->hasRange() ? timeline_->rangeOut() - 1 : timeline_->trimOut());
     };
   else if (key == Qt::Key_I && plain)
     action = [this] { setTrimIn(); };
@@ -2349,13 +2252,6 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
     action = [this] { showTransitionEditor(timeline_->selectedClip()); };
   else if (key == Qt::Key_R && plain)
     action = [this] { resetTrim(); };
-  else if (key == Qt::Key_B && plain)
-    action = [this] {
-      if (rangeButton_->isEnabled())
-        timeline_->setRangeMode(true);
-    };
-  else if (key == Qt::Key_V && plain)
-    action = [this] { timeline_->setRangeMode(false); };
   else if (key == Qt::Key_S && plain)
     action = [this] { splitAtPlayhead(); };
   else if (key == Qt::Key_Z && plain)
@@ -2386,7 +2282,6 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
   else if (key == Qt::Key_Escape && plain)
     action = [this] {
       timeline_->clearSelection();
-      timeline_->setRangeMode(false);
       preview_->setTargetMarker(false);
       refreshControls();
       setFocus();
@@ -2436,16 +2331,14 @@ void StudioWindow::showShortcuts() {
   layout->setContentsMargins(28, 24, 28, 24);
   auto *label = new QLabel(
       QStringLiteral("Space                 Play / pause\n"
-                     "Shift + Space         Play selected range once\n"
-                     "[ / ]                 Selection start / last instant\n"
+                     "Shift + drag          Select playback range\n"
                      "Ctrl + drag           Reorder scenes\n"
                      "Left / Right          Previous / next frame\n"
                      "Shift + Left / Right  Back / forward 5 seconds\n"
-                     "Home / End            Trim start / end\n"
+                     "Home / End            Selection or trim start / end\n"
                      "I / O                 Set trim start / end\n"
                      "R                     Reset trim\n"
                      "Z                     Add zoom at playhead\n"
-                     "V / B                 Select / range tool\n"
                      "S                     Split scene at playhead\n"
                      "Delete / Backspace    Delete range, clip, or zoom\n"
                      "Ctrl + Z              Undo\n"
@@ -2496,10 +2389,8 @@ void StudioWindow::resizeEvent(QResizeEvent *event) {
   inspector_->setVisible(inspectorWanted_ && width() >= 960);
   fileLabel_->setVisible(width() >= 1100);
   shortcutLegend_->setText(
-      width() >= 1150 ? QStringLiteral("SPACE  Play / pause     ← →  Frame     "
-                                       "SHIFT + ← →  5 seconds     Z  Add zoom")
-                      : QStringLiteral("SPACE  Play / pause     ← →  Frame     "
-                                       "Z  Zoom     ?  Shortcuts"));
+      width() >= 1150 ? QStringLiteral("SPACE  Play / pause     SHIFT+DRAG  Range     CTRL+DRAG  Reorder     ESC  Clear")
+                      : QStringLiteral("SPACE  Play / pause     SHIFT+DRAG  Range     ESC  Clear"));
 }
 
 void StudioWindow::toggleInspector() {

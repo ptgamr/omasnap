@@ -2,7 +2,6 @@
 #include "studio-playback.hpp"
 #include "studio.hpp"
 #include <QFile>
-#include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QTemporaryDir>
@@ -27,14 +26,14 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
           "cut UI source did not load"))
     return false;
   player->setPosition(5000);
-  QTest::keyClick(&window, Qt::Key_B);
   const auto point = [&](qint64 ms) {
     return QPoint(64 + qRound((timeline->width() - 80) * ms / 6000.0), 60);
   };
   // Reverse drag and subsequent endpoint resize must both be unambiguous.
-  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, point(3000));
+  timeline->scrubbed(4500);
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::ShiftModifier, point(3000));
   QTest::mouseMove(timeline, point(1000));
-  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, point(1000));
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ShiftModifier, point(1000));
   if (!require(timeline->rangeOut() > timeline->rangeIn() &&
                    timeline->rangeIn() >= 990,
                "reverse drag did not select passage"))
@@ -57,19 +56,31 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
     if (button->text() == QStringLiteral("Range · B")) rangeTool = button;
     if (button->text() == QStringLiteral("Split at playhead · S")) split = button;
   }
-  if (!require(selectTool && rangeTool && split && !split->isCheckable(),
-               "timeline actions are missing or presented as modes"))
+  if (!require(!selectTool && !rangeTool && split && !split->isCheckable(),
+               "obsolete mode buttons remain or split action is missing"))
     return false;
-  selectTool->setFocus();
-  QTest::keyClick(selectTool, Qt::Key_B);
-  if (!require(!selectTool->isChecked() && rangeTool->isChecked(),
-               "B left both timeline tools checked")) return false;
-  QTest::keyClick(&window, Qt::Key_BracketLeft);
-  if (!require(player->position() == from, "selection start shortcut missed boundary")) return false;
-  QTest::keyClick(&window, Qt::Key_BracketRight);
-  if (!require(player->position() == to - 1, "selection end preview went outside selection")) return false;
+  if (!require(player->position() == from && player->playbackState() == QMediaPlayer::PausedState,
+               "range gesture did not park the playhead at its start")) return false;
+  QTest::keyClick(&window, Qt::Key_End);
+  if (!require(player->position() == to - 1, "End escaped selection")) return false;
+  QTest::keyClick(&window, Qt::Key_Right, Qt::ShiftModifier);
+  if (!require(player->position() == to - 1, "forward seek escaped selection")) return false;
+  QTest::keyClick(&window, Qt::Key_Home);
+  QTest::keyClick(&window, Qt::Key_Left);
+  if (!require(player->position() == from, "backward frame step escaped selection")) return false;
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(5500));
+  if (!require(QTest::qWaitFor([&] { return player->position() == to - 1; }, 4000) &&
+                   timeline->hasRange(), "outside timeline click cleared or escaped selection")) return false;
   timeline->setTrim(0, 2000);
-  QTest::keyClick(&window, Qt::Key_Space, Qt::ShiftModifier);
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(QTest::qWaitFor([&] { return player->position() > from + 200; }, 3000),
+               "normal Space did not start playback inside selection")) return false;
+  QTest::keyClick(&window, Qt::Key_Space);
+  const qint64 paused = player->position();
+  if (!require(player->playbackState() == QMediaPlayer::PausedState && paused < to,
+               "normal Space did not pause range playback")) return false;
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(player->position() == paused, "range resume restarted instead of resuming")) return false;
   if (!require(QTest::qWaitFor([&] {
         return player->playbackState() == QMediaPlayer::PausedState && player->position() == to - 1;
       }, 6000), "selected range did not play once and stop inside its end")) return false;
@@ -77,20 +88,13 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
                "range preview changed the export range")) return false;
   timeline->setTrim(0, 6000);
   timeline->setRange(5500, 6000);
-  QTest::keyClick(&window, Qt::Key_Space, Qt::ShiftModifier);
+  QTest::keyClick(&window, Qt::Key_Space);
   if (!require(QTest::qWaitFor([&] {
         return player->playbackState() == QMediaPlayer::PausedState && player->position() == 5999;
       }, 4000), "range preview at project EOF did not settle inside the selection")) return false;
   timeline->setRange(from, to);
-  auto *startField = window.findChild<QDoubleSpinBox *>("rangeStart");
-  auto *endField = window.findChild<QDoubleSpinBox *>("rangeEnd");
-  if (!require(startField && endField, "precise range fields missing")) return false;
-  startField->setValue(1.750);
-  startField->editingFinished();
-  if (!require(timeline->rangeIn() == 1750, "precise range start edit failed")) return false;
-  timeline->setRange(from, to);
-  player->setPosition(0);
-  if (!require(!split->isEnabled(), "split action enabled at scene start")) return false;
+  if (!require(!window.findChild<QWidget *>("rangeControls"),
+               "separate range controls still occupy the timeline")) return false;
   player->setPosition(5000);
   QTest::keyClick(&window, Qt::Key_Delete);
   if (!require(player->duration() == 6000 - (to - from) &&
@@ -99,7 +103,7 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
   if (!require(player->duration() == 6000 && timeline->rangeIn() == from &&
-                   timeline->rangeOut() == to && player->position() == 5000,
+                   timeline->rangeOut() == to && player->position() == to - 1,
                "Undo did not restore deleted range and playhead"))
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
@@ -108,9 +112,10 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
   QTest::keyClick(&window, Qt::Key_Escape);
-  if (!require(!timeline->rangeMode(), "Escape did not leave range mode"))
+  if (!require(!timeline->hasRange(), "Escape did not clear the range"))
     return false;
-  QTest::keyClick(&window, Qt::Key_V);
+  player->setPosition(0);
+  if (!require(player->position() == 0, "Escape did not release range seeking constraint")) return false;
   player->setPosition(2000);
   QTest::keyClick(&window, Qt::Key_S);
   if (!require(player->duration() == 6000 && timeline->selectedClip() != 0,
@@ -147,6 +152,14 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 6000,
                "Final clip deletion was not undoable"))
     return false;
+  timeline->setSelectedClip(1);
+  QTest::keyClick(&window, Qt::Key_D, Qt::ControlModifier);
+  if (!require(player->duration() == 12000, "could not create long project for range undo")) return false;
+  timeline->setRange(9000, 10000);
+  player->setPosition(9500);
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 6000 && player->position() < 6000 && !timeline->hasRange(),
+               "old range constrained undo into a shorter project")) return false;
   // Editing a text field must not delete video or split scenes.
   auto *text = new QLineEdit(&window);
   text->setText("test");
