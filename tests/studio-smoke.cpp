@@ -81,9 +81,9 @@ bool runTimecodeChecks(QString &error) {
 }
 
 bool runExportCommandChecks(QString &error) {
-  const QStringList arguments =
-      studioExportArguments(QStringLiteral("/tmp/rec.mkv"),
-                            QStringLiteral("/tmp/rec-trim.mp4"), 5000, 8500);
+  const QStringList arguments = studioExportArguments(
+      QStringLiteral("/tmp/rec.mkv"),
+      QStringLiteral("/tmp/rec-omasnap-exported.mp4"), 5000, 8500);
   // -ss before -i so ffmpeg seeks instead of decoding the head, and a
   // duration rather than an end time so it cannot be read against the wrong
   // timeline.
@@ -99,7 +99,8 @@ bool runExportCommandChecks(QString &error) {
     return false;
   if (!check(valueAfter(arguments, QStringLiteral("-i")) ==
                      QStringLiteral("/tmp/rec.mkv") &&
-                 arguments.last() == QStringLiteral("/tmp/rec-trim.mp4"),
+                 arguments.last() ==
+                     QStringLiteral("/tmp/rec-omasnap-exported.mp4"),
              error, QStringLiteral("source or destination is misplaced")))
     return false;
   if (!check(valueAfter(arguments, QStringLiteral("-map_metadata")) ==
@@ -147,7 +148,8 @@ bool runExportPathChecks(QString &error) {
       QDir(directory.path()).filePath(QStringLiteral("recording-1.mkv"));
   const QString first = studioExportPath(source);
   if (!check(first == QDir(directory.path())
-                          .filePath(QStringLiteral("recording-1-trim.mp4")),
+                          .filePath(QStringLiteral(
+                              "recording-1-omasnap-exported.mp4")),
              error, QStringLiteral("export path is not beside the source")))
     return false;
 
@@ -158,15 +160,16 @@ bool runExportPathChecks(QString &error) {
     return false;
   }
   placeholder.close();
-  return check(studioExportPath(source) ==
-                   QDir(directory.path())
-                       .filePath(QStringLiteral("recording-1-trim-2.mp4")),
-               error, QStringLiteral("export overwrote an existing file"));
+  return check(
+      studioExportPath(source) ==
+          QDir(directory.path())
+              .filePath(QStringLiteral("recording-1-omasnap-exported-2.mp4")),
+      error, QStringLiteral("export overwrote an existing file"));
 }
 
 bool runTimelineChecks(QString &error) {
   StudioTimeline timeline;
-  timeline.resize(400, 46);
+  timeline.setFixedSize(400, 176);
   timeline.show();
 
   // Before a duration is known there is nothing to drag and nothing to emit.
@@ -223,6 +226,49 @@ bool runTimelineChecks(QString &error) {
   timeline.setTrim(-5000, 900000);
   if (!check(timeline.trimIn() == 0 && timeline.trimOut() == 60000, error,
              QStringLiteral("a trim outside the recording was not clamped")))
+    return false;
+
+  StudioProject project;
+  project.assets = {{1,
+                     QStringLiteral("recording.mp4"),
+                     {{320, 180}, 30, 1, 0, false, 60000, 0}}};
+  project.clips = {{1, 1, 0, 30000, 1.0}, {2, 1, 30000, 60000, 1.0}};
+  timeline.setProject(&project);
+  QVector<QImage> thumbnails;
+  for (const QColor &color : {QColor(Qt::red), QColor(Qt::green),
+                              QColor(Qt::blue), QColor(Qt::yellow)}) {
+    QImage thumbnail(32, 18, QImage::Format_RGB32);
+    thumbnail.fill(color);
+    thumbnails.push_back(thumbnail);
+  }
+  timeline.setThumbnails(thumbnails);
+  QTest::mouseClick(&timeline, Qt::LeftButton, {}, QPoint(130, 58));
+  const QImage selected = timeline.grab().toImage();
+  const qreal dpr = selected.devicePixelRatio();
+  const QColor red = selected.pixelColor(qRound(90 * dpr), qRound(75 * dpr));
+  const QColor green = selected.pixelColor(qRound(185 * dpr), qRound(75 * dpr));
+  if (!check(timeline.selectedClip() == 1 && red.red() > red.green() + 10 &&
+                 green.green() > green.red() + 10,
+             error, QStringLiteral("selecting a scene hid its thumbnails")))
+    return false;
+  // Plain dragging starts away from the playhead, updates while held, and
+  // crosses scene boundaries without accidentally rearranging the composition.
+  QSignalSpy moved(&timeline, &StudioTimeline::sceneMoveRequested);
+  scrubbed.clear();
+  QTest::mousePress(&timeline, Qt::LeftButton, {}, QPoint(160, 58));
+  QTest::mouseMove(&timeline, QPoint(190, 58), 20);
+  QTest::mouseMove(&timeline, QPoint(300, 58), 20);
+  if (!check(scrubbed.size() >= 3 && scrubbed.last()[0].toLongLong() > 43000 &&
+                 moved.isEmpty(),
+             error,
+             QStringLiteral("dragging the video lane did not scrub live")))
+    return false;
+  QTest::mouseRelease(&timeline, Qt::LeftButton, {}, QPoint(330, 58));
+  if (!check(qAbs(scrubbed.last()[0].toLongLong() - 49875) < 100 &&
+                 moved.isEmpty(),
+             error,
+             QStringLiteral(
+                 "scrub release lost its final position or moved a scene")))
     return false;
 
   return true;

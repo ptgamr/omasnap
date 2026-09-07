@@ -146,9 +146,11 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
                "one undo did not restore the scene edge drag"))
     return false;
   // Move the duplicate from between second/third scenes to the final boundary.
-  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, point(14500));
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
+                    point(14500));
   QTest::mouseMove(timeline, point(28500), 40);
-  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, point(28500));
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ControlModifier,
+                      point(28500));
   if (!require(player->duration() == 29000 && timeline->selectedClip() == 5,
                "scene drag changed duration or selection"))
     return false;

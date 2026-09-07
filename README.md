@@ -311,8 +311,9 @@ Use **Add scenes** in the Clip inspector or `Ctrl+O` to import more recordings.
 Drop local video files onto a marked timeline boundary to insert, or elsewhere
 to append. An invalid import batch leaves the project unchanged.
 
-**Arrange scenes.** In Select mode (`V`), drag scene bodies to reorder them;
-the ruler still scrubs. Drag a selected scene's edges to trim it, or use the
+**Arrange scenes.** In Select mode (`V`), click and drag the video lane or ruler
+to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.
+Drag a selected scene's edges to trim it, or use the
 Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
 Earlier/Later offer precise reorder buttons. Each operation is undoable.
 Zooms follow scene content, and duplicates have independent edits. Structural
@@ -350,8 +351,9 @@ Export (`Ctrl+E`) opens a modal with encoding progress and a Cancel button
 (also `Esc`). On completion it shows the full saved path, with **Open video**
 and **Open folder** actions through `xdg-open`. The result stays visible until
 you close it; errors stay visible too. Exports are saved beside the source
-as `-trim.mp4` (numbered when needed). Partial exports are cleaned up on cancel
-or failure, and existing videos are never overwritten.
+as `-omasnap-exported.mp4` (numbered when needed, e.g. `-omasnap-exported-2.mp4`).
+Partial exports are cleaned up on cancel or failure, and existing videos are
+never overwritten.
 
 What you see is what you get: the preview and the export are driven by the same
 model, and a golden test renders the same frames both ways across seven

@@ -128,6 +128,7 @@ private:
   qint64 rangeAnchor_ = 0;
   quint64 selectedClip_ = 0;
   QPointF scenePress_;
+  bool reorderGesture_ = false;
   StudioClip grabbedScene_;
   qint64 sceneStartMs_ = 0;
   qint64 sceneDurationMs_ = 0;

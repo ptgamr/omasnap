@@ -74,8 +74,9 @@ initial project's canvas/FPS remain fixed, including after deleting all clips.
 Imports, ordering, duplicates, and source-edge trims share project history.
 Undoing an import removes references only; it never deletes a media file.
 
-In Select mode, drag scene bodies to reorder and selected scene edges to trim.
-The ruler remains a scrubbing target. The Clip inspector offers source in/out
+In Select mode, plain dragging on scene bodies or the ruler scrubs continuously.
+Ctrl+drag reorders scene bodies; selected scene edges still trim.
+The Clip inspector offers source in/out
 milliseconds, Duplicate, Earlier, and Later as precise alternatives. I/O/R
 continue to control the project-wide review/export range, not the selected scene.
 Structural scene edits reset that range to the full composition so newly added

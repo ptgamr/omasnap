@@ -246,10 +246,11 @@ QString studioExportPath(const QString &source) {
   const QFileInfo info(source);
   const QDir directory = info.dir();
   const QString stem = info.completeBaseName();
-  QString candidate = directory.filePath(stem + QStringLiteral("-trim.mp4"));
+  QString candidate =
+      directory.filePath(stem + QStringLiteral("-omasnap-exported.mp4"));
   for (int index = 2; QFileInfo::exists(candidate) && index < 1000; ++index)
     candidate = directory.filePath(
-        QStringLiteral("%1-trim-%2.mp4").arg(stem).arg(index));
+        QStringLiteral("%1-omasnap-exported-%2.mp4").arg(stem).arg(index));
   return candidate;
 }
 
@@ -511,6 +512,7 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
   emit editStarted();
   grabbed_ = grabAt(event->position());
   scenePress_ = event->position();
+  reorderGesture_ = event->modifiers().testFlag(Qt::ControlModifier);
   sceneDurationMs_ = duration_;
   grabbedScene_ = {};
   if (project_ && trackRect().contains(event->position()) && !rangeMode_) {
@@ -576,7 +578,8 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
     return;
   }
   const qint64 time = timeForX(event->position().x());
-  if (grabbed_ == Grab::Playhead && cuesEditable_ && grabbedScene_.id &&
+  if (grabbed_ == Grab::Playhead && reorderGesture_ && cuesEditable_ &&
+      grabbedScene_.id &&
       (event->position() - scenePress_).manhattanLength() >=
           QApplication::startDragDistance())
     grabbed_ = Grab::SceneMove;
@@ -665,6 +668,9 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
 void StudioTimeline::mouseReleaseEvent(QMouseEvent *event) {
   if (event->button() != Qt::LeftButton)
     return;
+  if (grabbed_ == Grab::Playhead &&
+      timeForX(event->position().x()) != position_)
+    mouseMoveEvent(event);
   if (grabbed_ == Grab::SceneMove)
     emit sceneMoveRequested(grabbedScene_.id, insertionBefore_);
   showInsertion(0, false);
@@ -730,8 +736,11 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
                          track.height());
       painter.save();
       painter.setClipRect(scene);
-      if (span.clipId == selectedClip_)
-        painter.fillRect(scene, chrome_.selected());
+      if (span.clipId == selectedClip_) {
+        QColor selection = chrome_.foreground;
+        selection.setAlphaF(0.18);
+        painter.fillRect(scene, selection);
+      }
       painter.setPen(QPen(
           span.clipId == selectedClip_ ? chrome_.accent : chrome_.border(), 1));
       painter.setBrush(Qt::NoBrush);
@@ -1046,7 +1055,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   outButton->setToolTip(QStringLiteral("Set trim end at playhead · O"));
   resetButton_->setToolTip(QStringLiteral("Keep the complete recording · R"));
   auto *clipHint = new QLabel(
-      QStringLiteral("Drag scenes to arrange; drag a selected scene's edges "
+      QStringLiteral("Drag to scrub; Ctrl+drag scenes to arrange; drag a "
+                     "selected scene's edges "
                      "to trim it. I/O set the project export range. Originals "
                      "stay untouched."),
       clipPage);
