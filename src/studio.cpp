@@ -1378,6 +1378,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   inspectorLayout->addStretch();
 
   zoomCard_ = new QWidget(inspector_);
+  zoomCard_->setObjectName(QStringLiteral("zoomCard"));
   auto *zoomControls = new QVBoxLayout(zoomCard_);
   zoomControls->setContentsMargins(0, 0, 0, 0);
   zoomControls->setSpacing(14);
@@ -1419,6 +1420,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   inspectorLayout->addWidget(zoomCard_);
 
   transitionCard_ = new QWidget(inspector_);
+  transitionCard_->setObjectName(QStringLiteral("transitionCard"));
   auto *transitionControls = new QVBoxLayout(transitionCard_);
   transitionControls->setContentsMargins(0, 0, 0, 0);
   transitionControls->setSpacing(14);
@@ -1427,6 +1429,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   inspectorLayout->addWidget(transitionCard_);
 
   clipCard_ = new QWidget(inspector_);
+  clipCard_->setObjectName(QStringLiteral("clipCard"));
   auto *clipControls = new QVBoxLayout(clipCard_);
   clipControls->setContentsMargins(0, 0, 0, 0);
   clipControls->setSpacing(14);
@@ -1435,6 +1438,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   inspectorLayout->addWidget(clipCard_);
 
   emptyCard_ = new QWidget(inspector_);
+  emptyCard_->setObjectName(QStringLiteral("emptyCard"));
   auto *emptyControls = new QVBoxLayout(emptyCard_);
   emptyControls->setContentsMargins(0, 0, 0, 0);
   auto *emptyHint = new QLabel(

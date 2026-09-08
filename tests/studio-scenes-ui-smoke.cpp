@@ -95,6 +95,20 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     return false;
   timeline->setSelectedClip(2);
   QTest::keyClick(&window, Qt::Key_D, Qt::ControlModifier);
+  // Layouts settle asynchronously: the tweak card must end up paired with
+  // the timeline row at the column bottom.
+  QTest::qWait(200);
+  {
+    auto *inspector = window.findChild<QWidget *>("studioInspector");
+    auto *clipCard = window.findChild<QWidget *>("clipCard");
+    if (!require(inspector && clipCard, "tweak cards are missing"))
+      return false;
+    const int bottom = clipCard->y() + clipCard->height();
+    if (!require(bottom <= inspector->height() &&
+                    bottom >= inspector->height() - 18 - 8,
+                 "tweak card is not bottom-aligned with the timeline row"))
+      return false;
+  }
   if (!require(player->duration() == 30000 && timeline->selectedClip() == 5,
                "Ctrl+D did not duplicate and select the scene"))
     return false;
