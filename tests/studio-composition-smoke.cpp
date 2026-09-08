@@ -751,6 +751,47 @@ bool runStudioCompositionChecks(QString &error) {
   if (!require(difference < 10,
                "mixed-aspect canvas camera/style preview and export disagree"))
     return false;
+  // Dawn Fire runs top-left to bottom-right: the export corners must carry
+  // the first and last stops, and the QPainter preview must agree with the
+  // ffmpeg gradients source.
+  project.style = {StudioStyle::solidCount, 10, 0};
+  project.zoom.cues.clear();
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto gradientExport = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  if (!require(!gradientExport.isNull(),
+               "gradient background export frame was missing"))
+    return false;
+  const QColor first =
+      studioStopColor(StudioStyle::gradient(project.style.background).stops[0]);
+  const QColor last =
+      studioStopColor(StudioStyle::gradient(project.style.background).stops[2]);
+  const auto topLeft = gradientExport.pixelColor(4, 4);
+  const auto bottomRight = gradientExport.pixelColor(315, 175);
+  if (!require(std::abs(topLeft.red() - first.red()) < 16 &&
+                   std::abs(topLeft.green() - first.green()) < 16 &&
+                   std::abs(topLeft.blue() - first.blue()) < 16 &&
+                   std::abs(bottomRight.red() - last.red()) < 16 &&
+                   std::abs(bottomRight.green() - last.green()) < 16 &&
+                   std::abs(bottomRight.blue() - last.blue()) < 16,
+               "gradient background export corners carry the wrong stops"))
+    return false;
+  const QImage gradientShown =
+      preview.grab().toImage().scaled(project.canvas);
+  double gradientDifference = 0;
+  for (int y = 0; y < 180; y += 3)
+    for (int x = 0; x < 320; x += 3) {
+      const auto a = gradientShown.pixelColor(x, y),
+                 b = gradientExport.pixelColor(x, y);
+      gradientDifference += std::abs(a.red() - b.red()) +
+                            std::abs(a.green() - b.green()) +
+                            std::abs(a.blue() - b.blue());
+    }
+  gradientDifference /= 60 * 107 * 3;
+  if (!require(gradientDifference < 12,
+               "gradient background preview and export disagree"))
+    return false;
   // A changing cadence retains timestamps; frame-index-based concatenation
   // would move the blue/green changes and shorten this two-second source.
   const QString vfrPath = scratch.filePath("vfr.mp4");

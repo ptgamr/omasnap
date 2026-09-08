@@ -93,6 +93,7 @@ void StudioVideoSurface::releaseResources() {
     bank.dirty = true;
   }
   program_.removeAllShaders();
+  gradientProgram_.removeAllShaders();
   doneCurrent();
 }
 
@@ -177,6 +178,40 @@ void StudioVideoSurface::initializeGL() {
                  .arg(program_.log()));
     return;
   }
+  // Gradient backgrounds get their own trivial program so the solid clear
+  // path above stays byte-identical. A link failure here is not fatal: the
+  // paint falls back to the flat middle-stop color.
+  gradientProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
+    attribute vec2 position;
+    uniform vec2 uSize;
+    varying vec2 vPos;
+    void main() {
+      vPos = vec2((position.x + 1.0) * 0.5 * uSize.x,
+                  (1.0 - (position.y + 1.0) * 0.5) * uSize.y);
+      gl_Position = vec4(position, 0.0, 1.0); }
+  )");
+  gradientProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
+    #ifdef GL_ES
+    precision highp float;
+    #endif
+    uniform vec3 uStops0;
+    uniform vec3 uStops1;
+    uniform vec3 uStops2;
+    uniform vec4 uAxis;
+    uniform vec4 uCanvas;
+    varying vec2 vPos;
+    void main() {
+      vec2 a = uCanvas.xy + uCanvas.zw * uAxis.xy;
+      vec2 b = uCanvas.xy + uCanvas.zw * uAxis.zw;
+      vec2 d = b - a;
+      float t = clamp(dot(vPos - a, d) / max(dot(d, d), 1e-6), 0.0, 1.0);
+      // Linear stops like QLinearGradient and the ffmpeg gradients source:
+      // smoothstep would visibly bend the ramp between stops.
+      vec3 col = mix(mix(uStops0, uStops1, clamp(t * 2.0, 0.0, 1.0)), uStops2,
+                     clamp(t * 2.0 - 1.0, 0.0, 1.0));
+      gl_FragColor = vec4(col, 1.0); }
+  )");
+  gradientProgram_.link();
   for (auto &bank : banks_)
     bank.dirty = true;
 }
@@ -189,8 +224,35 @@ void StudioVideoSurface::paintGL() {
   glScissor(qRound(canvas.x() * dpr),
             qRound((height() - canvas.bottom()) * dpr),
             qRound(canvas.width() * dpr), qRound(canvas.height() * dpr));
-  glClearColor(background.redF(), background.greenF(), background.blueF(), 1);
-  glClear(GL_COLOR_BUFFER_BIT);
+  if (backgroundIsGradient && gradientProgram_.isLinked()) {
+    gradientProgram_.bind();
+    gradientProgram_.setUniformValue("uSize",
+                                     QVector2D(static_cast<float>(width() * dpr),
+                                               static_cast<float>(height() * dpr)));
+    gradientProgram_.setUniformValue("uStops0", backgroundStops[0]);
+    gradientProgram_.setUniformValue("uStops1", backgroundStops[1]);
+    gradientProgram_.setUniformValue("uStops2", backgroundStops[2]);
+    gradientProgram_.setUniformValue(
+        "uAxis", QVector4D(static_cast<float>(backgroundStart.x()),
+                           static_cast<float>(backgroundStart.y()),
+                           static_cast<float>(backgroundEnd.x()),
+                           static_cast<float>(backgroundEnd.y())));
+    gradientProgram_.setUniformValue(
+        "uCanvas",
+        QVector4D(static_cast<float>(canvas.x() * dpr),
+                  static_cast<float>(canvas.y() * dpr),
+                  static_cast<float>(canvas.width() * dpr),
+                  static_cast<float>(canvas.height() * dpr)));
+    gradientProgram_.enableAttributeArray("position");
+    static const GLfloat triangle[6] = {-1, -1, 3, -1, -1, 3};
+    gradientProgram_.setAttributeArray("position", GL_FLOAT, triangle, 2);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    gradientProgram_.disableAttributeArray("position");
+    gradientProgram_.release();
+  } else {
+    glClearColor(background.redF(), background.greenF(), background.blueF(), 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
   glDisable(GL_SCISSOR_TEST);
   if (banks_[primary].frame.size.isEmpty() ||
       (secondary >= 0 && secondaryOpacity > 0 &&

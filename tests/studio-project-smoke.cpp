@@ -818,6 +818,24 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("Out-of-range background accepted")))
       return false;
   }
+  if (!check(!StudioStyle::isGradient(StudioStyle::solidCount - 1) &&
+                 StudioStyle::isGradient(StudioStyle::solidCount) &&
+                 StudioStyle::isGradient(StudioStyle::backgroundCount - 1) &&
+                 !StudioStyle::isGradient(StudioStyle::backgroundCount) &&
+                 StudioStyle::backgroundName(StudioStyle::backgroundCount)
+                     .isEmpty(),
+             QStringLiteral("Background solid/gradient boundary is wrong")))
+    return false;
+  {
+    const StudioGradient dawn =
+        StudioStyle::gradient(StudioStyle::solidCount);
+    if (!check(QString::fromUtf8(dawn.name) == QStringLiteral("Dawn Fire") &&
+                   dawn.startX == 0 && dawn.startY == 0 && dawn.endX == 1 &&
+                   dawn.endY == 1 && dawn.stops[0].red == 0.98 &&
+                   dawn.stops[2].blue == 0.80,
+               QStringLiteral("First gradient preset is not Dawn Fire")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&

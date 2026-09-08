@@ -218,12 +218,36 @@ QStringList studioCompositionArguments(const StudioProject &project,
                               "2-%1),0),max(abs(Y-(H-1)/2)-(H/2-%1),0)),0,1)'")
                    .arg(radius, 0, 'f', 4);
     graph << video + QStringLiteral("[card]");
-    graph << QStringLiteral("color=c=%1:s=%2x%3:r=%4/%5[canvas]")
-                 .arg(project.style.color().name())
-                 .arg(width)
-                 .arg(height)
-                 .arg(project.fpsNumerator)
-                 .arg(project.fpsDenominator);
+    if (StudioStyle::isGradient(project.style.background)) {
+      const StudioGradient preset =
+          StudioStyle::gradient(project.style.background);
+      const auto hex = [](const StudioGradientStop &stop) {
+        return studioStopColor(stop).name();
+      };
+      // Endpoints stay inside the frame: out-of-range values make the
+      // filter pick random ones. speed=0 pins the axis: by default it
+      // rotates a little on every frame.
+      graph << QStringLiteral(
+                   "gradients=s=%1x%2:r=%3/%4:n=3:speed=0:c0=%5:c1=%6:c2=%7:"
+                   "x0=%8:y0=%9:x1=%10:y1=%11[canvas]")
+                   .arg(width)
+                   .arg(height)
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator)
+                   .arg(hex(preset.stops[0]), hex(preset.stops[1]),
+                        hex(preset.stops[2]))
+                   .arg(qRound(preset.startX * (width - 1)))
+                   .arg(qRound(preset.startY * (height - 1)))
+                   .arg(qRound(preset.endX * (width - 1)))
+                   .arg(qRound(preset.endY * (height - 1)));
+    } else {
+      graph << QStringLiteral("color=c=%1:s=%2x%3:r=%4/%5[canvas]")
+                   .arg(project.style.color().name())
+                   .arg(width)
+                   .arg(height)
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator);
+    }
     graph << QStringLiteral("[canvas][card]overlay=x=(W-w)/2:y=(H-h)/2:"
                             "shortest=1:format=auto,format=yuv420p[video]");
   } else {

@@ -43,6 +43,13 @@ public:
   QRectF drawn;
   QRectF canvas;
   QColor background;
+  // Three-stop linear gradient replacing the flat clear when set. Unit
+  // endpoints share StudioStyle's top-left origin; an unlinked gradient
+  // program falls back to the flat `background` (the middle stop).
+  bool backgroundIsGradient = false;
+  std::array<QVector3D, 3> backgroundStops{};
+  QPointF backgroundStart{};
+  QPointF backgroundEnd{1, 1};
   QColor workspace{QStringLiteral("#101315")};
   qreal radius = 0;
   QRectF source{0, 0, 1, 1};
@@ -69,4 +76,5 @@ private:
   std::array<TextureBank, 2> banks_;
   bool multiFrame_ = false;
   QOpenGLShaderProgram program_;
+  QOpenGLShaderProgram gradientProgram_;
 };

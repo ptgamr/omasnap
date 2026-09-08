@@ -15,6 +15,22 @@ constexpr qreal kMarkerRadius = 7.0;
 
 } // namespace
 
+QBrush studioBackgroundBrush(const StudioStyle &style, const QRectF &rect) {
+  if (!StudioStyle::isGradient(style.background))
+    return QBrush(style.color());
+  const StudioGradient preset = StudioStyle::gradient(style.background);
+  const auto point = [&](double x, double y) {
+    return QPointF(rect.left() + x * rect.width(),
+                   rect.top() + y * rect.height());
+  };
+  QLinearGradient gradient(point(preset.startX, preset.startY),
+                           point(preset.endX, preset.endY));
+  gradient.setColorAt(0, studioStopColor(preset.stops[0]));
+  gradient.setColorAt(0.5, studioStopColor(preset.stops[1]));
+  gradient.setColorAt(1, studioStopColor(preset.stops[2]));
+  return QBrush(gradient);
+}
+
 StudioPreview::StudioPreview(QWidget *parent) : QWidget(parent) {
   setMouseTracking(true);
   setCursor(Qt::CrossCursor);
@@ -209,6 +225,18 @@ void StudioPreview::refreshSurface() {
     surface_->drawn = frameRect();
     surface_->canvas = canvasRect();
     surface_->background = style_.color();
+    surface_->backgroundIsGradient =
+        StudioStyle::isGradient(style_.background);
+    if (surface_->backgroundIsGradient) {
+      const StudioGradient preset = StudioStyle::gradient(style_.background);
+      for (int i = 0; i < 3; ++i) {
+        const QColor stop = studioStopColor(preset.stops[i]);
+        surface_->backgroundStops[static_cast<size_t>(i)] =
+            QVector3D(stop.redF(), stop.greenF(), stop.blueF());
+      }
+      surface_->backgroundStart = QPointF(preset.startX, preset.startY);
+      surface_->backgroundEnd = QPointF(preset.endX, preset.endY);
+    }
     surface_->workspace = chrome_.background;
     surface_->radius = style_.radius * canvasRect().height() / 1080.0;
     surface_->source =
@@ -363,7 +391,7 @@ void StudioPreview::paintEvent(QPaintEvent *) {
   const QRectF window =
       track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
   painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-  painter.fillRect(canvasRect(), style_.color());
+  painter.fillRect(canvasRect(), studioBackgroundBrush(style_, canvasRect()));
   painter.save();
   if (style_.radius > 0) {
     QPainterPath clip;

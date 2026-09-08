@@ -26,6 +26,10 @@
  * clicking while already zoomed in aims at the thing under the pointer
  * rather than somewhere else.
  */
+/** Solid color or three-stop linear gradient filling `rect`, matching the
+ *  ffmpeg export background for the same style. */
+[[nodiscard]] QBrush studioBackgroundBrush(const StudioStyle &style,
+                                           const QRectF &rect);
 class StudioPreview final : public QWidget {
   Q_OBJECT
 public:

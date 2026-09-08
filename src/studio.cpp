@@ -1340,8 +1340,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   canvasLayout->addWidget(canvasLabel);
   background_ = new StudioComboBox(canvasPanel_);
   background_->setChrome(theme_->chrome());
-  for (const auto &preset : StudioStyle::backgrounds)
-    background_->addItem(QString::fromUtf8(preset.name));
+  for (int index = 0; index < StudioStyle::backgroundCount; ++index)
+    background_->addItem(StudioStyle::backgroundName(index));
   canvasLayout->addWidget(background_);
   padding_ = new QSlider(Qt::Horizontal, canvasPanel_);
   padding_->setRange(0, 20);
