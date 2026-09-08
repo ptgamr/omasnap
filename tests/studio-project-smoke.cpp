@@ -836,6 +836,21 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("First gradient preset is not Dawn Fire")))
       return false;
   }
+  {
+    auto wallpapers = p;
+    wallpapers.style.wallpaperPath = QStringLiteral("/tmp/wallpaper.png");
+    if (!check(validateStudioProject(wallpapers).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(wallpapers), decoded)
+                           .isEmpty() &&
+                   decoded.style.wallpaperPath ==
+                       QStringLiteral("/tmp/wallpaper.png"),
+               QStringLiteral("Wallpaper background does not persist")))
+      return false;
+    wallpapers.style.wallpaperPath.fill(QChar::Null);
+    if (!check(!validateStudioProject(wallpapers).isEmpty(),
+               QStringLiteral("NUL wallpaper path accepted")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&

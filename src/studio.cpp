@@ -1343,6 +1343,19 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   for (int index = 0; index < StudioStyle::backgroundCount; ++index)
     background_->addItem(StudioStyle::backgroundName(index));
   canvasLayout->addWidget(background_);
+  auto *wallpaperRow = new QHBoxLayout;
+  wallpaperButton_ = new QPushButton(QStringLiteral("Wallpaper…"), canvasPanel_);
+  wallpaperButton_->setObjectName(QStringLiteral("canvasWallpaper"));
+  wallpaperButton_->setToolTip(
+      QStringLiteral("Use an image behind the video — start in the Omarchy themes"));
+  wallpaperLabel_ = new QLabel(QStringLiteral("None"), canvasPanel_);
+  wallpaperLabel_->setObjectName(QStringLiteral("muted"));
+  wallpaperLabel_->setWordWrap(true);
+  wallpaperRow->addWidget(wallpaperButton_);
+  wallpaperRow->addWidget(wallpaperLabel_, 1);
+  canvasLayout->addLayout(wallpaperRow);
+  connect(wallpaperButton_, &QPushButton::clicked, this,
+          &StudioWindow::chooseWallpaper);
   padding_ = new QSlider(Qt::Horizontal, canvasPanel_);
   padding_->setRange(0, 20);
   padding_->setObjectName(QStringLiteral("canvasPadding"));
@@ -1366,7 +1379,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   };
   styleSlider(QStringLiteral("Padding"), padding_, QStringLiteral("%"));
   styleSlider(QStringLiteral("Corner radius"), radius_, QStringLiteral(" px"));
-  connect(background_, &QComboBox::currentIndexChanged, this,
+  // activated, not currentIndexChanged: re-picking the shown preset must
+  // still reach styleChanged (it clears an active wallpaper), while
+  // refreshControls restoring the index must not look like a user edit.
+  connect(background_, &QComboBox::activated, this,
           &StudioWindow::styleChanged);
   for (QSlider *slider : {padding_, radius_}) {
     connect(slider, &QSlider::valueChanged, this, &StudioWindow::styleChanged);
@@ -1522,7 +1538,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(splitButton_, keepButton_);
   QWidget::setTabOrder(keepButton_, deleteButton_);
   QWidget::setTabOrder(deleteButton_, background_);
-  QWidget::setTabOrder(background_, padding_);
+  QWidget::setTabOrder(background_, wallpaperButton_);
+  QWidget::setTabOrder(wallpaperButton_, padding_);
   QWidget::setTabOrder(padding_, radius_);
   QWidget::setTabOrder(radius_, previewZoomButton_);
   QWidget::setTabOrder(previewZoomButton_, zoomSlider_);
@@ -1971,9 +1988,41 @@ void StudioWindow::styleChanged() {
   captureCursor();
   if (restoring_ || !background_->isEnabled())
     return;
-  const StudioStyle style{background_->currentIndex(), padding_->value(),
-                          radius_->value()};
-  if (style == style_)
+  StudioStyle style{background_->currentIndex(), padding_->value(),
+                    radius_->value(), style_.wallpaperPath};
+  // Picking a preset drops the wallpaper; slider moves keep it.
+  if (sender() == background_)
+    style.wallpaperPath.clear();
+  commitStyle(style);
+}
+
+void StudioWindow::chooseWallpaper() {
+  if (!scenesEditable())
+    return;
+  QString start = QFileInfo(style_.wallpaperPath).dir().path();
+  if (style_.wallpaperPath.isEmpty() || !QDir(start).exists()) {
+    start = QStringLiteral("/usr/share/omarchy/themes");
+    if (!QDir(start).exists())
+      start = QDir::homePath();
+  }
+  auto *dialog = new QFileDialog(this, QStringLiteral("Choose wallpaper"),
+                                 start);
+  dialog->setAttribute(Qt::WA_DeleteOnClose);
+  dialog->setOption(QFileDialog::DontUseNativeDialog);
+  dialog->setFileMode(QFileDialog::ExistingFile);
+  dialog->setNameFilters(
+      {QStringLiteral("Images (*.png *.jpg *.jpeg *.webp *.bmp)"),
+       QStringLiteral("All files (*)")});
+  connect(dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
+    captureCursor();
+    commitStyle({background_->currentIndex(), padding_->value(),
+                 radius_->value(), path});
+  });
+  dialog->show();
+}
+
+void StudioWindow::commitStyle(const StudioStyle &style) {
+  if (restoring_ || style == style_)
     return;
   style_ = style;
   preview_->setStyle(style_);
@@ -2293,6 +2342,11 @@ void StudioWindow::refreshControls() {
       ? QStringLiteral("Delete the selected range, clip, transition, or zoom · Delete")
       : QStringLiteral("Select a clip, transition, zoom, or range to delete"));
   background_->setEnabled(editable);
+  wallpaperButton_->setEnabled(editable);
+  wallpaperLabel_->setText(style_.wallpaperPath.isEmpty()
+                               ? QStringLiteral("None")
+                               : QFileInfo(style_.wallpaperPath).fileName());
+  wallpaperLabel_->setToolTip(style_.wallpaperPath);
   padding_->setEnabled(editable);
   radius_->setEnabled(editable);
   {

@@ -143,6 +143,13 @@ QStringList studioCompositionArguments(const StudioProject &project,
                      .arg(length, index);
     joined += QStringLiteral("[v%1][a%1]").arg(index);
   }
+  // Wallpaper rides as one looped still after the scene inputs, stretched to
+  // fill like Bettershot. A missing file fails loudly in ffmpeg, the same
+  // way a missing scene source does.
+  const bool wallpaper = !project.style.wallpaperPath.isEmpty();
+  if (wallpaper)
+    args << QStringLiteral("-loop") << QStringLiteral("1") << QStringLiteral("-i")
+         << project.style.wallpaperPath;
   if (!transitions) {
     // Leave the timestamp-aware hard-cut path alone: it does not need a
     // per-scene CFR conversion, RGB intermediate, or overlapping decoders.
@@ -218,7 +225,25 @@ QStringList studioCompositionArguments(const StudioProject &project,
                               "2-%1),0),max(abs(Y-(H-1)/2)-(H/2-%1),0)),0,1)'")
                    .arg(radius, 0, 'f', 4);
     graph << video + QStringLiteral("[card]");
-    if (StudioStyle::isGradient(project.style.background)) {
+    if (wallpaper) {
+      // Transparency flattens onto black, matching the preview worker: the
+      // wallpaper keeps its alpha for the blend, then the canvas is opaque.
+      graph << QStringLiteral(
+                   "[%1:v:0]scale=%2:%3:force_divisible_by=2,setsar=1,"
+                   "format=rgba[wall]")
+                   .arg(spans.size())
+                   .arg(width)
+                   .arg(height);
+      graph << QStringLiteral("color=c=black:s=%1x%2:r=%3/%4[wallbg]")
+                   .arg(width)
+                   .arg(height)
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator);
+      graph << QStringLiteral("[wallbg][wall]overlay=x=0:y=0:format=auto,"
+                              "fps=%1/%2,format=yuv420p[canvas]")
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator);
+    } else if (StudioStyle::isGradient(project.style.background)) {
       const StudioGradient preset =
           StudioStyle::gradient(project.style.background);
       const auto hex = [](const StudioGradientStop &stop) {

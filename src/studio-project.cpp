@@ -342,7 +342,8 @@ QString validateStudioProject(const StudioProject &p) {
   if (p.style.background < 0 ||
       p.style.background >= StudioStyle::backgroundCount ||
       p.style.padding < 0 || p.style.padding > 40 || p.style.radius < 0 ||
-      p.style.radius > 100)
+      p.style.radius > 100 || p.style.wallpaperPath.size() > 32768 ||
+      p.style.wallpaperPath.contains(QChar::Null))
     return QStringLiteral("Invalid project canvas styling.");
   QSet<quint64> assets;
   for (const auto &a : p.assets) {
@@ -441,7 +442,9 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                                         {"fpsDenominator", p.fpsDenominator}}},
                  {"style", QJsonObject{{"background", p.style.background},
                                        {"padding", p.style.padding},
-                                       {"radius", p.style.radius}}},
+                                       {"radius", p.style.radius},
+                                       {"wallpaperPath",
+                                        p.style.wallpaperPath}}},
                  {"zoom", writeZoomTrack(p.zoom)},
                  {"trimInMs", p.trimInMs},
                  {"trimOutMs", p.trimOutMs}})
@@ -479,11 +482,18 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
   for (const auto *key : {"background", "padding", "radius"})
     if (!integer(style[key], 0, 100))
       return malformed;
+  // Absent in projects written before wallpapers existed; overlong or
+  // non-string values are malformed like any other mistyped field.
+  if (!style["wallpaperPath"].isUndefined() &&
+      (!style["wallpaperPath"].isString() ||
+       style["wallpaperPath"].toString().size() > 32768 ||
+       style["wallpaperPath"].toString().contains(QChar::Null)))
+    return malformed;
   p.canvas = {canvas["width"].toInt(), canvas["height"].toInt()};
   p.fpsNumerator = canvas["fpsNumerator"].toInt();
   p.fpsDenominator = canvas["fpsDenominator"].toInt();
   p.style = {style["background"].toInt(), style["padding"].toInt(),
-             style["radius"].toInt()};
+             style["radius"].toInt(), style["wallpaperPath"].toString()};
   for (const auto &value : assets) {
     const auto a = value.toObject();
     const auto s = a["source"].toObject();

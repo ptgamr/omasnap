@@ -94,6 +94,10 @@ private:
   void preparePendingFrame(int slot);
   void refreshSurface();
   void paintOverlay(QPainter &painter) const;
+  /** Decodes the requested wallpaper off the GUI thread; the finished
+   *  handler commits it only when still wanted and chains a newer
+   *  request. */
+  void startWallpaperLoad();
 
   QImage frame_;
   QSize videoSize_;
@@ -120,6 +124,13 @@ private:
   bool composition_ = false;
   int canvasInset_ = 0;
   StudioStyle style_;
+  // Requested, in-flight, fulfilled, and painted wallpaper state. The image
+  // is shared implicitly with the GPU surface; uploads happen there.
+  QString wallpaperPath_;
+  QString wallpaperLoadingPath_;
+  QString wallpaperLoadedPath_;
+  QImage wallpaper_;
+  QFutureWatcher<QImage> wallpaperWatcher_;
   StudioChrome chrome_;
   const ZoomTrack *track_ = nullptr;
   qint64 positionMs_ = 0;

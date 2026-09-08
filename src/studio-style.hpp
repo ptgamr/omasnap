@@ -43,6 +43,10 @@ struct StudioStyle {
   int background = 0;
   int padding = 0; // Percent of each canvas dimension, on each side.
   int radius = 0;  // Pixels at a 1080-pixel canvas height.
+  // Local wallpaper image winning over `background` while set. Stored as an
+  // absolute path; a missing file surfaces as an export error, like a
+  // missing scene source.
+  QString wallpaperPath;
   bool operator==(const StudioStyle &) const = default;
 
   // Solid background presets matching Bettershot's twelve-color palette.

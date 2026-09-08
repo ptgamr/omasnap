@@ -84,6 +84,19 @@ StudioPreview::StudioPreview(QWidget *parent) : QWidget(parent) {
           }
           preparePendingFrame(index);
         });
+  connect(&wallpaperWatcher_, &QFutureWatcher<QImage>::finished, this, [this] {
+    if (wallpaperLoadingPath_ == wallpaperPath_) {
+      wallpaper_ = wallpaperWatcher_.result();
+      wallpaperLoadedPath_ = wallpaperPath_;
+    }
+    wallpaperLoadingPath_ = {};
+    if (wallpaperLoadedPath_ != wallpaperPath_ && !wallpaperPath_.isEmpty())
+      startWallpaperLoad();
+    else {
+      refreshSurface();
+      update();
+    }
+  });
 }
 
 QSize StudioPreview::sizeHint() const { return {960, 540}; }
@@ -206,7 +219,38 @@ void StudioPreview::setCanvasInset(int inset) {
 
 void StudioPreview::setStyle(const StudioStyle &style) {
   style_ = style;
+  if (style_.wallpaperPath != wallpaperPath_) {
+    wallpaperPath_ = style_.wallpaperPath;
+    wallpaper_ = {};
+    wallpaperLoadedPath_ = {};
+    if (!wallpaperPath_.isEmpty() && !wallpaperWatcher_.isRunning())
+      startWallpaperLoad();
+  }
   refreshSurface();
+}
+
+void StudioPreview::startWallpaperLoad() {
+  wallpaperLoadingPath_ = wallpaperPath_;
+  const QString path = wallpaperPath_;
+  wallpaperWatcher_.setFuture(QtConcurrent::run([path] {
+    QImage image(path);
+    if (image.isNull())
+      return image;
+    if (qMax(image.width(), image.height()) > 2048)
+      image = image.scaled(2048, 2048, Qt::KeepAspectRatio,
+                           Qt::SmoothTransformation);
+    // Flatten transparency onto black once, here: video has no alpha, and
+    // every backend (painter, GL texture, ffmpeg yuv420p) must agree on the
+    // result instead of each compositing its own surrounding color.
+    if (!image.hasAlphaChannel())
+      return image.convertToFormat(QImage::Format_RGBA8888);
+    QImage flat(image.size(), QImage::Format_RGBA8888);
+    flat.fill(Qt::black);
+    QPainter painter(&flat);
+    painter.drawImage(0, 0, image);
+    painter.end();
+    return flat;
+  }));
 }
 
 void StudioPreview::setChrome(const StudioChrome &chrome) {
@@ -225,6 +269,7 @@ void StudioPreview::refreshSurface() {
     surface_->drawn = frameRect();
     surface_->canvas = canvasRect();
     surface_->background = style_.color();
+    surface_->wallpaper = wallpaper_;
     surface_->backgroundIsGradient =
         StudioStyle::isGradient(style_.background);
     if (surface_->backgroundIsGradient) {
@@ -391,7 +436,10 @@ void StudioPreview::paintEvent(QPaintEvent *) {
   const QRectF window =
       track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
   painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-  painter.fillRect(canvasRect(), studioBackgroundBrush(style_, canvasRect()));
+  if (!wallpaper_.isNull())
+    painter.drawImage(canvasRect(), wallpaper_);
+  else
+    painter.fillRect(canvasRect(), studioBackgroundBrush(style_, canvasRect()));
   painter.save();
   if (style_.radius > 0) {
     QPainterPath clip;

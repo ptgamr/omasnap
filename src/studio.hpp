@@ -222,6 +222,8 @@ private:
   void restoreEdit();
   void setSelectedZoomTiming(bool easeIn, int milliseconds);
   void styleChanged();
+  void chooseWallpaper();
+  void commitStyle(const StudioStyle &style);
   void togglePlayback();
   [[nodiscard]] qint64 boundedSeek(qint64 milliseconds) const;
   void refreshSplitAction();
@@ -323,6 +325,8 @@ private:
   class QWidget *emptyCard_ = nullptr;
   bool inspectorWanted_ = true;
   StudioComboBox *background_ = nullptr;
+  class QPushButton *wallpaperButton_ = nullptr;
+  class QLabel *wallpaperLabel_ = nullptr;
   class QSlider *padding_ = nullptr;
   class QSlider *radius_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;

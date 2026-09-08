@@ -94,6 +94,12 @@ void StudioVideoSurface::releaseResources() {
   }
   program_.removeAllShaders();
   gradientProgram_.removeAllShaders();
+  wallpaperProgram_.removeAllShaders();
+  if (wallpaperTexture != 0) {
+    glDeleteTextures(1, &wallpaperTexture);
+    wallpaperTexture = 0;
+  }
+  wallpaperTextureKey = 0;
   doneCurrent();
 }
 
@@ -212,8 +218,47 @@ void StudioVideoSurface::initializeGL() {
       gl_FragColor = vec4(col, 1.0); }
   )");
   gradientProgram_.link();
+  // Stretched wallpaper sampling. Same vertex mapping as the gradient
+  // program; uv (0,0) is the image top-left, matching the QImage row order
+  // uploaded below. Unlinked programs fall back to the flat color.
+  wallpaperProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
+    attribute vec2 position;
+    uniform vec2 uSize;
+    varying vec2 vPos;
+    void main() {
+      vPos = vec2((position.x + 1.0) * 0.5 * uSize.x,
+                  (1.0 - (position.y + 1.0) * 0.5) * uSize.y);
+      gl_Position = vec4(position, 0.0, 1.0); }
+  )");
+  wallpaperProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
+    #ifdef GL_ES
+    precision highp float;
+    #endif
+    uniform sampler2D uTex;
+    uniform vec4 uCanvas;
+    varying vec2 vPos;
+    void main() {
+      gl_FragColor = texture2D(uTex, (vPos - uCanvas.xy) / uCanvas.zw); }
+  )");
+  wallpaperProgram_.link();
   for (auto &bank : banks_)
     bank.dirty = true;
+}
+
+void StudioVideoSurface::ensureWallpaperTexture() {
+  if (wallpaper.isNull() || wallpaperTextureKey == wallpaper.cacheKey())
+    return;
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+  if (wallpaperTexture == 0)
+    glGenTextures(1, &wallpaperTexture);
+  glBindTexture(GL_TEXTURE_2D, wallpaperTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, wallpaper.width(), wallpaper.height(),
+               0, GL_RGBA, GL_UNSIGNED_BYTE, wallpaper.constBits());
+  wallpaperTextureKey = wallpaper.cacheKey();
 }
 
 void StudioVideoSurface::paintGL() {
@@ -224,7 +269,28 @@ void StudioVideoSurface::paintGL() {
   glScissor(qRound(canvas.x() * dpr),
             qRound((height() - canvas.bottom()) * dpr),
             qRound(canvas.width() * dpr), qRound(canvas.height() * dpr));
-  if (backgroundIsGradient && gradientProgram_.isLinked()) {
+  if (!wallpaper.isNull() && wallpaperProgram_.isLinked()) {
+    ensureWallpaperTexture();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, wallpaperTexture);
+    wallpaperProgram_.bind();
+    wallpaperProgram_.setUniformValue(
+        "uSize", QVector2D(static_cast<float>(width() * dpr),
+                           static_cast<float>(height() * dpr)));
+    wallpaperProgram_.setUniformValue("uTex", 0);
+    wallpaperProgram_.setUniformValue(
+        "uCanvas",
+        QVector4D(static_cast<float>(canvas.x() * dpr),
+                  static_cast<float>(canvas.y() * dpr),
+                  static_cast<float>(canvas.width() * dpr),
+                  static_cast<float>(canvas.height() * dpr)));
+    wallpaperProgram_.enableAttributeArray("position");
+    static const GLfloat triangle[6] = {-1, -1, 3, -1, -1, 3};
+    wallpaperProgram_.setAttributeArray("position", GL_FLOAT, triangle, 2);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    wallpaperProgram_.disableAttributeArray("position");
+    wallpaperProgram_.release();
+  } else if (backgroundIsGradient && gradientProgram_.isLinked()) {
     gradientProgram_.bind();
     gradientProgram_.setUniformValue("uSize",
                                      QVector2D(static_cast<float>(width() * dpr),

@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTest>
 #include <QtEndian>
 #include <cmath>
 
@@ -791,6 +792,75 @@ bool runStudioCompositionChecks(QString &error) {
   gradientDifference /= 60 * 107 * 3;
   if (!require(gradientDifference < 12,
                "gradient background preview and export disagree"))
+    return false;
+  // Wallpaper images stretch to fill, like Bettershot, in both preview and
+  // export. The preview decodes off the GUI thread, so poll for arrival.
+  const QString wallpaperPath = scratch.filePath("wallpaper.png");
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "color=0x2bd96a:s=64x48", "-frames:v", "1", wallpaperPath},
+           output, error))
+    return false;
+  project.style = {0, 10, 0, wallpaperPath};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto wallpaperExport = sample(ffmpeg, path, 0.3, error);
+  if (!require(!wallpaperExport.isNull(),
+               "wallpaper background export frame was missing"))
+    return false;
+  const auto wallpaperCorner = wallpaperExport.pixelColor(4, 4);
+  if (!require(std::abs(wallpaperCorner.red() - 0x2b) < 16 &&
+                   std::abs(wallpaperCorner.green() - 0xd9) < 16 &&
+                   std::abs(wallpaperCorner.blue() - 0x6a) < 16,
+               "wallpaper background export corner has the wrong color"))
+    return false;
+  preview.setStyle(project.style);
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     const auto corner = preview.grab()
+                                             .toImage()
+                                             .scaled(project.canvas)
+                                             .pixelColor(4, 4);
+                     return std::abs(corner.red() - 0x2b) < 24 &&
+                            std::abs(corner.green() - 0xd9) < 24 &&
+                            std::abs(corner.blue() - 0x6a) < 24;
+                   },
+                   5000),
+               "wallpaper background never reached the preview"))
+    return false;
+  // Transparency flattens onto black identically in preview and export,
+  // never onto the theme chrome surrounding the preview.
+  const QString alphaPath = scratch.filePath("alpha.png");
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "color=c=red@0.0:s=32x24:d=1,format=rgba", "-frames:v", "1",
+            alphaPath},
+           output, error))
+    return false;
+  // Bright fallback: the arrival poll below must not pass on the preset
+  // showing while the wallpaper still decodes.
+  project.style = {1, 10, 0, alphaPath};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto alphaExport = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  if (!require(!alphaExport.isNull() &&
+                   QTest::qWaitFor(
+                       [&] {
+                         const auto corner = preview.grab()
+                                                 .toImage()
+                                                 .scaled(project.canvas)
+                                                 .pixelColor(4, 4);
+                         return corner.red() < 24 && corner.green() < 24 &&
+                                corner.blue() < 24;
+                       },
+                       5000),
+               "transparent wallpaper did not flatten onto black in preview"))
+    return false;
+  const auto alphaCorner = alphaExport.pixelColor(4, 4);
+  if (!require(alphaCorner.red() < 24 && alphaCorner.green() < 24 &&
+                   alphaCorner.blue() < 24,
+               "transparent wallpaper did not flatten onto black in export"))
     return false;
   // A changing cadence retains timestamps; frame-index-based concatenation
   // would move the blue/green changes and shorten this two-second source.

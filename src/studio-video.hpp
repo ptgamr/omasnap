@@ -50,6 +50,10 @@ public:
   std::array<QVector3D, 3> backgroundStops{};
   QPointF backgroundStart{};
   QPointF backgroundEnd{1, 1};
+  // Stretched wallpaper winning over both, uploaded once per image. The key
+  // is the image cache key, so identical pixels never re-upload.
+  QImage wallpaper;
+  qint64 wallpaperTextureKey = 0;
   QColor workspace{QStringLiteral("#101315")};
   qreal radius = 0;
   QRectF source{0, 0, 1, 1};
@@ -77,4 +81,7 @@ private:
   bool multiFrame_ = false;
   QOpenGLShaderProgram program_;
   QOpenGLShaderProgram gradientProgram_;
+  QOpenGLShaderProgram wallpaperProgram_;
+  GLuint wallpaperTexture = 0;
+  void ensureWallpaperTexture();
 };
