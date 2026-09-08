@@ -157,6 +157,7 @@ QWidget { color: @text; font-family: monospace; }
 QWidget#studioHeader, QWidget#studioInspector, QWidget#studioCanvas, QWidget#timelinePanel, QDialog { background: @background; }
 QWidget#timelinePanel, QWidget#studioInspector { border-top: 1px solid @divider; }
 QWidget#studioInspector { border-left: 1px solid @divider; }
+QWidget#studioHeader { border-bottom: 1px solid @divider; }
 QWidget#studioScenePage, QWidget#studioScrollViewport { background: @background; }
 QLabel#muted, QLabel#section { color: @muted; }
 QLabel[studioError="true"] { color: @urgent; }
