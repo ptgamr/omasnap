@@ -175,6 +175,16 @@ void StudioWindow::refreshTransitionControls(bool force) {
   transitionDirection_->setEnabled(editable && directional);
   transitionDuration_->setEnabled(editable && transition && maximum > 0);
   previewTransitionButton_->setEnabled(editable && !mediaFailed_);
+  const bool transitionPreviewing =
+      previewKind_ == PreviewKind::Transition &&
+      player_->playbackState() == QMediaPlayer::PlayingState;
+  previewTransitionButton_->setText(transitionPreviewing
+                                        ? QStringLiteral("Stop")
+                                        : QStringLiteral("Preview"));
+  previewTransitionButton_->setToolTip(
+      transitionPreviewing
+          ? QStringLiteral("Stop the transition preview")
+          : QStringLiteral("Play from just before the transition"));
   transitionType_->setCurrentIndex(
       transition ? transitionType_->findData(transitionTypeFor(transition->kind))
                  : 0);
