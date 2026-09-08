@@ -54,6 +54,7 @@ if(BUILD_TESTING)
   find_package(Qt6 6.8 REQUIRED COMPONENTS Test)
   set(STUDIO_TEST_SOURCES
     studio-smoke.cpp
+    studio-background-ui-smoke.cpp studio-background-ui-smoke.hpp
     studio-project-smoke.cpp studio-project-smoke.hpp
     studio-composition-smoke.cpp studio-composition-smoke.hpp
     studio-playback-smoke.cpp studio-playback-smoke.hpp

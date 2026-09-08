@@ -2,6 +2,7 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio-composition-smoke.hpp"
+#include "studio-background-ui-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
 #include "studio-export.hpp"
 #include "studio-playback-smoke.hpp"
@@ -1292,6 +1293,8 @@ bool runStudioInteractionChecks(QString &error) {
   if (!runStudioPlaybackChecks(source, error))
     return false;
   if (!runStudioCutsUiChecks(source, error))
+    return false;
+  if (!runStudioBackgroundUiChecks(source, error))
     return false;
   if (!runStudioScenesUiChecks(source, error))
     return false;

@@ -214,6 +214,7 @@ qt_add_executable(omasnap-studio-smoke
   src/studio-composition.cpp src/studio-composition.hpp
   src/studio-playback.cpp src/studio-playback.hpp
   tests/studio-project-smoke.cpp tests/studio-project-smoke.hpp
+  tests/studio-background-ui-smoke.cpp tests/studio-background-ui-smoke.hpp
   tests/studio-composition-smoke.cpp tests/studio-composition-smoke.hpp
   tests/studio-playback-smoke.cpp tests/studio-playback-smoke.hpp
   tests/studio-cuts-ui-smoke.cpp tests/studio-cuts-ui-smoke.hpp

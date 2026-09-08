@@ -9,10 +9,13 @@
 
 #include <QFutureWatcher>
 #include <QImage>
+#include <QMap>
+#include <QPair>
 #include <QPixmap>
 #include <QSet>
 #include <QSize>
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <utility>
@@ -29,6 +32,16 @@ struct StudioThumbnail {
   qint64 sourceMs = 0;
   QImage image;
 };
+
+/** A discovered wallpaper plus its uniform grid tile, center-cropped. */
+using StudioWallpaperThumb = QPair<QString, QImage>;
+/** Images under the shipped Quattro themes and the user background dir,
+ *  sorted. Empty where Omarchy themes are absent (CI, other systems). */
+[[nodiscard]] QStringList studioQuattroWallpaperPaths();
+/** Decodes and crops tiles for the grid. Skips unreadable files. Runs on a
+ *  worker, never inline in a GUI callback. */
+[[nodiscard]] QVector<StudioWallpaperThumb>
+studioWallpaperThumbs(const QStringList &paths);
 
 /** Composition timeline with source-keyed thumbnail tiles and modeless gestures. */
 class StudioTimeline final : public QWidget {
@@ -224,6 +237,21 @@ private:
   void styleChanged();
   void chooseWallpaper();
   void commitStyle(const StudioStyle &style);
+  /** Combo index mapped to the model, preserving the stored preset while
+   *  the combo is hidden on the wallpaper tab. */
+  [[nodiscard]] int currentPresetIndex() const;
+  /** Applies a built-in preset from the presets combo. */
+  void applyPreset(int index);
+  /** Shows one background tab, committing a preset when leaving wallpaper. */
+  void switchBackgroundTab(int tab);
+  /** Shows recent or discovered wallpapers in the grid. */
+  void switchWallpaperGroup(int group);
+  /** Rebuilds the section from the style without creating an edit. */
+  void refreshBackgroundSection();
+  /** Starts async thumbnail loading on first wallpaper view. */
+  void ensureWallpapers();
+  /** Records a picked wallpaper in session recents and refreshes checks. */
+  void noteWallpaperPicked(const QString &path);
   void togglePlayback();
   [[nodiscard]] qint64 boundedSeek(qint64 milliseconds) const;
   void refreshSplitAction();
@@ -326,8 +354,35 @@ private:
   bool inspectorWanted_ = true;
   StudioComboBox *background_ = nullptr;
   StudioComboBox *aspect_ = nullptr;
-  class QPushButton *wallpaperButton_ = nullptr;
-  class QLabel *wallpaperLabel_ = nullptr;
+  StudioComboBox *presets_ = nullptr;
+  class QPushButton *colorTab_ = nullptr;
+  class QPushButton *gradientTab_ = nullptr;
+  class QPushButton *wallpaperTab_ = nullptr;
+  class QWidget *presetPage_ = nullptr;
+  class QWidget *wallpaperPage_ = nullptr;
+  class QPushButton *recentTab_ = nullptr;
+  class QPushButton *quattroTab_ = nullptr;
+  class QWidget *wallpaperGrid_ = nullptr;
+  class QGridLayout *wallpaperGridLayout_ = nullptr;
+  class QLabel *wallpaperStatus_ = nullptr;
+  QVector<QPushButton *> wallpaperTiles_;
+  QStringList wallpaperTilePaths_;
+  QStringList gridShownPaths_;
+  bool gridBuilt_ = false;
+  QMap<QString, QImage> wallpaperThumbs_;
+  QStringList wallpaperPaths_;
+  QStringList recentWallpapers_;
+  QFutureWatcher<QVector<StudioWallpaperThumb>> wallpaperGridWatcher_;
+  bool wallpapersLoading_ = false;
+  bool wallpapersLoaded_ = false;
+  // 0 Color, 1 Gradient, 2 Wallpaper; 0 Recent, 1 Quattro. The background
+  // view starts invalid so the first refresh populates the combo. The
+  // wallpaper view is sticky (slider moves must not kick out browsing);
+  // every other view follows the model.
+  int backgroundTab_ = -1;
+  int comboTab_ = -1;
+  int wallpaperGroup_ = 1;
+  int lastPreset_ = 0;
   class QSlider *padding_ = nullptr;
   class QSlider *radius_ = nullptr;
   class QSlider *shadow_ = nullptr;

@@ -10,14 +10,17 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QAudioOutput>
+#include <QButtonGroup>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -51,6 +54,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <iterator>
 #include <limits>
 
 namespace {
@@ -1213,6 +1217,59 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
   }
 }
 
+QStringList studioQuattroWallpaperPaths() {
+  const QStringList roots{QStringLiteral("/usr/share/omarchy/themes"),
+                          QDir::homePath() +
+                              QStringLiteral("/.config/omarchy/backgrounds")};
+  const QStringList filters{QStringLiteral("*.png"), QStringLiteral("*.PNG"),
+                            QStringLiteral("*.jpg"), QStringLiteral("*.JPG"),
+                            QStringLiteral("*.jpeg"), QStringLiteral("*.JPEG"),
+                            QStringLiteral("*.webp"), QStringLiteral("*.WEBP"),
+                            QStringLiteral("*.bmp"), QStringLiteral("*.BMP")};
+  QStringList paths;
+  for (const auto &root : roots) {
+    QDirIterator it(root, filters, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext() && paths.size() < 500) {
+      it.next();
+      // Theme chrome previews are not wallpapers.
+      if (it.fileName().startsWith(QStringLiteral("preview")) ||
+          it.fileName().startsWith(QStringLiteral("unlock")))
+        continue;
+      paths.push_back(it.filePath());
+    }
+  }
+  std::sort(paths.begin(), paths.end());
+  paths.removeDuplicates();
+  return paths;
+}
+
+QVector<StudioWallpaperThumb>
+studioWallpaperThumbs(const QStringList &paths) {
+  QVector<StudioWallpaperThumb> thumbs;
+  const QSize tile(128, 80);
+  for (const auto &path : paths) {
+    const QImage image(path);
+    if (image.isNull())
+      continue;
+    const QImage scaled = image.scaled(tile, Qt::KeepAspectRatioByExpanding,
+                                       Qt::SmoothTransformation);
+    const int x = (scaled.width() - tile.width()) / 2;
+    const int y = (scaled.height() - tile.height()) / 2;
+    thumbs.push_back({path, scaled.copy(x, y, tile.width(), tile.height())});
+  }
+  return thumbs;
+}
+
+namespace {
+// Built-in recipes for the presets combo; Custom (index 0) is the manual
+// state, never applied. Custom user presets need a storage decision first.
+const StudioStyle kBackgroundPresetStyles[] = {
+    {0, 0, 0, 0, {}, 0},     // Edge to edge
+    {12, 10, 24, 0, {}, 30}, // Floating card on Dawn Fire
+    {0, 10, 24, 2, {}, 30},  // Portrait short on Obsidian
+};
+} // namespace
+
 StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     : QWidget(parent), path_(std::move(path)) {
   theme_ = new StudioTheme(this, std::move(themePath));
@@ -1338,11 +1395,24 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   auto *canvasLabel = new QLabel(QStringLiteral("Background"), canvasPanel_);
   canvasLabel->setFont(chromeMonoFont(13));
   canvasLayout->addWidget(canvasLabel);
+  presets_ = new StudioComboBox(canvasPanel_);
+  presets_->setChrome(theme_->chrome());
+  presets_->setObjectName(QStringLiteral("canvasPresets"));
+  presets_->setToolTip(QStringLiteral("Apply a built-in background recipe"));
+  presets_->addItems({QStringLiteral("Custom"),
+                      QStringLiteral("Edge to edge"),
+                      QStringLiteral("Floating card"),
+                      QStringLiteral("Portrait short")});
+  canvasLayout->addWidget(presets_);
+  connect(presets_, &QComboBox::activated, this, &StudioWindow::applyPreset);
   background_ = new StudioComboBox(canvasPanel_);
   background_->setChrome(theme_->chrome());
-  for (int index = 0; index < StudioStyle::backgroundCount; ++index)
-    background_->addItem(StudioStyle::backgroundName(index));
-  canvasLayout->addWidget(background_);
+  background_->setObjectName(QStringLiteral("canvasBackground"));
+  presetPage_ = new QWidget(canvasPanel_);
+  auto *presetPageLayout = new QVBoxLayout(presetPage_);
+  presetPageLayout->setContentsMargins(0, 0, 0, 0);
+  presetPageLayout->addWidget(background_);
+  canvasLayout->addWidget(presetPage_);
   auto *aspectLabel = new QLabel(QStringLiteral("Aspect"), canvasPanel_);
   aspectLabel->setFont(chromeMonoFont(12));
   aspectLabel->setObjectName(QStringLiteral("muted"));
@@ -1353,19 +1423,89 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   for (int index = 0; index < StudioStyle::aspectCount; ++index)
     aspect_->addItem(StudioStyle::aspectName(index));
   canvasLayout->addWidget(aspect_);
-  auto *wallpaperRow = new QHBoxLayout;
-  wallpaperButton_ = new QPushButton(QStringLiteral("Wallpaper…"), canvasPanel_);
-  wallpaperButton_->setObjectName(QStringLiteral("canvasWallpaper"));
-  wallpaperButton_->setToolTip(
-      QStringLiteral("Use an image behind the video — start in the Omarchy themes"));
-  wallpaperLabel_ = new QLabel(QStringLiteral("None"), canvasPanel_);
-  wallpaperLabel_->setObjectName(QStringLiteral("muted"));
-  wallpaperLabel_->setWordWrap(true);
-  wallpaperRow->addWidget(wallpaperButton_);
-  wallpaperRow->addWidget(wallpaperLabel_, 1);
-  canvasLayout->addLayout(wallpaperRow);
-  connect(wallpaperButton_, &QPushButton::clicked, this,
-          &StudioWindow::chooseWallpaper);
+  auto *styleLabel = new QLabel(QStringLiteral("Style"), canvasPanel_);
+  styleLabel->setFont(chromeMonoFont(12));
+  styleLabel->setObjectName(QStringLiteral("muted"));
+  canvasLayout->addWidget(styleLabel);
+  auto *tabRow = new QHBoxLayout;
+  tabRow->setSpacing(StudioChrome::gap);
+  const auto styleTab = [this](const QString &text) {
+    auto *tab = new QPushButton(text, canvasPanel_);
+    tab->setCheckable(true);
+    return tab;
+  };
+  colorTab_ = styleTab(QStringLiteral("Color"));
+  gradientTab_ = styleTab(QStringLiteral("Gradient"));
+  wallpaperTab_ = styleTab(QStringLiteral("Wallpaper"));
+  colorTab_->setObjectName(QStringLiteral("backgroundColorTab"));
+  gradientTab_->setObjectName(QStringLiteral("backgroundGradientTab"));
+  wallpaperTab_->setObjectName(QStringLiteral("backgroundWallpaperTab"));
+  tabRow->addWidget(colorTab_);
+  tabRow->addWidget(gradientTab_);
+  tabRow->addWidget(wallpaperTab_);
+  canvasLayout->addLayout(tabRow);
+  auto *styleGroup = new QButtonGroup(this);
+  styleGroup->setExclusive(true);
+  styleGroup->addButton(colorTab_, 0);
+  styleGroup->addButton(gradientTab_, 1);
+  styleGroup->addButton(wallpaperTab_, 2);
+  connect(styleGroup, &QButtonGroup::idClicked, this,
+          &StudioWindow::switchBackgroundTab);
+  wallpaperPage_ = new QWidget(canvasPanel_);
+  auto *wallpaperPageLayout = new QVBoxLayout(wallpaperPage_);
+  wallpaperPageLayout->setContentsMargins(0, 0, 0, 0);
+  wallpaperPageLayout->setSpacing(StudioChrome::gap);
+  auto *groupRow = new QHBoxLayout;
+  groupRow->setSpacing(StudioChrome::gap);
+  recentTab_ = new QPushButton(QStringLiteral("Recent"), wallpaperPage_);
+  recentTab_->setCheckable(true);
+  recentTab_->setObjectName(QStringLiteral("wallpaperRecentTab"));
+  quattroTab_ = new QPushButton(QStringLiteral("Quattro"), wallpaperPage_);
+  quattroTab_->setCheckable(true);
+  quattroTab_->setObjectName(QStringLiteral("wallpaperQuattroTab"));
+  groupRow->addWidget(recentTab_);
+  groupRow->addWidget(quattroTab_);
+  wallpaperPageLayout->addLayout(groupRow);
+  auto *wallpaperGroup = new QButtonGroup(this);
+  wallpaperGroup->setExclusive(true);
+  wallpaperGroup->addButton(recentTab_, 0);
+  wallpaperGroup->addButton(quattroTab_, 1);
+  connect(wallpaperGroup, &QButtonGroup::idClicked, this,
+          &StudioWindow::switchWallpaperGroup);
+  wallpaperStatus_ = new QLabel(wallpaperPage_);
+  wallpaperStatus_->setObjectName(QStringLiteral("wallpaperStatus"));
+  wallpaperStatus_->setObjectName(QStringLiteral("muted"));
+  wallpaperStatus_->setWordWrap(true);
+  wallpaperPageLayout->addWidget(wallpaperStatus_);
+  auto *wallpaperScroll = new QScrollArea(wallpaperPage_);
+  wallpaperScroll->setWidgetResizable(true);
+  wallpaperScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  wallpaperScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  wallpaperScroll->setMaximumHeight(196);
+  wallpaperScroll->setFrameShape(QFrame::NoFrame);
+  wallpaperGrid_ = new QWidget(wallpaperScroll);
+  wallpaperGrid_->setObjectName(QStringLiteral("wallpaperGrid"));
+  wallpaperGridLayout_ = new QGridLayout(wallpaperGrid_);
+  wallpaperGridLayout_->setContentsMargins(0, 0, 0, 0);
+  wallpaperGridLayout_->setSpacing(StudioChrome::gap);
+  wallpaperScroll->setWidget(wallpaperGrid_);
+  wallpaperPageLayout->addWidget(wallpaperScroll);
+  canvasLayout->addWidget(wallpaperPage_);
+  connect(&wallpaperGridWatcher_,
+          &QFutureWatcher<QVector<StudioWallpaperThumb>>::finished, this,
+          [this] {
+            wallpapersLoading_ = false;
+            const auto thumbs = wallpaperGridWatcher_.result();
+            wallpaperPaths_.clear();
+            wallpaperThumbs_.clear();
+            for (const auto &thumb : thumbs) {
+              wallpaperPaths_.push_back(thumb.first);
+              wallpaperThumbs_.insert(thumb.first, thumb.second);
+            }
+            wallpapersLoaded_ = true;
+            gridShownPaths_.clear();
+            refreshBackgroundSection();
+          });
   padding_ = new QSlider(Qt::Horizontal, canvasPanel_);
   padding_->setRange(0, 20);
   padding_->setObjectName(QStringLiteral("canvasPadding"));
@@ -1390,6 +1530,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
         slider, &QSlider::valueChanged, value,
         [value, unit](int n) { value->setText(QString::number(n) + unit); });
   };
+  auto *layoutLabel = new QLabel(QStringLiteral("Layout"), canvasPanel_);
+  layoutLabel->setFont(chromeMonoFont(13));
+  canvasLayout->addWidget(layoutLabel);
   styleSlider(QStringLiteral("Padding"), padding_, QStringLiteral("%"));
   styleSlider(QStringLiteral("Corner radius"), radius_, QStringLiteral(" px"));
   styleSlider(QStringLiteral("Shadow"), shadow_, QStringLiteral("%"));
@@ -1552,10 +1695,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(mute, splitButton_);
   QWidget::setTabOrder(splitButton_, keepButton_);
   QWidget::setTabOrder(keepButton_, deleteButton_);
-  QWidget::setTabOrder(deleteButton_, background_);
+  QWidget::setTabOrder(deleteButton_, presets_);
+  QWidget::setTabOrder(presets_, background_);
   QWidget::setTabOrder(background_, aspect_);
-  QWidget::setTabOrder(aspect_, wallpaperButton_);
-  QWidget::setTabOrder(wallpaperButton_, padding_);
+  QWidget::setTabOrder(aspect_, colorTab_);
+  QWidget::setTabOrder(colorTab_, gradientTab_);
+  QWidget::setTabOrder(gradientTab_, wallpaperTab_);
+  QWidget::setTabOrder(wallpaperTab_, padding_);
   QWidget::setTabOrder(padding_, radius_);
   QWidget::setTabOrder(radius_, shadow_);
   QWidget::setTabOrder(shadow_, previewZoomButton_);
@@ -2005,13 +2151,20 @@ void StudioWindow::styleChanged() {
   captureCursor();
   if (restoring_ || !background_->isEnabled())
     return;
-  StudioStyle style{background_->currentIndex(), padding_->value(),
-                    radius_->value(), aspect_->currentIndex(),
-                    style_.wallpaperPath, shadow_->value()};
+  StudioStyle style{currentPresetIndex(), padding_->value(), radius_->value(),
+                    aspect_->currentIndex(), style_.wallpaperPath,
+                    shadow_->value()};
   // Picking a preset drops the wallpaper; slider moves keep it.
   if (sender() == background_)
     style.wallpaperPath.clear();
   commitStyle(style);
+}
+
+int StudioWindow::currentPresetIndex() const {
+  if (backgroundTab_ == 2)
+    return style_.background;
+  return background_->currentIndex() +
+         (backgroundTab_ == 1 ? StudioStyle::solidCount : 0);
 }
 
 void StudioWindow::chooseWallpaper() {
@@ -2033,9 +2186,9 @@ void StudioWindow::chooseWallpaper() {
        QStringLiteral("All files (*)")});
   connect(dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
     captureCursor();
-    commitStyle({background_->currentIndex(), padding_->value(),
-                 radius_->value(), aspect_->currentIndex(), path,
-                 shadow_->value()});
+    commitStyle({currentPresetIndex(), padding_->value(), radius_->value(),
+                 aspect_->currentIndex(), path, shadow_->value()});
+    noteWallpaperPicked(path);
   });
   dialog->show();
 }
@@ -2053,6 +2206,193 @@ void StudioWindow::commitStyle(const StudioStyle &style) {
   preview_->setContentSize(project_.canvas);
   saveTimer_->start();
   refreshControls();
+}
+
+void StudioWindow::applyPreset(int index) {
+  if (index <= 0 ||
+      index > static_cast<int>(std::size(kBackgroundPresetStyles)))
+    return;
+  captureCursor();
+  commitStyle(kBackgroundPresetStyles[index - 1]);
+}
+
+void StudioWindow::switchBackgroundTab(int tab) {
+  if (tab < 0 || tab > 2 || tab == backgroundTab_)
+    return;
+  if (tab == 2) {
+    // View-only: the model keeps its preset until a wallpaper is picked.
+    backgroundTab_ = 2;
+    ensureWallpapers();
+    refreshBackgroundSection();
+    return;
+  }
+  const int base = tab == 0 ? 0 : StudioStyle::solidCount;
+  const int count =
+      tab == 0 ? StudioStyle::solidCount : StudioStyle::gradientCount;
+  int index = lastPreset_;
+  if (index < base || index >= base + count)
+    index = base;
+  captureCursor();
+  commitStyle({index, padding_->value(), radius_->value(),
+               aspect_->currentIndex(), QString(), shadow_->value()});
+  // The view follows the click even when the commit is a no-op (same preset
+  // while browsing wallpapers); refresh derives the rest from the model.
+  backgroundTab_ = tab;
+  refreshBackgroundSection();
+}
+
+void StudioWindow::switchWallpaperGroup(int group) {
+  if (group == wallpaperGroup_ || group < 0 || group > 1)
+    return;
+  wallpaperGroup_ = group;
+  refreshBackgroundSection();
+}
+
+void StudioWindow::ensureWallpapers() {
+  if (wallpapersLoaded_ || wallpapersLoading_)
+    return;
+  wallpapersLoading_ = true;
+  wallpaperStatus_->setText(QStringLiteral("Loading theme wallpapers…"));
+  wallpaperGridWatcher_.setFuture(
+      QtConcurrent::run([] { return studioWallpaperThumbs(studioQuattroWallpaperPaths()); }));
+}
+
+void StudioWindow::noteWallpaperPicked(const QString &path) {
+  recentWallpapers_.removeAll(path);
+  recentWallpapers_.prepend(path);
+  while (recentWallpapers_.size() > 8)
+    recentWallpapers_.takeLast();
+  gridShownPaths_.clear();
+  refreshBackgroundSection();
+}
+
+void StudioWindow::refreshBackgroundSection() {
+  if (style_.wallpaperPath.isEmpty())
+    lastPreset_ = style_.background;
+  // The wallpaper view is sticky: browsing it survives slider moves and undo
+  // steps that keep a preset model. Every other view follows the model, and
+  // a wallpapered model always shows its tab.
+  const int modelTab = !style_.wallpaperPath.isEmpty()
+                           ? 2
+                           : (StudioStyle::isGradient(style_.background) ? 1
+                                                                         : 0);
+  if (modelTab == 2 || backgroundTab_ != 2)
+    backgroundTab_ = modelTab;
+  if (backgroundTab_ != 2 && backgroundTab_ != comboTab_) {
+    comboTab_ = backgroundTab_;
+    const QSignalBlocker quiet(background_);
+    background_->clear();
+    if (backgroundTab_ == 1) {
+      for (const auto &preset : StudioStyle::gradients)
+        background_->addItem(QString::fromUtf8(preset.name));
+    } else {
+      for (const auto &preset : StudioStyle::backgrounds)
+        background_->addItem(QString::fromUtf8(preset.name));
+    }
+  }
+  colorTab_->setChecked(backgroundTab_ == 0);
+  gradientTab_->setChecked(backgroundTab_ == 1);
+  wallpaperTab_->setChecked(backgroundTab_ == 2);
+  presetPage_->setVisible(backgroundTab_ != 2);
+  wallpaperPage_->setVisible(backgroundTab_ == 2);
+  recentTab_->setChecked(wallpaperGroup_ == 0);
+  quattroTab_->setChecked(wallpaperGroup_ == 1);
+  {
+    const QSignalBlocker quiet(background_);
+    if (backgroundTab_ == 1)
+      background_->setCurrentIndex(style_.background - StudioStyle::solidCount);
+    else if (backgroundTab_ == 0)
+      background_->setCurrentIndex(style_.background);
+  }
+  {
+    const QSignalBlocker quiet(presets_);
+    presets_->setCurrentIndex(0);
+    if (style_.wallpaperPath.isEmpty()) {
+      for (size_t i = 0; i < std::size(kBackgroundPresetStyles); ++i)
+        if (kBackgroundPresetStyles[i] == style_)
+          presets_->setCurrentIndex(static_cast<int>(i) + 1);
+    }
+  }
+  if (backgroundTab_ != 2)
+    return;
+  // Status syncs on every refresh: an empty completed load would otherwise
+  // keep "Loading…" past the unchanged-grid check below.
+  const QStringList wanted =
+      wallpaperGroup_ == 0 ? recentWallpapers_ : wallpaperPaths_;
+  if (!wallpapersLoaded_) {
+    wallpaperStatus_->setText(wallpapersLoading_
+                                  ? QStringLiteral("Loading theme wallpapers…")
+                                  : QStringLiteral("No theme wallpapers found."));
+  } else if (wanted.isEmpty()) {
+    wallpaperStatus_->setText(wallpaperGroup_ == 0
+                                  ? QStringLiteral("Pick a wallpaper to start recents.")
+                                  : QStringLiteral("No theme wallpapers found."));
+  } else {
+    wallpaperStatus_->clear();
+  }
+  // Rebuild when the shown set changed or never built (empty discovery
+  // still gets its custom tile); otherwise refresh checks.
+  if (gridBuilt_ && wanted == gridShownPaths_) {
+    for (qsizetype i = 0; i < wallpaperTiles_.size(); ++i)
+      wallpaperTiles_[i]->setChecked(wallpaperTilePaths_[i] ==
+                                     style_.wallpaperPath);
+    return;
+  }
+  QLayoutItem *item = nullptr;
+  while ((item = wallpaperGridLayout_->takeAt(0)) != nullptr) {
+    delete item->widget();
+    delete item;
+  }
+  wallpaperTiles_.clear();
+  wallpaperTilePaths_.clear();
+  const int columns = 4;
+  int row = 0, column = 0;
+  const auto place = [&](QWidget *tile) {
+    wallpaperGridLayout_->addWidget(tile, row, column);
+    if (++column >= columns) {
+      column = 0;
+      ++row;
+    }
+  };
+  for (const auto &path : wanted) {
+    auto *tile = new QPushButton(wallpaperGrid_);
+    tile->setCheckable(true);
+    tile->setFixedSize(72, 48);
+    const auto thumb = wallpaperThumbs_.constFind(path);
+    if (thumb != wallpaperThumbs_.constEnd()) {
+      tile->setIcon(QIcon(QPixmap::fromImage(thumb.value())));
+      tile->setIconSize(QSize(64, 40));
+    } else {
+      tile->setText(QFileInfo(path).baseName().left(10));
+    }
+    tile->setToolTip(path);
+    tile->setChecked(path == style_.wallpaperPath);
+    connect(tile, &QPushButton::clicked, this, [this, path] {
+      if (!scenesEditable())
+        return;
+      captureCursor();
+      commitStyle({currentPresetIndex(), padding_->value(), radius_->value(),
+                   aspect_->currentIndex(), path, shadow_->value()});
+      // The recents reorder rebuilds the grid, deleting tiles: on the
+      // Recent tab that includes this tile, so defer past the click.
+      if (wallpaperGroup_ == 0)
+        QTimer::singleShot(0, this,
+                           [this, path] { noteWallpaperPicked(path); });
+      else
+        noteWallpaperPicked(path);
+    });
+    place(tile);
+    wallpaperTiles_.push_back(tile);
+    wallpaperTilePaths_.push_back(path);
+  }
+  auto *plus = new QPushButton(QStringLiteral("+"), wallpaperGrid_);
+  plus->setFixedSize(72, 48);
+  plus->setToolTip(QStringLiteral("Choose an image file"));
+  plus->setObjectName(QStringLiteral("canvasWallpaperPlus"));
+  connect(plus, &QPushButton::clicked, this, &StudioWindow::chooseWallpaper);
+  place(plus);
+  gridBuilt_ = true;
+  gridShownPaths_ = wanted;
 }
 
 void StudioWindow::endEdit() {
@@ -2371,21 +2711,22 @@ void StudioWindow::refreshControls() {
       : QStringLiteral("Select a clip, transition, zoom, or range to delete"));
   background_->setEnabled(editable);
   aspect_->setEnabled(editable);
-  wallpaperButton_->setEnabled(editable);
-  wallpaperLabel_->setText(style_.wallpaperPath.isEmpty()
-                               ? QStringLiteral("None")
-                               : QFileInfo(style_.wallpaperPath).fileName());
-  wallpaperLabel_->setToolTip(style_.wallpaperPath);
+  presets_->setEnabled(editable);
+  colorTab_->setEnabled(editable);
+  gradientTab_->setEnabled(editable);
+  wallpaperTab_->setEnabled(editable);
+  wallpaperPage_->setEnabled(editable);
+  refreshBackgroundSection();
   padding_->setEnabled(editable);
   radius_->setEnabled(editable);
   shadow_->setEnabled(editable);
   {
-    const QSignalBlocker quietBackground(background_);
-    background_->setCurrentIndex(style_.background);
     const QSignalBlocker quietAspect(aspect_);
     aspect_->setCurrentIndex(style_.aspect);
     // Signals update the value labels; restoring the model must not create
-    // another edit. styleChanged compares the complete state first.
+    // another edit. styleChanged compares the complete state first. The
+    // background combo restores inside refreshBackgroundSection, which maps
+    // the model index through the active tab.
     const bool previous = restoring_;
     restoring_ = true;
     padding_->setValue(style_.padding);
