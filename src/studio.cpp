@@ -869,6 +869,48 @@ QVector<StudioThumbnail> StudioTimeline::missingThumbnails() const {
   return missing;
 }
 
+void StudioTimeline::cacheAudioPeaks(
+    quint64 assetId, QVector<QPair<qint16, qint16>> peaks) {
+  for (qsizetype i = 0; i < audioPeaks_.size(); ++i)
+    if (audioPeaks_[i].assetId == assetId) {
+      audioPeaks_.removeAt(i);
+      break;
+    }
+  // 1024 assets of 1024 buckets fit in 4 MiB and always cover a valid
+  // project (at most 1000 assets), so decoded peaks are never evicted back
+  // into the missing set and the refresh chain always terminates.
+  if (audioPeaks_.size() >= 1024)
+    audioPeaks_.removeFirst();
+  audioPeaks_.push_back({assetId, std::move(peaks)});
+  update();
+}
+
+QVector<quint64> StudioTimeline::missingAudioPeaks() const {
+  QVector<quint64> missing;
+  if (!project_)
+    return missing;
+  for (const auto &clip : project_->audioClips) {
+    if (missing.contains(clip.assetId))
+      continue;
+    const bool cached = std::any_of(
+        audioPeaks_.cbegin(), audioPeaks_.cend(),
+        [&](const StudioAudioPeakResult &entry) {
+          return entry.assetId == clip.assetId;
+        });
+    if (!cached)
+      missing.push_back(clip.assetId);
+  }
+  return missing;
+}
+
+const QVector<QPair<qint16, qint16>> *StudioTimeline::audioPeaksFor(
+    quint64 assetId) const {
+  for (const auto &entry : audioPeaks_)
+    if (entry.assetId == assetId)
+      return &entry.peaks;
+  return nullptr;
+}
+
 void StudioTimeline::paintThumbnails(QPainter &painter, const QRectF &region) const {
   for (const auto &tile : thumbnailTiles(region)) {
     const auto *image = thumbnailFor(tile);
@@ -2028,6 +2070,14 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     if (!thumbnailTimer_->isActive())
       refreshThumbnails();
   });
+  connect(&audioPeaksWatcher_,
+          &QFutureWatcher<StudioAudioPeakResult>::finished, this, [this] {
+            const auto result = audioPeaksWatcher_.result();
+            timeline_->cacheAudioPeaks(result.assetId, result.peaks);
+            audioPeaksBusy_ = false;
+            // Asset-keyed like thumbnails: an old lane's work survives edits.
+            refreshAudioPeaks();
+          });
   saveTimer_ = new QTimer(this);
   saveTimer_->setSingleShot(true);
   saveTimer_->setInterval(kSaveDebounceMs);
@@ -2831,6 +2881,7 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
   if (resetHistory)
     history_.reset(editState());
   refreshThumbnails();
+  refreshAudioPeaks();
   refreshControls();
 }
 
@@ -2869,6 +2920,25 @@ void StudioWindow::refreshThumbnails() {
       request.image.loadFromData(process.readAllStandardOutput(), "PNG");
     // Remember failed samples too, preventing an unbounded retry loop.
     return request;
+  }));
+}
+
+void StudioWindow::refreshAudioPeaks() {
+  if (!loaded_ || closing_ || audioPeaksBusy_)
+    return;
+  const auto missing = timeline_->missingAudioPeaks();
+  if (missing.isEmpty())
+    return;
+  const quint64 assetId = missing.first();
+  QString path;
+  for (const auto &asset : project_.assets)
+    if (asset.id == assetId)
+      path = asset.path;
+  if (path.isEmpty())
+    return;
+  audioPeaksBusy_ = true;
+  audioPeaksWatcher_.setFuture(QtConcurrent::run([assetId, path] {
+    return StudioAudioPeakResult{assetId, studioDecodeAudioPeaks(path)};
   }));
 }
 

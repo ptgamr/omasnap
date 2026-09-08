@@ -170,6 +170,16 @@ struct StudioBlend {
 /** The audio lane laid end to end from composition zero, in clip order. */
 [[nodiscard]] QVector<StudioAudioSpan> studioAudioComposition(
     const StudioProject &);
+/** Min/max waveform buckets for lane painting, from mono 16-bit PCM. */
+[[nodiscard]] QVector<QPair<qint16, qint16>> studioBucketAudioPeaks(
+    const QByteArray &pcm, int buckets);
+/**
+ * Decodes `path` to low-rate mono and buckets it for the lane. Empty on
+ * missing files, audioless inputs, absurd sizes, or timeouts. Blocking;
+ * bounded; worker-only, never inline in a GUI callback.
+ */
+[[nodiscard]] QVector<QPair<qint16, qint16>> studioDecodeAudioPeaks(
+    const QString &path, int buckets = 1024);
 /** The canvas after the style aspect expands it: Original returns the
  *  source size, anything else grows one side to the ratio (even, never
  *  cropping). Preview, playback sizing, and export all use this. */

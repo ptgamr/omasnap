@@ -4,6 +4,7 @@
 #include "studio-preview.hpp"
 
 #include <QImage>
+#include <QDataStream>
 #include <QFile>
 #include <QProcess>
 #include <QStandardPaths>
@@ -771,6 +772,46 @@ bool runStudioCompositionChecks(QString &error) {
                "background music did not reach the silent scene"))
     return false;
   project.music = {};
+  // Waveform decode buckets exact peaks through the real decoder: a crafted
+  // full-scale WAV keeps the assertion deterministic across codecs.
+  const QString exactPath = scratch.filePath(QStringLiteral("exact.wav"));
+  {
+    QFile exact(exactPath);
+    if (!require(exact.open(QIODevice::WriteOnly),
+                 "could not stage waveform fixture"))
+      return false;
+    const int rate = 8000, samples = 8000;
+    QByteArray header;
+    QDataStream head(&header, QIODevice::WriteOnly);
+    head.setByteOrder(QDataStream::LittleEndian);
+    head.writeRawData("RIFF", 4);
+    head << quint32(36 + samples * 2);
+    head.writeRawData("WAVEfmt ", 8);
+    head << quint32(16) << quint16(1) << quint16(1) << quint32(rate)
+         << quint32(rate * 2) << quint16(2) << quint16(16);
+    head.writeRawData("data", 4);
+    head << quint32(samples * 2);
+    exact.write(header);
+    QByteArray pcm;
+    QDataStream body(&pcm, QIODevice::WriteOnly);
+    body.setByteOrder(QDataStream::LittleEndian);
+    for (int i = 0; i < samples; ++i)
+      body << static_cast<qint16>((i / 10) % 2 ? 32767 : -32767);
+    exact.write(pcm);
+  }
+  const auto decoded = studioDecodeAudioPeaks(exactPath);
+  int peak = 0;
+  for (const auto &bucket : decoded) {
+    const int lo = bucket.first, hi = bucket.second;
+    peak = qMax(peak, lo < 0 ? -lo : lo);
+    peak = qMax(peak, hi < 0 ? -hi : hi);
+  }
+  if (!require(decoded.size() == 1024 && peak > 32000 &&
+                   studioDecodeAudioPeaks(
+                       scratch.filePath(QStringLiteral("missing.mp3")))
+                       .isEmpty(),
+               "waveform decode is wrong or loud on failure"))
+    return false;
   // Fractional frame clip lengths must not accumulate a per-scene rounding
   // error. Audio anchors exact scene milliseconds before one final CFR pass.
   project.clips.clear();

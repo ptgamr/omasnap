@@ -1,13 +1,18 @@
 #include "studio-project.hpp"
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QSaveFile>
 #include <QSet>
+#include <QStandardPaths>
+#include <QTemporaryFile>
+#include <QtEndian>
 #include <QtMath>
 #include <algorithm>
 #include <array>
@@ -293,6 +298,85 @@ QVector<StudioAudioSpan> studioAudioComposition(const StudioProject &p) {
     position += duration;
   }
   return spans;
+}
+QVector<QPair<qint16, qint16>> studioBucketAudioPeaks(const QByteArray &pcm,
+                                                     int buckets) {
+  buckets = qBound(1, buckets, 4096);
+  QVector<QPair<qint16, qint16>> out;
+  const qsizetype samples = pcm.size() / 2;
+  if (samples <= 0)
+    return out;
+  out.reserve(buckets);
+  for (int b = 0; b < buckets; ++b) {
+    const qsizetype begin =
+        static_cast<qint64>(b) * samples / buckets;
+    const qsizetype end =
+        static_cast<qint64>(b + 1) * samples / buckets;
+    qint16 lo = 0, hi = 0;
+    for (qsizetype i = begin; i < end; ++i) {
+      const qint16 sample =
+          qFromLittleEndian<qint16>(pcm.constData() + 2 * i);
+      lo = qMin(lo, sample);
+      hi = qMax(hi, sample);
+    }
+    out.push_back({lo, hi});
+  }
+  return out;
+}
+QVector<QPair<qint16, qint16>> studioDecodeAudioPeaks(const QString &path,
+                                                     int buckets) {
+  constexpr qint64 maxBytes = 96LL * 1024 * 1024; // ~200 min at 4 kHz mono.
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  if (ffmpeg.isEmpty() || path.isEmpty())
+    return {};
+  // A file, not a pipe: draining a pipe and then asking waitForFinished
+  // misreports, because that call returns false once the process already
+  // ended. One wait while running, then plain file I/O.
+  QTemporaryFile out(QDir::tempPath() +
+                     QStringLiteral("/omasnap-peaks-XXXXXX.pcm"));
+  if (!out.open())
+    return {};
+  out.close();
+  QProcess process;
+  process.start(ffmpeg,
+                {QStringLiteral("-v"), QStringLiteral("error"),
+                 QStringLiteral("-y"), QStringLiteral("-i"), path,
+                 QStringLiteral("-map"), QStringLiteral("0:a:0?"),
+                 QStringLiteral("-ac"), QStringLiteral("1"),
+                 QStringLiteral("-ar"), QStringLiteral("4000"),
+                 QStringLiteral("-threads"), QStringLiteral("1"),
+                 QStringLiteral("-f"), QStringLiteral("s16le"),
+                 QStringLiteral("-c:a"), QStringLiteral("pcm_s16le"),
+                 out.fileName()});
+  // Poll the growing file: the byte cap applies during the write, not
+  // after, so absurd inputs cannot fill /tmp before being rejected. The
+  // startup check comes first: a process that never launches would
+  // otherwise spin here until the watchdog expires.
+  if (!process.waitForStarted(5000))
+    return {};
+  QElapsedTimer watchdog;
+  watchdog.start();
+  while (process.state() != QProcess::NotRunning) {
+    process.waitForFinished(2000);
+    if (process.state() == QProcess::NotRunning)
+      break;
+    if (QFileInfo(out.fileName()).size() > maxBytes ||
+        watchdog.elapsed() > 180000) {
+      process.kill();
+      process.waitForFinished(1000);
+      return {};
+    }
+  }
+  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    return {};
+  QFile decoded(out.fileName());
+  if (!decoded.open(QIODevice::ReadOnly))
+    return {};
+  const QByteArray pcm = decoded.read(maxBytes + 1);
+  if (pcm.size() < 2 || pcm.size() > maxBytes)
+    return {};
+  return studioBucketAudioPeaks(pcm, buckets);
 }
 std::optional<StudioBlend> studioBlendAt(const StudioProject &p, qint64 time) {
   const auto spans = studioComposition(p);

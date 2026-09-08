@@ -1,7 +1,9 @@
 #include "studio-project-smoke.hpp"
 #include "studio-project.hpp"
+#include "studio.hpp"
 #include <QFile>
 #include <QFileInfo>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1067,6 +1069,77 @@ bool runStudioProjectChecks(QString &error) {
                        .isEmpty() &&
                    decoded.audioClips.isEmpty(),
                QStringLiteral("Missing audio lane does not default to empty")))
+      return false;
+  }
+  {
+    // Waveform bucketing is pure little-endian min/max over even slices.
+    const qint16 samples[] = {0, 1000, -2000, 3000, -3000, 2000, -1000, 0};
+    QByteArray pcm(reinterpret_cast<const char *>(samples), sizeof(samples));
+    const auto peaks = studioBucketAudioPeaks(pcm, 2);
+    if (!check(peaks.size() == 2 && peaks[0].first == -2000 &&
+                   peaks[0].second == 3000 && peaks[1].first == -3000 &&
+                   peaks[1].second == 2000,
+               QStringLiteral("Waveform buckets hold the wrong extremes")))
+      return false;
+    if (!check(studioBucketAudioPeaks({}, 16).isEmpty() &&
+                   studioBucketAudioPeaks(pcm, 0).size() == 1,
+               QStringLiteral("Waveform bucketing mishandles edges")))
+      return false;
+  }
+  {
+    // Peak scheduling terminates past old cache pressure: the cache covers
+    // a whole project, so decoded assets never become missing again.
+    StudioProject scored;
+    for (int i = 0; i < 70; ++i) {
+      StudioSource song;
+      song.durationMs = 60000;
+      song.audioStreams = 1;
+      scored.assets.push_back({static_cast<quint64>(i + 1),
+                               QStringLiteral("song-%1.mp3").arg(i), song});
+      scored.audioClips.push_back({static_cast<quint64>(100 + i),
+                                   static_cast<quint64>(i + 1), 0, 60000, 1.0,
+                                   100});
+    }
+    StudioTimeline lane;
+    lane.setProject(&scored);
+    int rounds = 0;
+    while (rounds++ < 200) {
+      const auto missing = lane.missingAudioPeaks();
+      if (missing.isEmpty())
+        break;
+      lane.cacheAudioPeaks(missing.first(),
+                           QVector<QPair<qint16, qint16>>(1024));
+    }
+    if (!check(rounds < 200 && lane.missingAudioPeaks().isEmpty(),
+               QStringLiteral("Waveform scheduling loops past capacity")))
+      return false;
+  }
+  {
+    // An unlaunchable decoder fails fast instead of spinning on the
+    // watchdog: an executable non-script cannot start at all (ENOEXEC).
+    QTemporaryDir binDir;
+    if (!check(binDir.isValid(), QStringLiteral("No launch-failure folder")))
+      return false;
+    QFile fake(binDir.filePath(QStringLiteral("ffmpeg")));
+    if (!check(
+            fake.open(QIODevice::WriteOnly) &&
+                fake.write("not an executable format") > 0 &&
+                fake.setPermissions(QFileDevice::ReadOwner |
+                                    QFileDevice::WriteOwner |
+                                    QFileDevice::ExeOwner),
+            QStringLiteral("Could not stage fake decoder")))
+      return false;
+    fake.close();
+    const QByteArray savedPath = qgetenv("PATH");
+    qputenv("PATH", binDir.path().toUtf8());
+    QElapsedTimer launchClock;
+    launchClock.start();
+    const auto launched =
+        studioDecodeAudioPeaks(QStringLiteral("/tmp/anything.wav"));
+    const qint64 launchMs = launchClock.elapsed();
+    qputenv("PATH", savedPath);
+    if (!check(launched.isEmpty() && launchMs < 20000,
+               QStringLiteral("Decoder launch failure did not fail fast")))
       return false;
   }
   StudioProject empty;

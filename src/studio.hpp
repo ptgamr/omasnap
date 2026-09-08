@@ -34,6 +34,12 @@ struct StudioThumbnail {
   QImage image;
 };
 
+/** Waveform buckets for one audio asset, decoded on a worker. */
+struct StudioAudioPeakResult {
+  quint64 assetId = 0;
+  QVector<QPair<qint16, qint16>> peaks;
+};
+
 /** A discovered wallpaper plus its uniform grid tile, center-cropped. */
 using StudioWallpaperThumb = QPair<QString, QImage>;
 /** Images under the shipped Quattro themes and the user background dir,
@@ -61,6 +67,13 @@ public:
   [[nodiscard]] bool cuesEditable() const { return cuesEditable_; }
   void cacheThumbnail(StudioThumbnail thumbnail);
   [[nodiscard]] QVector<StudioThumbnail> missingThumbnails() const;
+  void cacheAudioPeaks(quint64 assetId,
+                       QVector<QPair<qint16, qint16>> peaks);
+  /** Audio asset ids on the lane still waiting for a waveform. */
+  [[nodiscard]] QVector<quint64> missingAudioPeaks() const;
+  /** Cached buckets for an asset, or nullptr. */
+  [[nodiscard]] const QVector<QPair<qint16, qint16>> *audioPeaksFor(
+      quint64 assetId) const;
   void setThumbnailViewport(const QRectF &viewport);
   void setProject(const StudioProject *project) {
     project_ = project;
@@ -192,6 +205,7 @@ private:
   void paintThumbnails(QPainter &painter, const QRectF &region) const;
   QVector<StudioThumbnail> thumbnails_;
   QRectF thumbnailViewport_;
+  QVector<StudioAudioPeakResult> audioPeaks_;
   StudioChrome chrome_;
 };
 
@@ -278,6 +292,7 @@ private:
   void applyProject(bool resetHistory = false, qint64 position = -1);
   void relinkAsset();
   void refreshThumbnails();
+  void refreshAudioPeaks();
   void captureCursor();
   void splitAtPlayhead();
   void deleteSelection();
@@ -427,7 +442,9 @@ private:
   QFutureWatcher<LoadedSource> loadWatcher_;
   QFutureWatcher<QString> saveWatcher_;
   QFutureWatcher<StudioThumbnail> thumbnailWatcher_;
+  QFutureWatcher<StudioAudioPeakResult> audioPeaksWatcher_;
   bool thumbnailBusy_ = false;
+  bool audioPeaksBusy_ = false;
   class QTimer *thumbnailTimer_ = nullptr;
   bool saving_ = false;
   bool savePending_ = false;
