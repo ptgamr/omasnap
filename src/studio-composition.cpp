@@ -72,6 +72,11 @@ QStringList studioCompositionArguments(const StudioProject &project,
                            "composition; the full project remains saved.");
     return {};
   }
+  if (project.audioClips.size() > 64) {
+    error = QStringLiteral("Export supports up to 64 sounds. Export a smaller "
+                           "lane; the full project remains saved.");
+    return {};
+  }
   const auto spans = studioComposition(project);
   const qint64 duration = studioDuration(project);
   const qint64 exportIn = project.trimInMs;
@@ -367,8 +372,75 @@ QStringList studioCompositionArguments(const StudioProject &project,
                             "atrim=duration=%2,asetpts=N/SR/TB[music]")
                  .arg(musicIndex, seconds(duration),
                       QString::number(project.music.volume / 100.0, 'g', 6));
-    graph << QStringLiteral("[sound][music]amix=inputs=2:duration=first:"
-                            "dropout_transition=0:normalize=0[mixed]");
+  }
+  // The audio lane, one decoder per span like the scenes, silenced gaps
+  // between sounds, all joined to a single bed for the final mix.
+  const auto laneSpans = studioAudioComposition(project);
+  const bool hasLane = !laneSpans.isEmpty() &&
+                       laneSpans.first().startMs < duration;
+  if (hasLane) {
+    const int laneBase = spans.size() + (wallpaper ? 1 : 0) + (scored ? 1 : 0);
+    for (const auto &span : laneSpans) {
+      const auto *asset = studioAsset(project, span.assetId);
+      if (!asset || !QFileInfo::exists(asset->path)) {
+        error = QStringLiteral("An audio file is missing. Remove it or "
+                               "relink its media.");
+        return {};
+      }
+    }
+    QString joinedLane;
+    qint64 cursor = 0;
+    int segments = 0;
+    for (qsizetype i = 0; i < laneSpans.size(); ++i) {
+      const auto &span = laneSpans[i];
+      if (span.startMs >= duration)
+        break;
+      const qint64 end = qMin(span.endMs, duration);
+      const auto *asset = studioAsset(project, span.assetId);
+      args << QStringLiteral("-threads") << QStringLiteral("2")
+           << QStringLiteral("-ss") << seconds(span.inMs)
+           << QStringLiteral("-t") << seconds(span.outMs - span.inMs)
+           << QStringLiteral("-i") << asset->path;
+      if (span.startMs > cursor) {
+        graph << QStringLiteral(
+                     "anullsrc=r=48000:cl=stereo,aformat=sample_fmts=fltp:"
+                     "channel_layouts=stereo,atrim=duration=%1,"
+                     "asetpts=N/SR/TB[lanesil%2]")
+                     .arg(seconds(span.startMs - cursor),
+                          QString::number(segments));
+        joinedLane += QStringLiteral("[lanesil%1]").arg(segments);
+        ++segments;
+      }
+      graph << QStringLiteral(
+                   "[%1:a:0]atrim=duration=%2,aresample=48000:async=1:"
+                   "first_pts=0,aformat=sample_fmts=fltp:channel_layouts="
+                   "stereo,%3,volume=%4,apad,atrim=duration=%5,"
+                   "asetpts=N/SR/TB[lane%6]")
+                   .arg(QString::number(laneBase + i),
+                        seconds(span.outMs - span.inMs), tempo(span.speed),
+                        QString::number(span.gain / 100.0, 'g', 6),
+                        seconds(end - span.startMs),
+                        QString::number(segments));
+      joinedLane += QStringLiteral("[lane%1]").arg(segments);
+      ++segments;
+      cursor = end;
+    }
+    if (segments == 1)
+      graph << joinedLane + QStringLiteral("anull[lane]");
+    else
+      graph << joinedLane + QStringLiteral("concat=n=%1:v=0:a=1[lane]")
+                                .arg(segments);
+  }
+  QStringList beds{QStringLiteral("[sound]")};
+  if (hasLane)
+    beds << QStringLiteral("[lane]");
+  if (scored)
+    beds << QStringLiteral("[music]");
+  if (beds.size() > 1) {
+    graph << beds.join(QString{}) +
+                 QStringLiteral("amix=inputs=%1:duration=first:"
+                                "dropout_transition=0:normalize=0[mixed]")
+                     .arg(beds.size());
     soundLabel = QStringLiteral("[mixed]");
   }
   graph << QStringLiteral(

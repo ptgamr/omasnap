@@ -772,6 +772,43 @@ bool runStudioCompositionChecks(QString &error) {
                "background music did not reach the silent scene"))
     return false;
   project.music = {};
+  // The audio lane mixes under the scenes with per-clip gain: the silent
+  // second scene carries the song, then nothing at gain zero.
+  StudioSource songSource;
+  songSource.durationMs = 5000;
+  songSource.audioStreams = 1;
+  project.assets.push_back({4, songPath, songSource});
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 100}};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(std::abs(output.size() / 96000.0 - 4.0) < 0.04 &&
+                   audioEnergy(output, 1.0) > 0.05,
+               "audio lane did not reach the silent scene"))
+    return false;
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 0}};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(audioEnergy(output, 1.0) < 0.0001,
+               "muted lane sound leaked into the mix"))
+    return false;
+  project.assets[3].path = scratch.filePath(QStringLiteral("missing.mp3"));
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 100}};
+  if (!require(studioCompositionArguments(project, path, error).isEmpty() &&
+                   error.contains(QStringLiteral("missing")),
+               "missing lane file did not fail loudly"))
+    return false;
+  project.assets.pop_back();
+  project.audioClips.clear();
   // Waveform decode buckets exact peaks through the real decoder: a crafted
   // full-scale WAV keeps the assertion deterministic across codecs.
   const QString exactPath = scratch.filePath(QStringLiteral("exact.wav"));
