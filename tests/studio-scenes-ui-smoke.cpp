@@ -95,17 +95,23 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     return false;
   timeline->setSelectedClip(2);
   QTest::keyClick(&window, Qt::Key_D, Qt::ControlModifier);
-  // Layouts settle asynchronously: the tweak card must end up hugging its
-  // content at the column bottom, paired with the timeline row.
+  // Layouts settle asynchronously: the tweak panel shares its row with the
+  // timeline, and the card hugs its content at the panel bottom.
   QTest::qWait(200);
   {
-    auto *inspector = window.findChild<QWidget *>("studioInspector");
+    auto *tweak = window.findChild<QWidget *>("studioInspector");
+    auto *lane = window.findChild<QWidget *>("timelinePanel");
     auto *clipCard = window.findChild<QWidget *>("clipCard");
-    if (!require(inspector && clipCard, "tweak cards are missing"))
+    if (!require(tweak && lane && clipCard, "tweak panel is missing"))
+      return false;
+    const int tweakTop = tweak->mapTo(&window, QPoint(0, 0)).y();
+    const int laneTop = lane->mapTo(&window, QPoint(0, 0)).y();
+    if (!require(tweakTop == laneTop && tweak->height() == lane->height(),
+                 "tweak panel left its timeline row"))
       return false;
     const int bottom = clipCard->y() + clipCard->height();
-    if (!require(bottom <= inspector->height() &&
-                    bottom >= inspector->height() - 18 - 8 &&
+    if (!require(bottom <= tweak->height() &&
+                    bottom >= tweak->height() - 8 - 8 &&
                     clipCard->height() <= clipCard->sizeHint().height() + 8,
                  "tweak card is not bottom-aligned with the timeline row"))
       return false;

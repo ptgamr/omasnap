@@ -151,7 +151,9 @@ void StudioTheme::reload() {
 QString StudioChrome::styleSheet() const {
   QString sheet = QStringLiteral(R"(
 QWidget { color: @text; font-family: monospace; }
-QWidget#studioHeader, QWidget#studioInspector, QWidget#timelinePanel, QDialog { background: @background; }
+QWidget#studioHeader, QWidget#studioInspector, QWidget#studioCanvas, QWidget#timelinePanel, QDialog { background: @background; }
+QWidget#timelinePanel, QWidget#studioInspector { border-top: 1px solid @border; }
+QWidget#studioInspector { border-left: 1px solid @border; }
 QWidget#studioScenePage, QWidget#studioScrollViewport { background: @background; }
 QLabel#muted, QLabel#section { color: @muted; }
 QLabel[studioError="true"] { color: @urgent; }

@@ -311,7 +311,8 @@ private:
   class QLabel *cueLabel_ = nullptr;
   class QSpinBox *easeIn_ = nullptr;
   class QSpinBox *easeOut_ = nullptr;
-  class QWidget *inspector_ = nullptr;
+  class QWidget *canvasPanel_ = nullptr;
+  class QWidget *tweakPanel_ = nullptr;
   class QWidget *zoomCard_ = nullptr;
   class QWidget *transitionCard_ = nullptr;
   class QWidget *clipCard_ = nullptr;

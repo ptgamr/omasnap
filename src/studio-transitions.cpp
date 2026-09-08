@@ -234,7 +234,8 @@ void StudioWindow::showTransitionEditor(quint64 id) {
       }
   }
   inspectorWanted_ = true;
-  inspector_->show();
+  canvasPanel_->show();
+  tweakPanel_->show();
   transitionType_->setFocus();
 }
 

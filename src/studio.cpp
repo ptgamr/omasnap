@@ -1326,40 +1326,40 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
                     : QStringLiteral("Relink the remaining missing sources"));
           });
 
-  inspector_ = new QWidget(this);
-  inspector_->setObjectName(QStringLiteral("studioInspector"));
-  inspector_->setMinimumWidth(260);
-  inspector_->setMaximumWidth(340);
-  auto *inspectorLayout = new QVBoxLayout(inspector_);
-  inspectorLayout->setContentsMargins(
+  canvasPanel_ = new QWidget(this);
+  canvasPanel_->setObjectName(QStringLiteral("studioCanvas"));
+  canvasPanel_->setMinimumWidth(260);
+  canvasPanel_->setMaximumWidth(340);
+  auto *canvasLayout = new QVBoxLayout(canvasPanel_);
+  canvasLayout->setContentsMargins(
       StudioChrome::panelPadding, StudioChrome::panelPadding,
       StudioChrome::panelPadding, StudioChrome::panelPadding);
-  inspectorLayout->setSpacing(StudioChrome::gap);
-  auto *canvasLabel = new QLabel(QStringLiteral("Canvas"), inspector_);
+  canvasLayout->setSpacing(StudioChrome::gap);
+  auto *canvasLabel = new QLabel(QStringLiteral("Canvas"), canvasPanel_);
   canvasLabel->setFont(chromeMonoFont(13));
-  inspectorLayout->addWidget(canvasLabel);
-  background_ = new StudioComboBox(inspector_);
+  canvasLayout->addWidget(canvasLabel);
+  background_ = new StudioComboBox(canvasPanel_);
   background_->setChrome(theme_->chrome());
   background_->addItems({QStringLiteral("Midnight"), QStringLiteral("Lavender"),
                          QStringLiteral("Sand"), QStringLiteral("Pearl")});
-  inspectorLayout->addWidget(background_);
-  padding_ = new QSlider(Qt::Horizontal, inspector_);
+  canvasLayout->addWidget(background_);
+  padding_ = new QSlider(Qt::Horizontal, canvasPanel_);
   padding_->setRange(0, 20);
   padding_->setObjectName(QStringLiteral("canvasPadding"));
-  radius_ = new QSlider(Qt::Horizontal, inspector_);
+  radius_ = new QSlider(Qt::Horizontal, canvasPanel_);
   radius_->setRange(0, 64);
   radius_->setObjectName(QStringLiteral("canvasCorners"));
-  const auto styleSlider = [inspectorLayout, this](const QString &text,
-                                                       QSlider *slider,
-                                                       const QString &unit) {
+  const auto styleSlider = [canvasLayout, this](const QString &text,
+                                                QSlider *slider,
+                                                const QString &unit) {
     auto *row = new QHBoxLayout;
-    row->addWidget(new QLabel(text, inspector_));
+    row->addWidget(new QLabel(text, canvasPanel_));
     row->addStretch();
-    auto *value = new QLabel(QStringLiteral("0") + unit, inspector_);
+    auto *value = new QLabel(QStringLiteral("0") + unit, canvasPanel_);
     value->setFont(chromeMonoFont(12));
     row->addWidget(value);
-    inspectorLayout->addLayout(row);
-    inspectorLayout->addWidget(slider);
+    canvasLayout->addLayout(row);
+    canvasLayout->addWidget(slider);
     QObject::connect(
         slider, &QSlider::valueChanged, value,
         [value, unit](int n) { value->setText(QString::number(n) + unit); });
@@ -1373,13 +1373,20 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
     connect(slider, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
   }
-  // The tweak cards sit at the column bottom, paired with the timeline row;
-  // only the card for the current selection is visible. The spacer needs a
-  // real stretch factor: with factor 0 the layout shares excess space with
+  // The tweak panel shares its row with the timeline, so the active card
+  // can never stretch past the preview/timeline divider. Only the card
+  // for the current selection is visible. The spacer needs a real
+  // stretch factor: with factor 0 the layout shares excess space with
   // the Preferred cards and stretches the visible card itself.
-  inspectorLayout->addStretch(1);
+  tweakPanel_ = new QWidget(this);
+  tweakPanel_->setObjectName(QStringLiteral("studioInspector"));
+  tweakPanel_->setFixedWidth(290);
+  auto *tweakLayout = new QVBoxLayout(tweakPanel_);
+  tweakLayout->setContentsMargins(16, 12, 16, 8);
+  tweakLayout->setSpacing(StudioChrome::gap);
+  tweakLayout->addStretch(1);
 
-  zoomCard_ = new QWidget(inspector_);
+  zoomCard_ = new QWidget(tweakPanel_);
   zoomCard_->setObjectName(QStringLiteral("zoomCard"));
   auto *zoomControls = new QVBoxLayout(zoomCard_);
   zoomControls->setContentsMargins(0, 0, 0, 0);
@@ -1419,27 +1426,27 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   timingRow(QStringLiteral("Ease in"), easeIn_);
   timingRow(QStringLiteral("Ease out"), easeOut_);
   zoomControls->addStretch();
-  inspectorLayout->addWidget(zoomCard_);
+  tweakLayout->addWidget(zoomCard_);
 
-  transitionCard_ = new QWidget(inspector_);
+  transitionCard_ = new QWidget(tweakPanel_);
   transitionCard_->setObjectName(QStringLiteral("transitionCard"));
   auto *transitionControls = new QVBoxLayout(transitionCard_);
   transitionControls->setContentsMargins(0, 0, 0, 0);
   transitionControls->setSpacing(14);
   setupTransitions(transitionControls);
   transitionControls->addStretch();
-  inspectorLayout->addWidget(transitionCard_);
+  tweakLayout->addWidget(transitionCard_);
 
-  clipCard_ = new QWidget(inspector_);
+  clipCard_ = new QWidget(tweakPanel_);
   clipCard_->setObjectName(QStringLiteral("clipCard"));
   auto *clipControls = new QVBoxLayout(clipCard_);
   clipControls->setContentsMargins(0, 0, 0, 0);
   clipControls->setSpacing(14);
   setupScenes(clipControls);
   clipControls->addStretch();
-  inspectorLayout->addWidget(clipCard_);
+  tweakLayout->addWidget(clipCard_);
 
-  emptyCard_ = new QWidget(inspector_);
+  emptyCard_ = new QWidget(tweakPanel_);
   emptyCard_->setObjectName(QStringLiteral("emptyCard"));
   auto *emptyControls = new QVBoxLayout(emptyCard_);
   emptyControls->setContentsMargins(0, 0, 0, 0);
@@ -1450,7 +1457,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   emptyHint->setWordWrap(true);
   emptyControls->addWidget(emptyHint);
   emptyControls->addStretch();
-  inspectorLayout->addWidget(emptyCard_);
+  tweakLayout->addWidget(emptyCard_);
 
   auto *timelinePanel = new QWidget(this);
   timelinePanel->setObjectName(QStringLiteral("timelinePanel"));
@@ -1552,17 +1559,26 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   workspaceLayout->setSpacing(0);
   workspaceLayout->addWidget(preview_, 1);
   workspaceLayout->addWidget(timelinePanel);
+  auto *bottomRow = new QWidget(this);
+  auto *bottomLayout = new QHBoxLayout(bottomRow);
+  bottomLayout->setContentsMargins(0, 0, 0, 0);
+  bottomLayout->setSpacing(0);
+  bottomLayout->addWidget(timelinePanel, 1);
+  bottomLayout->addWidget(tweakPanel_);
   auto *splitter = new QSplitter(Qt::Horizontal, this);
-  splitter->addWidget(workspace);
-  splitter->addWidget(inspector_);
+  splitter->addWidget(preview_);
+  splitter->addWidget(canvasPanel_);
   splitter->setChildrenCollapsible(false);
   splitter->setStretchFactor(0, 1);
   splitter->setSizes({970, 290});
+  connect(splitter, &QSplitter::splitterMoved, this,
+          [this](int, int) { tweakPanel_->setFixedWidth(canvasPanel_->width()); });
   auto *layout = new QVBoxLayout(this);
   layout->setContentsMargins(0, 0, 0, 0);
   layout->setSpacing(1);
   layout->addWidget(header);
   layout->addWidget(splitter, 1);
+  layout->addWidget(bottomRow);
 
   player_ = new StudioPlayback(preview_, this);
   audio_ = player_->audioOutput();
@@ -2704,9 +2720,11 @@ void StudioWindow::paintEvent(QPaintEvent *) {
 
 void StudioWindow::resizeEvent(QResizeEvent *event) {
   QWidget::resizeEvent(event);
-  if (!inspector_)
+  if (!canvasPanel_ || !tweakPanel_)
     return;
-  inspector_->setVisible(inspectorWanted_ && width() >= 960);
+  const bool visible = inspectorWanted_ && width() >= 960;
+  canvasPanel_->setVisible(visible);
+  tweakPanel_->setVisible(visible);
   fileLabel_->setVisible(width() >= 1100);
   shortcutLegend_->setText(
       width() >= 1150 ? QStringLiteral("SPACE  Play / pause     SHIFT+DRAG  Range     CTRL+DRAG  Reorder     ESC  Clear")
@@ -2714,6 +2732,7 @@ void StudioWindow::resizeEvent(QResizeEvent *event) {
 }
 
 void StudioWindow::toggleInspector() {
-  inspectorWanted_ = !inspector_->isVisible();
-  inspector_->setVisible(inspectorWanted_);
+  inspectorWanted_ = !canvasPanel_->isVisible();
+  canvasPanel_->setVisible(inspectorWanted_);
+  tweakPanel_->setVisible(inspectorWanted_);
 }
