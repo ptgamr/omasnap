@@ -377,6 +377,10 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
   }
   bank.dirty = false;
   bank.allocatedLayout = frame_.layout;
+  // The quad covers the letterboxed content with its own rounded mask in
+  // canvas units; the ring between content and card stays transparent over
+  // the background. Without an aspect the content is the card.
+  const QRectF quad = content.isEmpty() ? drawn : content;
   program_.setUniformValue("gain", static_cast<float>(opacity));
   program_.setUniformValue("plane0", 0);
   program_.setUniformValue("plane1", 1);
@@ -385,9 +389,10 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
   program_.setUniformValue("coefficients", frame_.coefficients);
   program_.setUniformValue("range", frame_.range);
   program_.setUniformValue("cardSize",
-                           QVector2D(static_cast<float>(drawn.width() * dpr),
-                                     static_cast<float>(drawn.height() * dpr)));
-  program_.setUniformValue("radius", static_cast<float>(radius * dpr));
+                           QVector2D(static_cast<float>(quad.width() * dpr),
+                                     static_cast<float>(quad.height() * dpr)));
+  program_.setUniformValue(
+      "radius", static_cast<float>(radius * dpr));
   const int chromaPixels = (frame_.size.width() + 1) / 2;
   const float chromaWidth = static_cast<float>(chromaPixels);
   program_.setUniformValue(
@@ -415,12 +420,13 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
       return QPointF(1 - p.y(), p.x());
     return p;
   };
-  const std::array<QPointF, 4> points{drawn.topLeft(), drawn.bottomLeft(),
-                                      drawn.topRight(), drawn.bottomRight()};
+  const std::array<QPointF, 4> points{quad.topLeft(), quad.bottomLeft(),
+                                      quad.topRight(), quad.bottomRight()};
   const std::array<QPointF, 4> canonical{source.topLeft(), source.bottomLeft(),
                                          source.topRight(),
                                          source.bottomRight()};
   std::array<GLfloat, 8> positions{}, coordinates{}, composition{};
+  const std::array<GLfloat, 8> corners{0, 0, 0, 1, 1, 0, 1, 1};
   for (size_t i = 0; i < points.size(); ++i) {
     positions[i * 2] = static_cast<float>(points[i].x() / width() * 2 - 1);
     positions[i * 2 + 1] = static_cast<float>(1 - points[i].y() / height() * 2);
@@ -432,7 +438,6 @@ void StudioVideoSurface::drawFrame(int slot, double opacity, bool additive) {
   }
   program_.enableAttributeArray("position");
   program_.enableAttributeArray("texcoord");
-  const std::array<GLfloat, 8> corners{0, 0, 0, 1, 1, 0, 1, 1};
   program_.enableAttributeArray("corner");
   program_.enableAttributeArray("canonical");
   program_.setAttributeArray("position", GL_FLOAT, positions.data(), 2);

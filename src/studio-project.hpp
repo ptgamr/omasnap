@@ -123,6 +123,10 @@ struct StudioBlend {
                                           QString &error);
 [[nodiscard]] const StudioAsset *studioAsset(const StudioProject &, quint64 id);
 [[nodiscard]] QVector<StudioSpan> studioComposition(const StudioProject &);
+/** The canvas after the style aspect expands it: Original returns the
+ *  source size, anything else grows one side to the ratio (even, never
+ *  cropping). Preview, playback sizing, and export all use this. */
+[[nodiscard]] QSize studioEffectiveCanvas(const StudioProject &);
 [[nodiscard]] qint64 studioDuration(const StudioProject &);
 /** Half-open spans: an exact cut belongs to the incoming clip; project end
  * has no frame. Callers seeking the last frame clamp before calling. */

@@ -325,6 +325,7 @@ private:
   class QWidget *emptyCard_ = nullptr;
   bool inspectorWanted_ = true;
   StudioComboBox *background_ = nullptr;
+  StudioComboBox *aspect_ = nullptr;
   class QPushButton *wallpaperButton_ = nullptr;
   class QLabel *wallpaperLabel_ = nullptr;
   class QSlider *padding_ = nullptr;

@@ -132,7 +132,8 @@ void StudioPlayback::setProject(const StudioProject &project,
   blendTime_ = -1;
   preview_->setTrack(&project_.zoom);
   preview_->setStyle(project_.style);
-  preview_->setCanvasSize(project_.canvas);
+  preview_->setCanvasSize(studioEffectiveCanvas(project_));
+  preview_->setContentSize(project_.canvas);
   emit durationChanged(duration());
   if (spans_.isEmpty()) {
     stop();

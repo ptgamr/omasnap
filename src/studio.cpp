@@ -1343,6 +1343,16 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   for (int index = 0; index < StudioStyle::backgroundCount; ++index)
     background_->addItem(StudioStyle::backgroundName(index));
   canvasLayout->addWidget(background_);
+  auto *aspectLabel = new QLabel(QStringLiteral("Aspect"), canvasPanel_);
+  aspectLabel->setFont(chromeMonoFont(12));
+  aspectLabel->setObjectName(QStringLiteral("muted"));
+  canvasLayout->addWidget(aspectLabel);
+  aspect_ = new StudioComboBox(canvasPanel_);
+  aspect_->setChrome(theme_->chrome());
+  aspect_->setObjectName(QStringLiteral("canvasAspect"));
+  for (int index = 0; index < StudioStyle::aspectCount; ++index)
+    aspect_->addItem(StudioStyle::aspectName(index));
+  canvasLayout->addWidget(aspect_);
   auto *wallpaperRow = new QHBoxLayout;
   wallpaperButton_ = new QPushButton(QStringLiteral("Wallpaper…"), canvasPanel_);
   wallpaperButton_->setObjectName(QStringLiteral("canvasWallpaper"));
@@ -1384,6 +1394,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   // refreshControls restoring the index must not look like a user edit.
   connect(background_, &QComboBox::activated, this,
           &StudioWindow::styleChanged);
+  connect(aspect_, &QComboBox::activated, this, &StudioWindow::styleChanged);
   for (QSlider *slider : {padding_, radius_}) {
     connect(slider, &QSlider::valueChanged, this, &StudioWindow::styleChanged);
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
@@ -1538,7 +1549,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(splitButton_, keepButton_);
   QWidget::setTabOrder(keepButton_, deleteButton_);
   QWidget::setTabOrder(deleteButton_, background_);
-  QWidget::setTabOrder(background_, wallpaperButton_);
+  QWidget::setTabOrder(background_, aspect_);
+  QWidget::setTabOrder(aspect_, wallpaperButton_);
   QWidget::setTabOrder(wallpaperButton_, padding_);
   QWidget::setTabOrder(padding_, radius_);
   QWidget::setTabOrder(radius_, previewZoomButton_);
@@ -1989,7 +2001,8 @@ void StudioWindow::styleChanged() {
   if (restoring_ || !background_->isEnabled())
     return;
   StudioStyle style{background_->currentIndex(), padding_->value(),
-                    radius_->value(), style_.wallpaperPath};
+                    radius_->value(), aspect_->currentIndex(),
+                    style_.wallpaperPath};
   // Picking a preset drops the wallpaper; slider moves keep it.
   if (sender() == background_)
     style.wallpaperPath.clear();
@@ -2016,7 +2029,7 @@ void StudioWindow::chooseWallpaper() {
   connect(dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
     captureCursor();
     commitStyle({background_->currentIndex(), padding_->value(),
-                 radius_->value(), path});
+                 radius_->value(), aspect_->currentIndex(), path});
   });
   dialog->show();
 }
@@ -2027,6 +2040,11 @@ void StudioWindow::commitStyle(const StudioStyle &style) {
   style_ = style;
   preview_->setStyle(style_);
   rememberEdit();
+  // Aspect changes the effective canvas: resize the preview paint, not just
+  // the style paint. The project carries the change once remembered, except
+  // mid-gesture where aspect cannot change.
+  preview_->setCanvasSize(studioEffectiveCanvas(project_));
+  preview_->setContentSize(project_.canvas);
   saveTimer_->start();
   refreshControls();
 }
@@ -2154,6 +2172,10 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
                      project_.trimOutMs < 0 ? duration : project_.trimOutMs);
   preview_->setStyle(style_);
   preview_->setTrack(&zoom_);
+  // The player repeats this once media loads; missing sources skip the
+  // player, so set both sizes here too.
+  preview_->setCanvasSize(studioEffectiveCanvas(project_));
+  preview_->setContentSize(project_.canvas);
   mediaFailed_ = !missingAssets_.isEmpty();
   if (!mediaFailed_)
     player_->setProject(project_, position);
@@ -2342,6 +2364,7 @@ void StudioWindow::refreshControls() {
       ? QStringLiteral("Delete the selected range, clip, transition, or zoom · Delete")
       : QStringLiteral("Select a clip, transition, zoom, or range to delete"));
   background_->setEnabled(editable);
+  aspect_->setEnabled(editable);
   wallpaperButton_->setEnabled(editable);
   wallpaperLabel_->setText(style_.wallpaperPath.isEmpty()
                                ? QStringLiteral("None")
@@ -2352,6 +2375,8 @@ void StudioWindow::refreshControls() {
   {
     const QSignalBlocker quietBackground(background_);
     background_->setCurrentIndex(style_.background);
+    const QSignalBlocker quietAspect(aspect_);
+    aspect_->setCurrentIndex(style_.aspect);
     // Signals update the value labels; restoring the model must not create
     // another edit. styleChanged compares the complete state first.
     const bool previous = restoring_;
@@ -2867,6 +2892,8 @@ void StudioWindow::applyChrome() {
   timeline_->setChrome(chrome);
   if (background_)
     background_->setChrome(chrome);
+  if (aspect_)
+    aspect_->setChrome(chrome);
   if (transitionType_)
     transitionType_->setChrome(chrome);
   if (transitionDirection_)

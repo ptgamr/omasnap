@@ -801,7 +801,7 @@ bool runStudioCompositionChecks(QString &error) {
             "color=0x2bd96a:s=64x48", "-frames:v", "1", wallpaperPath},
            output, error))
     return false;
-  project.style = {0, 10, 0, wallpaperPath};
+  project.style = {0, 10, 0, 0, wallpaperPath};
   if (!exportProject(ffmpeg, project, path, error))
     return false;
   const auto wallpaperExport = sample(ffmpeg, path, 0.3, error);
@@ -839,7 +839,7 @@ bool runStudioCompositionChecks(QString &error) {
     return false;
   // Bright fallback: the arrival poll below must not pass on the preset
   // showing while the wallpaper still decodes.
-  project.style = {1, 10, 0, alphaPath};
+  project.style = {1, 10, 0, 0, alphaPath};
   if (!exportProject(ffmpeg, project, path, error))
     return false;
   const auto alphaExport = sample(ffmpeg, path, 0.3, error);
@@ -861,6 +861,30 @@ bool runStudioCompositionChecks(QString &error) {
   if (!require(alphaCorner.red() < 24 && alphaCorner.green() < 24 &&
                    alphaCorner.blue() < 24,
                "transparent wallpaper did not flatten onto black in export"))
+    return false;
+  // Aspect grows the canvas onto background: a 9:16 export of this
+  // landscape project is portrait with the scene centred.
+  project.style = {0, 10, 0, 2};
+  project.trimInMs = 0;
+  project.trimOutMs = -1;
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto portrait = sample(ffmpeg, path, 0.3, error);
+  if (!require(!portrait.isNull() && portrait.size() == QSize(320, 570),
+               "9:16 export did not grow the canvas"))
+    return false;
+  const auto portraitCorner = portrait.pixelColor(4, 4);
+  // (160,100) sits inside the card but outside the landscape scene: the
+  // aspect band must carry the styled background, not scene-padding black.
+  const auto portraitBand = portrait.pixelColor(160, 100);
+  if (!require(std::abs(portraitCorner.red() - 5) < 12 &&
+                   std::abs(portraitCorner.green() - 5) < 12 &&
+                   std::abs(portraitCorner.blue() - 8) < 12 &&
+                   std::abs(portraitBand.red() - 5) < 12 &&
+                   std::abs(portraitBand.green() - 5) < 12 &&
+                   std::abs(portraitBand.blue() - 8) < 12 &&
+                   portrait.pixelColor(160, 285).blue() > 200,
+               "9:16 export misplaced the scene or background"))
     return false;
   // A changing cadence retains timestamps; frame-index-based concatenation
   // would move the blue/green changes and shorten this two-second source.

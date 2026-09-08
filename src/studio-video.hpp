@@ -42,6 +42,8 @@ public:
   std::array<int, 2> rotations{};
   QRectF drawn;
   QRectF canvas;
+  // Content frame letterboxed inside the card; empty means same as drawn.
+  QRectF content;
   QColor background;
   // Three-stop linear gradient replacing the flat clear when set. Unit
   // endpoints share StudioStyle's top-left origin; an unlinked gradient

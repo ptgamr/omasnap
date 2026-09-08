@@ -46,6 +46,9 @@ public:
   void setComposition(int primary, int secondary, StudioTransitionKind kind,
                       double progress, qint64 timelineMs);
   void setCanvasSize(const QSize &size);
+  /** Source-canvas size the frames are fitted to; the canvas may be larger
+   *  when an aspect expands it. Empty means same as the canvas. */
+  void setContentSize(const QSize &size);
   void clearFrame();
   void invalidatePendingFrames(int slot);
   void setCanvasInset(int inset);
@@ -88,6 +91,9 @@ private:
   /** Where the frame is drawn inside the widget, keeping its aspect. */
   [[nodiscard]] QRectF frameRect() const;
   [[nodiscard]] QRectF canvasRect() const;
+  /** The content frame letterboxed inside the card: equal to it unless an
+   *  aspect expanded the canvas. */
+  [[nodiscard]] QRectF contentRect() const;
   /** Widget point to a normalized point on the source frame, or nothing
    *  when the click missed the frame. */
   [[nodiscard]] std::optional<QPointF> sourceAt(const QPointF &position) const;
@@ -116,6 +122,7 @@ private:
   };
   std::array<Preparation, 2> preparations_;
   QSize canvasSize_;
+  QSize contentSize_;
   int primary_ = 0;
   int secondary_ = -1;
   double primaryOpacity_ = 1;

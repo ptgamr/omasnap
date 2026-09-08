@@ -77,12 +77,18 @@ QStringList studioCompositionArguments(const StudioProject &project,
     error = QStringLiteral("The export range is empty.");
     return {};
   }
-  const int width = project.canvas.width();
-  const int height = project.canvas.height();
+  const QSize effective = studioEffectiveCanvas(project);
+  const int width = effective.width();
+  const int height = effective.height();
   if (width % 2 || height % 2) {
     error = QStringLiteral("The export canvas must have even dimensions.");
     return {};
   }
+  // Scenes fit the source canvas; its black bars are part of the frame and
+  // zoom with it. The aspect expansion lives behind the card instead, so the
+  // added bands always show the styled background.
+  const int fittedWidth = project.canvas.width();
+  const int fittedHeight = project.canvas.height();
   QStringList args{QStringLiteral("-hide_banner"),
                    QStringLiteral("-loglevel"),
                    QStringLiteral("error"),
@@ -117,8 +123,8 @@ QStringList studioCompositionArguments(const StudioProject &project,
             "color=black,format=yuv420p,settb=AVTB")
             .arg(index, seconds(span.outMs - span.inMs),
                  QString::number(span.speed, 'g', 12))
-            .arg(width)
-            .arg(height);
+            .arg(fittedWidth)
+            .arg(fittedHeight);
     if (transitions)
       sourceVideo +=
           QStringLiteral(",fps=%1/%2:start_time=0,format=gbrp,settb=AVTB")
@@ -204,26 +210,43 @@ QStringList studioCompositionArguments(const StudioProject &project,
     video +=
         QStringLiteral(",zoompan=z='%1':x='%2':y='%3':d=1:s=%4x%5:fps=%6/%7")
             .arg(camera.z, camera.x, camera.y)
-            .arg(width)
-            .arg(height)
+            .arg(fittedWidth)
+            .arg(fittedHeight)
             .arg(project.fpsNumerator)
             .arg(project.fpsDenominator);
   video += QStringLiteral(",trim=start=%1:end=%2,setpts=PTS-STARTPTS")
                .arg(seconds(exportIn), seconds(exportOut));
-  if (project.style.padding > 0 || project.style.radius > 0) {
+  // An aspect expansion needs the canvas even with no padding or corners:
+  // without it the output would stay the source size.
+  if (project.style.padding > 0 || project.style.radius > 0 ||
+      effective != project.canvas) {
     const int cardWidth = qMax(
         2, qRound(width * (1 - 2 * project.style.padding / 100.0)) / 2 * 2);
     const int cardHeight = qMax(
         2, qRound(height * (1 - 2 * project.style.padding / 100.0)) / 2 * 2);
+    // The content frame keeps its shape inside the card: the surround stays
+    // transparent so the styled canvas shows through (aspect bands). The
+    // rounded mask runs before the padding on the content size, so it never
+    // reads the padded alpha that geq cannot interpolate.
+    const double fit =
+        qMin(cardWidth / static_cast<double>(fittedWidth),
+             cardHeight / static_cast<double>(fittedHeight));
+    const int fitWidth = qMax(2, qRound(fittedWidth * fit) / 2 * 2);
+    const int fitHeight = qMax(2, qRound(fittedHeight * fit) / 2 * 2);
     video += QStringLiteral(",scale=%1:%2,format=rgba")
-                 .arg(cardWidth)
-                 .arg(cardHeight);
+                 .arg(fitWidth)
+                 .arg(fitHeight);
+    // Canvas units like the preview, even though the mask runs pre-pad.
     const double radius = project.style.radius * height / 1080.0;
     if (radius > 0)
       video += QStringLiteral(",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*"
                               "clip(%1+0.5-hypot(max(abs(X-(W-1)/2)-(W/"
                               "2-%1),0),max(abs(Y-(H-1)/2)-(H/2-%1),0)),0,1)'")
                    .arg(radius, 0, 'f', 4);
+    if (fitWidth != cardWidth || fitHeight != cardHeight)
+      video += QStringLiteral(",pad=%1:%2:(ow-iw)/2:(oh-ih)/2:color=black@0")
+                   .arg(cardWidth)
+                   .arg(cardHeight);
     graph << video + QStringLiteral("[card]");
     if (wallpaper) {
       // Transparency flattens onto black, matching the preview worker: the

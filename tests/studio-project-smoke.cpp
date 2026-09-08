@@ -851,6 +851,55 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("NUL wallpaper path accepted")))
       return false;
   }
+  {
+    StudioProject aspected;
+    aspected.canvas = {1920, 1080};
+    aspected.style.aspect = 1;
+    const bool sixteenNine =
+        studioEffectiveCanvas(aspected) == QSize(1920, 1080);
+    aspected.style.aspect = 2;
+    const bool nineSixteen =
+        studioEffectiveCanvas(aspected) == QSize(1920, 3414);
+    aspected.style.aspect = 3;
+    const bool square = studioEffectiveCanvas(aspected) == QSize(1920, 1920);
+    aspected.style.aspect = 4;
+    const bool fourFive =
+        studioEffectiveCanvas(aspected) == QSize(1920, 2400);
+    aspected.style.aspect = 0;
+    const bool original =
+        studioEffectiveCanvas(aspected) == QSize(1920, 1080);
+    if (!check(sixteenNine && nineSixteen && square && fourFive && original,
+               QStringLiteral("Aspect canvas expansion is wrong")))
+      return false;
+    aspected.canvas = {100, 100};
+    aspected.style.aspect = 1;
+    const QSize grown = studioEffectiveCanvas(aspected);
+    if (!check(grown == QSize(178, 100),
+               QStringLiteral("Aspect growth is not even")))
+      return false;
+    aspected.style.aspect = 9;
+    if (!check(studioEffectiveCanvas(aspected) == QSize(100, 100) &&
+                   !validateStudioProject(aspected).isEmpty(),
+               QStringLiteral("Out-of-range aspect accepted")))
+      return false;
+    auto styled = p;
+    styled.style.aspect = 2;
+    if (!check(decodeStudioProject(encodeStudioProject(styled), decoded)
+                       .isEmpty() &&
+                   decoded.style.aspect == 2,
+               QStringLiteral("Aspect does not persist")))
+      return false;
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(styled)).object();
+    auto styleObject = json["style"].toObject();
+    styleObject.remove(QStringLiteral("aspect"));
+    json["style"] = styleObject;
+    if (!check(decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.style.aspect == 0,
+               QStringLiteral("Missing aspect does not default to Original")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&

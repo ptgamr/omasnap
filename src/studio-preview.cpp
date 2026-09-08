@@ -179,6 +179,11 @@ void StudioPreview::setCanvasSize(const QSize &size) {
   refreshSurface();
 }
 
+void StudioPreview::setContentSize(const QSize &size) {
+  contentSize_ = size;
+  refreshSurface();
+}
+
 void StudioPreview::clearFrame() {
   for (int index = 0; index < 2; ++index)
     clearVideoSlot(index);
@@ -268,6 +273,7 @@ void StudioPreview::refreshSurface() {
     surface_->secondaryOpacity = secondaryOpacity_;
     surface_->drawn = frameRect();
     surface_->canvas = canvasRect();
+    surface_->content = contentRect();
     surface_->background = style_.color();
     surface_->wallpaper = wallpaper_;
     surface_->backgroundIsGradient =
@@ -292,14 +298,16 @@ void StudioPreview::refreshSurface() {
       surface_->rotations[index] =
           composition_ ? preparations_[index].rotation : rotation_;
       QSizeF fitted = preparations_[index].size;
-      if (canvasSize_.isValid() && !fitted.isEmpty())
-        fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
+      const QSize baseSize =
+          contentSize_.isValid() ? contentSize_ : canvasSize_;
+      if (baseSize.isValid() && !fitted.isEmpty())
+        fitted.scale(QSizeF(baseSize), Qt::KeepAspectRatio);
       surface_->fits[index] =
-          canvasSize_.isValid() && !fitted.isEmpty()
-              ? QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
-                       (1 - fitted.height() / canvasSize_.height()) / 2,
-                       fitted.width() / canvasSize_.width(),
-                       fitted.height() / canvasSize_.height())
+          baseSize.isValid() && !fitted.isEmpty()
+              ? QRectF((1 - fitted.width() / baseSize.width()) / 2,
+                       (1 - fitted.height() / baseSize.height()) / 2,
+                       fitted.width() / baseSize.width(),
+                       fitted.height() / baseSize.height())
               : QRectF(0, 0, 1, 1);
     }
     surface_->update();
@@ -389,12 +397,22 @@ QRectF StudioPreview::frameRect() const {
                          -canvas.height() * style_.padding / 100.0);
 }
 
+QRectF StudioPreview::contentRect() const {
+  const QRectF card = frameRect();
+  if (card.isEmpty() || !contentSize_.isValid())
+    return card;
+  QSizeF fitted(contentSize_);
+  fitted.scale(card.size(), Qt::KeepAspectRatio);
+  return {card.center() - QPointF(fitted.width(), fitted.height()) / 2.0,
+          fitted};
+}
+
 std::optional<QPointF> StudioPreview::sourceAt(const QPointF &position) const {
-  const QRectF drawn = frameRect();
-  if (drawn.isEmpty() || !drawn.contains(position))
+  const QRectF content = contentRect();
+  if (content.isEmpty() || !content.contains(position))
     return std::nullopt;
-  const QPointF inside((position.x() - drawn.left()) / drawn.width(),
-                       (position.y() - drawn.top()) / drawn.height());
+  const QPointF inside((position.x() - content.left()) / content.width(),
+                       (position.y() - content.top()) / content.height());
   // Through the visible window, not straight to the frame: while zoomed in,
   // the pointer is over a small part of the source and that is the part the
   // user means.
@@ -412,9 +430,9 @@ void StudioPreview::mousePressEvent(QMouseEvent *event) {
 }
 
 void StudioPreview::mouseMoveEvent(QMouseEvent *event) {
-  const bool wasInside = frameRect().contains(hover_);
+  const bool wasInside = contentRect().contains(hover_);
   hover_ = event->position();
-  if (wasInside != frameRect().contains(hover_))
+  if (wasInside != contentRect().contains(hover_))
     refreshSurface();
 }
 
@@ -441,14 +459,17 @@ void StudioPreview::paintEvent(QPaintEvent *) {
   else
     painter.fillRect(canvasRect(), studioBackgroundBrush(style_, canvasRect()));
   painter.save();
-  if (style_.radius > 0) {
+  // The ring between content and card stays transparent over the styled
+  // canvas; the rounded mask follows the content in canvas units.
+  const QRectF content = contentRect();
+  if (style_.radius > 0 && !content.isEmpty()) {
     QPainterPath clip;
     const qreal radius = style_.radius * canvasRect().height() / 1080;
-    clip.addRoundedRect(drawn, radius, radius);
+    clip.addRoundedRect(content, radius, radius);
     painter.setClipPath(clip);
   }
-  painter.setClipRect(drawn, Qt::IntersectClip);
-  painter.fillRect(drawn, Qt::black);
+  painter.setClipRect(content, Qt::IntersectClip);
+  painter.fillRect(content, Qt::black);
   if (composition_ &&
       (!videoSlotReady(primary_) || (secondary_ >= 0 && secondaryOpacity_ > 0 &&
                                      !videoSlotReady(secondary_)))) {
@@ -462,24 +483,26 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     painter.save();
     painter.setOpacity(layer.opacity);
     const auto projected = [&](const QRectF &canonical) {
-      return QRectF(drawn.left() + (canonical.x() - window.x()) /
-                                       window.width() * drawn.width(),
-                    drawn.top() + (canonical.y() - window.y()) /
-                                      window.height() * drawn.height(),
-                    canonical.width() / window.width() * drawn.width(),
-                    canonical.height() / window.height() * drawn.height());
+      return QRectF(content.left() + (canonical.x() - window.x()) /
+                                         window.width() * content.width(),
+                    content.top() + (canonical.y() - window.y()) /
+                                        window.height() * content.height(),
+                    canonical.width() / window.width() * content.width(),
+                    canonical.height() / window.height() * content.height());
     };
     painter.setClipRect(projected(layer.clip), Qt::IntersectClip);
     QRectF fit(0, 0, 1, 1);
-    if (canvasSize_.isValid()) {
+    const QSize contentSize =
+        contentSize_.isValid() ? contentSize_ : canvasSize_;
+    if (contentSize.isValid()) {
       // Match export: source is fitted into a black canonical canvas before
       // the global camera is evaluated. No full-size intermediate allocation.
       QSizeF fitted = image.size();
-      fitted.scale(QSizeF(canvasSize_), Qt::KeepAspectRatio);
-      fit = QRectF((1 - fitted.width() / canvasSize_.width()) / 2,
-                   (1 - fitted.height() / canvasSize_.height()) / 2,
-                   fitted.width() / canvasSize_.width(),
-                   fitted.height() / canvasSize_.height());
+      fitted.scale(QSizeF(contentSize), Qt::KeepAspectRatio);
+      fit = QRectF((1 - fitted.width() / contentSize.width()) / 2,
+                   (1 - fitted.height() / contentSize.height()) / 2,
+                   fitted.width() / contentSize.width(),
+                   fitted.height() / contentSize.height());
     }
     painter.drawImage(projected(fit.translated(layer.offset)), image);
     painter.restore();
@@ -498,7 +521,7 @@ void StudioPreview::paintEvent(QPaintEvent *) {
 }
 
 void StudioPreview::paintOverlay(QPainter &painter) const {
-  const QRectF drawn = frameRect();
+  const QRectF drawn = contentRect();
   const QRectF window =
       track_ ? zoomSourceRect(*track_, positionMs_) : QRectF(0, 0, 1, 1);
   painter.setRenderHint(QPainter::Antialiasing);

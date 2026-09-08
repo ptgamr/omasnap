@@ -43,6 +43,10 @@ struct StudioStyle {
   int background = 0;
   int padding = 0; // Percent of each canvas dimension, on each side.
   int radius = 0;  // Pixels at a 1080-pixel canvas height.
+  // Output aspect: 0 Original (source size), 1 16:9, 2 9:16, 3 1:1, 4 4:5.
+  // Anything else keeps Original. The canvas only ever grows: narrower
+  // content is centred on extra background, never cropped.
+  int aspect = 0;
   // Local wallpaper image winning over `background` while set. Stored as an
   // absolute path; a missing file surfaces as an export error, like a
   // missing scene source.
@@ -119,6 +123,10 @@ struct StudioStyle {
        {{0.98, 0.62, 0.77}, {0.98, 0.82, 0.47}, {0.42, 0.71, 0.96}},
        0, 1, 1, 0},
   }};
+  static constexpr std::array<const char *, 5> aspectNames{
+      {"Original", "16:9", "9:16", "1:1", "4:5"}};
+  static constexpr int aspectCount =
+      static_cast<int>(aspectNames.size());
   static constexpr int backgroundCount =
       static_cast<int>(backgrounds.size() + gradients.size());
   static constexpr int solidCount =
@@ -137,6 +145,12 @@ struct StudioStyle {
       return QString::fromUtf8(backgrounds[static_cast<size_t>(index)].name);
     return QString::fromUtf8(
         gradients[static_cast<size_t>(index - solidCount)].name);
+  }
+
+  [[nodiscard]] static QString aspectName(int index) {
+    if (index < 0 || index >= aspectCount)
+      return {};
+    return QString::fromUtf8(aspectNames[static_cast<size_t>(index)]);
   }
 
   [[nodiscard]] static StudioGradient gradient(int index) {

@@ -329,6 +329,36 @@ std::optional<qint64> studioTimelineTime(const StudioProject &p, quint64 id,
   }
   return std::nullopt;
 }
+QSize studioEffectiveCanvas(const StudioProject &p) {
+  double ratio = 0;
+  switch (p.style.aspect) {
+  case 1:
+    ratio = 16.0 / 9.0;
+    break;
+  case 2:
+    ratio = 9.0 / 16.0;
+    break;
+  case 3:
+    ratio = 1.0;
+    break;
+  case 4:
+    ratio = 4.0 / 5.0;
+    break;
+  default:
+    return p.canvas;
+  }
+  const int width = p.canvas.width(), height = p.canvas.height();
+  if (width <= 0 || height <= 0 || ratio <= 0)
+    return p.canvas;
+  // Ceil to even: the grown side must cover the content, and encoders need
+  // even dimensions.
+  const auto evenCeil = [](double value) {
+    return qMax(2, qCeil(value / 2.0) * 2);
+  };
+  if (static_cast<double>(width) / height < ratio)
+    return {evenCeil(height * ratio), height};
+  return {width, evenCeil(width / ratio)};
+}
 QString validateStudioProject(const StudioProject &p) {
   if (p.assets.size() > maxItems || p.clips.size() > maxItems)
     return QStringLiteral("Project exceeds the 1000 asset/scene limit.");
@@ -342,7 +372,9 @@ QString validateStudioProject(const StudioProject &p) {
   if (p.style.background < 0 ||
       p.style.background >= StudioStyle::backgroundCount ||
       p.style.padding < 0 || p.style.padding > 40 || p.style.radius < 0 ||
-      p.style.radius > 100 || p.style.wallpaperPath.size() > 32768 ||
+      p.style.radius > 100 || p.style.aspect < 0 ||
+      p.style.aspect >= StudioStyle::aspectCount ||
+      p.style.wallpaperPath.size() > 32768 ||
       p.style.wallpaperPath.contains(QChar::Null))
     return QStringLiteral("Invalid project canvas styling.");
   QSet<quint64> assets;
@@ -443,6 +475,7 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                  {"style", QJsonObject{{"background", p.style.background},
                                        {"padding", p.style.padding},
                                        {"radius", p.style.radius},
+                                       {"aspect", p.style.aspect},
                                        {"wallpaperPath",
                                         p.style.wallpaperPath}}},
                  {"zoom", writeZoomTrack(p.zoom)},
@@ -489,11 +522,18 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
        style["wallpaperPath"].toString().size() > 32768 ||
        style["wallpaperPath"].toString().contains(QChar::Null)))
     return malformed;
+  // Absent before aspect existed; a present but mistyped value is
+  // malformed, and an out-of-range one fails validation.
+  if (!style["aspect"].isUndefined() && !integer(style["aspect"], 0, 100))
+    return malformed;
+  const int aspect =
+      style["aspect"].isUndefined() ? 0 : style["aspect"].toInt();
   p.canvas = {canvas["width"].toInt(), canvas["height"].toInt()};
   p.fpsNumerator = canvas["fpsNumerator"].toInt();
   p.fpsDenominator = canvas["fpsDenominator"].toInt();
   p.style = {style["background"].toInt(), style["padding"].toInt(),
-             style["radius"].toInt(), style["wallpaperPath"].toString()};
+             style["radius"].toInt(), aspect,
+             style["wallpaperPath"].toString()};
   for (const auto &value : assets) {
     const auto a = value.toObject();
     const auto s = a["source"].toObject();
