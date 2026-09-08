@@ -1335,7 +1335,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       StudioChrome::panelPadding, StudioChrome::panelPadding,
       StudioChrome::panelPadding, StudioChrome::panelPadding);
   canvasLayout->setSpacing(StudioChrome::gap);
-  auto *canvasLabel = new QLabel(QStringLiteral("Canvas"), canvasPanel_);
+  auto *canvasLabel = new QLabel(QStringLiteral("Background"), canvasPanel_);
   canvasLabel->setFont(chromeMonoFont(13));
   canvasLayout->addWidget(canvasLabel);
   background_ = new StudioComboBox(canvasPanel_);

@@ -298,8 +298,8 @@ Omarchy palette, Studio uses built-in Quattro-style colors. Theme changes affect
 only the editor UI—not the saved canvas colors, video corners, or export.
 See [Studio design](docs/studio-design.md) for the palette contract.
 
-**Canvas.** Choose a background color, padding, and rounded corners in the
-Canvas tab. These are exported along with the zoom and trim. Reset canvas
+**Background.** Choose a background color, padding, and rounded corners in the
+Background section. These are exported along with the zoom and trim. Reset background
 returns to the original edge-to-edge framing.
 
 **Projects.** Studio stores source assets, ordered clip instances, source ranges,
