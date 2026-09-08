@@ -1442,6 +1442,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   connect(importButton_, &QPushButton::clicked, this,
           &StudioWindow::chooseScenes);
   headerLayout->addWidget(importButton_);
+  musicButton_ = new QPushButton(QStringLiteral("Music"), header);
+  musicButton_->setObjectName(QStringLiteral("studioMusic"));
+  musicButton_->setToolTip(
+      QStringLiteral("Background music under the composition"));
+  connect(musicButton_, &QPushButton::clicked, this,
+          &StudioWindow::showMusicDialog);
+  headerLayout->addWidget(musicButton_);
   headerLayout->addWidget(exportButton_);
   relinkButton_ = button(QStringLiteral("Relink media"),
                          QStringLiteral("Locate a missing project source"));
@@ -1779,7 +1786,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(redoButton_, help);
   QWidget::setTabOrder(help, inspectorToggle);
   QWidget::setTabOrder(inspectorToggle, importButton_);
-  QWidget::setTabOrder(importButton_, exportButton_);
+  QWidget::setTabOrder(importButton_, musicButton_);
+  QWidget::setTabOrder(musicButton_, exportButton_);
   QWidget::setTabOrder(exportButton_, relinkButton_);
   QWidget::setTabOrder(relinkButton_, playButton_);
   QWidget::setTabOrder(playButton_, mute);
@@ -2108,6 +2116,20 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       close();
     }
   });
+  connect(&musicProbeWatcher_, &QFutureWatcher<qint64>::finished, this,
+          [this] {
+            const qint64 durationMs = musicProbeWatcher_.result();
+            const QString path = musicPendingPath_;
+            musicPendingPath_.clear();
+            if (durationMs <= 0) {
+              setStatus(QStringLiteral("That file has no readable audio."),
+                        true);
+            } else {
+              commitMusic({path, project_.music.volume, durationMs});
+              setStatus(QStringLiteral("Music added — Ctrl+Z to undo"));
+            }
+            refreshControls();
+          });
   refreshControls();
 }
 
@@ -2315,6 +2337,172 @@ void StudioWindow::commitStyle(const StudioStyle &style) {
   preview_->setContentSize(project_.canvas);
   saveTimer_->start();
   refreshControls();
+}
+
+namespace {
+// Audio duration plus an audio stream, for the music picker. Video files
+// land here too, but only container duration and stream kinds are read.
+// Blocking; bounded; the caller runs it on a worker, never inline in a
+// GUI callback.
+qint64 probeMusicDurationMs(const QString &path) {
+  constexpr qint64 weekMs = 7 * 24 * 60 * 60 * 1000LL;
+  const QString ffprobe =
+      QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+  if (ffprobe.isEmpty() || path.isEmpty())
+    return 0;
+  QProcess process;
+  process.start(ffprobe,
+                {QStringLiteral("-v"), QStringLiteral("error"),
+                 QStringLiteral("-show_entries"),
+                 QStringLiteral("format=duration:stream=codec_type"),
+                 QStringLiteral("-of"),
+                 QStringLiteral("default=noprint_wrappers=1:nokey=1"), path});
+  if (!process.waitForFinished(8000)) {
+    process.kill();
+    process.waitForFinished(1000);
+    return 0;
+  }
+  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    return 0;
+  // Bare values in file order: one codec line per stream plus the
+  // container duration, sections unordered, so scan every line.
+  const QStringList lines =
+      QString::fromUtf8(process.readAllStandardOutput())
+          .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+  double seconds = 0;
+  bool hasAudio = false;
+  for (const QString &line : lines) {
+    const QString trimmed = line.trimmed();
+    if (trimmed == QStringLiteral("audio")) {
+      hasAudio = true;
+      continue;
+    }
+    bool ok = false;
+    const double value = trimmed.toDouble(&ok);
+    if (ok && value > seconds)
+      seconds = value;
+  }
+  const qint64 ms = qRound64(seconds * 1000);
+  if (ms <= 0 || ms > weekMs)
+    return 0;
+  return hasAudio ? ms : 0;
+}
+} // namespace
+
+void StudioWindow::commitMusic(const StudioMusic &music) {
+  if (restoring_ || music == project_.music)
+    return;
+  project_.music = music;
+  player_->setMusic(music);
+  rememberEdit();
+  saveTimer_->start();
+  refreshControls();
+}
+
+void StudioWindow::showMusicDialog() {
+  if (!scenesEditable())
+    return;
+  if (musicDialog_) {
+    musicDialog_->raise();
+    musicDialog_->activateWindow();
+    return;
+  }
+  auto *dialog = new QDialog(this);
+  dialog->setAttribute(Qt::WA_DeleteOnClose);
+  dialog->setWindowTitle(QStringLiteral("Background Music"));
+  dialog->setObjectName(QStringLiteral("studioMusicDialog"));
+  auto *layout = new QVBoxLayout(dialog);
+  layout->setContentsMargins(28, 24, 28, 24);
+  layout->setSpacing(StudioChrome::gap);
+  auto *fileRow = new QHBoxLayout;
+  musicFileLabel_ = new QLabel(dialog);
+  musicFileLabel_->setObjectName(QStringLiteral("musicFileName"));
+  musicFileLabel_->setWordWrap(true);
+  fileRow->addWidget(musicFileLabel_, 1);
+  musicChooseButton_ = new QPushButton(QStringLiteral("Choose…"), dialog);
+  musicChooseButton_->setObjectName(QStringLiteral("musicChoose"));
+  connect(musicChooseButton_, &QPushButton::clicked, this,
+          &StudioWindow::chooseMusicFile);
+  fileRow->addWidget(musicChooseButton_);
+  musicRemoveButton_ = new QPushButton(QStringLiteral("Remove"), dialog);
+  musicRemoveButton_->setObjectName(QStringLiteral("musicRemove"));
+  connect(musicRemoveButton_, &QPushButton::clicked, this,
+          &StudioWindow::removeMusic);
+  fileRow->addWidget(musicRemoveButton_);
+  layout->addLayout(fileRow);
+  auto *volumeRow = new QHBoxLayout;
+  volumeRow->addWidget(new QLabel(QStringLiteral("Volume"), dialog));
+  volumeRow->addStretch();
+  auto *volumeValue = new QLabel(dialog);
+  volumeValue->setObjectName(QStringLiteral("musicVolumeValue"));
+  volumeValue->setFont(chromeMonoFont(12));
+  volumeRow->addWidget(volumeValue);
+  musicVolumeValue_ = volumeValue;
+  layout->addLayout(volumeRow);
+  musicVolume_ = new StudioSlider(Qt::Horizontal, dialog);
+  musicVolume_->setObjectName(QStringLiteral("musicVolume"));
+  musicVolume_->setRange(0, 100);
+  musicVolume_->setToolTip(QStringLiteral("Music level under the scenes"));
+  layout->addWidget(musicVolume_);
+  connect(musicVolume_, &QSlider::valueChanged, volumeValue,
+          [volumeValue](int n) {
+            volumeValue->setText(QString::number(n) + QStringLiteral("%"));
+          });
+  connect(musicVolume_, &QSlider::valueChanged, this,
+          &StudioWindow::changeMusicVolume);
+  connect(musicVolume_, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
+  connect(musicVolume_, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
+  auto *hint = new QLabel(
+      QStringLiteral("Plays under the whole composition · trimmed to fit"),
+      dialog);
+  hint->setObjectName(QStringLiteral("muted"));
+  hint->setWordWrap(true);
+  layout->addWidget(hint);
+  auto *done = new QPushButton(QStringLiteral("Done"), dialog);
+  connect(done, &QPushButton::clicked, dialog, &QDialog::accept);
+  layout->addWidget(done);
+  musicDialog_ = dialog;
+  dialog->show();
+  refreshControls();
+}
+
+void StudioWindow::chooseMusicFile() {
+  if (!scenesEditable() || musicProbeWatcher_.isRunning())
+    return;
+  auto *dialog = new QFileDialog(this, QStringLiteral("Choose music"));
+  dialog->setAttribute(Qt::WA_DeleteOnClose);
+  dialog->setOption(QFileDialog::DontUseNativeDialog);
+  dialog->setFileMode(QFileDialog::ExistingFile);
+  dialog->setNameFilters(
+      {QStringLiteral("Audio (*.mp3 *.m4a *.aac *.wav *.ogg *.opus *.flac)"),
+       QStringLiteral("All files (*)")});
+  connect(dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
+    captureCursor();
+    musicPendingPath_ = QFileInfo(path).absoluteFilePath();
+    setStatus(QStringLiteral("Reading music…"));
+    refreshControls();
+    musicProbeWatcher_.setFuture(
+        QtConcurrent::run([path = musicPendingPath_] {
+          return probeMusicDurationMs(path);
+        }));
+  });
+  dialog->show();
+}
+
+void StudioWindow::removeMusic() {
+  if (!scenesEditable())
+    return;
+  captureCursor();
+  commitMusic({});
+  setStatus(QStringLiteral("Music removed — Ctrl+Z to undo"));
+}
+
+void StudioWindow::changeMusicVolume() {
+  if (restoring_ || !musicVolume_ || !musicVolume_->isEnabled())
+    return;
+  captureCursor();
+  commitMusic({project_.music.path, musicVolume_->value(),
+               project_.music.durationMs});
 }
 
 void StudioWindow::applyPreset(int index) {
@@ -2821,6 +3009,36 @@ void StudioWindow::refreshControls() {
   background_->setEnabled(editable);
   aspect_->setEnabled(editable);
   presets_->setEnabled(editable);
+  musicButton_->setEnabled(scenesEditable());
+  if (musicDialog_) {
+    const bool musicEditable =
+        scenesEditable() && musicPendingPath_.isEmpty();
+    if (musicChooseButton_)
+      musicChooseButton_->setEnabled(musicEditable);
+    if (musicRemoveButton_)
+      musicRemoveButton_->setEnabled(musicEditable &&
+                                     !project_.music.path.isEmpty());
+    if (musicFileLabel_) {
+      QString fileText = QStringLiteral("None");
+      if (!musicPendingPath_.isEmpty())
+        fileText = QStringLiteral("Reading…");
+      else if (!project_.music.path.isEmpty())
+        fileText = QFileInfo(project_.music.path).fileName();
+      musicFileLabel_->setText(fileText);
+      musicFileLabel_->setToolTip(project_.music.path);
+    }
+    if (musicVolume_) {
+      musicVolume_->setEnabled(musicEditable);
+      const QSignalBlocker quietVolume(musicVolume_);
+      musicVolume_->setValue(project_.music.volume);
+    }
+    // The restore above blocks the signal that paints the readout, so the
+    // label follows the model explicitly.
+    if (musicVolumeValue_) {
+      musicVolumeValue_->setText(QString::number(project_.music.volume) +
+                                 QStringLiteral("%"));
+    }
+  }
   colorTab_->setEnabled(editable);
   gradientTab_->setEnabled(editable);
   wallpaperTab_->setEnabled(editable);

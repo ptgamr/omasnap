@@ -41,6 +41,8 @@ public:
   [[nodiscard]] double playbackRate() const { return rate_; }
   [[nodiscard]] QAudioOutput *audioOutput() const { return audio_; }
   [[nodiscard]] QMediaPlayer *activePlayer() const;
+  /** Light music update: no decoder reload, volume applies immediately. */
+  void setMusic(const StudioMusic &music);
 
 signals:
   void positionChanged(qint64 milliseconds);
@@ -74,6 +76,8 @@ private:
   void finishSpan(const StudioSpan &span);
   void setState(QMediaPlayer::PlaybackState state);
   void updateAudio();
+  /** Reloads the song only when its path changed; silent when missing. */
+  void syncMusicSource();
   void refreshComposition();
   void synchronize();
   [[nodiscard]] const StudioSpan *nextSpan() const;
@@ -85,6 +89,13 @@ private:
   QVector<StudioSpan> spans_;
   std::array<Slot, 2> slots_;
   QAudioOutput *audio_;
+  // Background music follows the video clock and never drives it: it seeks,
+  // plays, and pauses with the transport, and stays quiet on any failure
+  // (the export fails loudly instead, like a missing scene source).
+  QMediaPlayer *musicPlayer_ = nullptr;
+  QAudioOutput *musicAudio_ = nullptr;
+  QString musicPath_;
+  bool musicFailed_ = false;
   QTimer timer_;
   QElapsedTimer frameClock_;
   QElapsedTimer seekClock_;

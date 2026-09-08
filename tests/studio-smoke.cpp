@@ -4,6 +4,7 @@
 #include "studio-composition-smoke.hpp"
 #include "studio-background-ui-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
+#include "studio-music-ui-smoke.hpp"
 #include "studio-export.hpp"
 #include "studio-playback-smoke.hpp"
 #include "studio-playback.hpp"
@@ -1131,10 +1132,14 @@ bool runMultiClipReadinessChecks(const QString &source, QString &error) {
   const auto decoders = player.findChildren<QMediaPlayer *>();
   if (!check(QTest::qWaitFor(
                  [&] {
-                   for (const auto *decoder : decoders)
+                   for (const auto *decoder : decoders) {
+                     // The music player decodes no video.
+                     if (!decoder->videoSink())
+                       continue;
                      if (!decoder->videoSink()->videoFrame().isValid() ||
                          decoder->playbackState() == QMediaPlayer::PlayingState)
                        return false;
+                   }
                    return true;
                  },
                  5000),
@@ -1295,6 +1300,8 @@ bool runStudioInteractionChecks(QString &error) {
   if (!runStudioCutsUiChecks(source, error))
     return false;
   if (!runStudioBackgroundUiChecks(source, error))
+    return false;
+  if (!runStudioMusicUiChecks(source, error))
     return false;
   if (!runStudioScenesUiChecks(source, error))
     return false;

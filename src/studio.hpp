@@ -11,6 +11,7 @@
 #include <QImage>
 #include <QMap>
 #include <QPair>
+#include <QPointer>
 #include <QPixmap>
 #include <QSet>
 #include <QSize>
@@ -310,10 +311,24 @@ private:
   StudioProject gestureProject_;
   QFutureWatcher<StudioProjectLoad> importWatcher_;
   class QPushButton *importButton_ = nullptr;
+  class QPushButton *musicButton_ = nullptr;
   class QLabel *sceneLabel_ = nullptr;
+  QPointer<class QDialog> musicDialog_;
+  QPointer<class QLabel> musicFileLabel_;
+  QPointer<class QSlider> musicVolume_;
+  QPointer<class QLabel> musicVolumeValue_;
+  QPointer<class QPushButton> musicChooseButton_;
+  QPointer<class QPushButton> musicRemoveButton_;
+  QFutureWatcher<qint64> musicProbeWatcher_;
+  QString musicPendingPath_;
   quint64 nextClipId_ = 1;
   void changeClipSpeed();
   class StudioComboBox *clipSpeed_ = nullptr;
+  void showMusicDialog();
+  void chooseMusicFile();
+  void removeMusic();
+  void changeMusicVolume();
+  void commitMusic(const StudioMusic &music);
   class QPushButton *splitButton_ = nullptr;
   class QPushButton *deleteButton_ = nullptr;
   [[nodiscard]] StudioEditState editState() const;

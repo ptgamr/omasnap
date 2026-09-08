@@ -302,6 +302,11 @@ See [Studio design](docs/studio-design.md) for the palette contract.
 Background section. These are exported along with the zoom and trim. Reset background
 returns to the original edge-to-edge framing.
 
+**Music.** The header **Music** button puts one song under the whole
+composition, trimmed to fit, with its own level. It previews with the mute
+switch, exports mixed under the scenes, and every change is undoable. A
+missing file fails the export with guidance instead of silent audio.
+
 **Projects.** Studio stores source assets, ordered clip instances, source ranges,
 speed, project-time zoom cues, and canvas settings in one non-destructive document.
 Open a video or its `.omasnap.json` project directly. Missing sources expose

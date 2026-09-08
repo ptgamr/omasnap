@@ -55,6 +55,7 @@ if(BUILD_TESTING)
   set(STUDIO_TEST_SOURCES
     studio-smoke.cpp
     studio-background-ui-smoke.cpp studio-background-ui-smoke.hpp
+    studio-music-ui-smoke.cpp studio-music-ui-smoke.hpp
     studio-project-smoke.cpp studio-project-smoke.hpp
     studio-composition-smoke.cpp studio-composition-smoke.hpp
     studio-playback-smoke.cpp studio-playback-smoke.hpp

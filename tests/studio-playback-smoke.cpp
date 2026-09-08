@@ -346,10 +346,14 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
                }, 4000), "paused backward seek left the preview blank"))
     return false;
   // A backend can report a decode error without changing BufferedMedia.
-  // Reloading that same file must not leave loaded=false forever.
-  for (auto *decoder : playback.findChildren<QMediaPlayer *>())
+  // Reloading that same file must not leave loaded=false forever. The music
+  // player is no decoder and gets no simulated failure.
+  for (auto *decoder : playback.findChildren<QMediaPlayer *>()) {
+    if (!decoder->videoSink())
+      continue;
     decoder->errorOccurred(QMediaPlayer::ResourceError,
                            QStringLiteral("simulated mid-file decode failure"));
+  }
   failures.clear();
   playback.setProject(original);
   if (!require(seekAndCheck(1500, 1, false),
@@ -541,7 +545,11 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
           QTest::qWaitFor([&] { return colorNear(QColor(190, 64, 0)); }, 4000),
           "reverse transition seek retained later scene textures"))
     return false;
-  const auto players = playback.findChildren<QMediaPlayer *>();
+  const auto allPlayers = playback.findChildren<QMediaPlayer *>();
+  QVector<QMediaPlayer *> players;
+  for (auto *candidate : allPlayers)
+    if (candidate->videoSink())
+      players.push_back(candidate);
   const auto *outgoingAudio = playback.activePlayer()->audioOutput();
   const auto *incomingAudio = players[0] == playback.activePlayer()
                                   ? players[1]->audioOutput()

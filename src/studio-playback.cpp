@@ -13,7 +13,22 @@ bool containsTime(const QVideoFrame &frame, qint64 milliseconds) {
 } // namespace
 
 StudioPlayback::StudioPlayback(StudioPreview *preview, QObject *parent)
-    : QObject(parent), preview_(preview), audio_(new QAudioOutput(this)) {
+    : QObject(parent), preview_(preview), audio_(new QAudioOutput(this)),
+      musicPlayer_(new QMediaPlayer(this)),
+      musicAudio_(new QAudioOutput(this)) {
+  musicPlayer_->setAudioOutput(musicAudio_);
+  connect(musicPlayer_, &QMediaPlayer::errorOccurred, this,
+          [this](QMediaPlayer::Error, const QString &) {
+            musicFailed_ = true;
+            musicPlayer_->pause();
+          });
+  connect(musicPlayer_, &QMediaPlayer::mediaStatusChanged, this,
+          [this](QMediaPlayer::MediaStatus status) {
+            // A song shorter than the composition simply ends; the picture
+            // plays on in silence.
+            if (status == QMediaPlayer::EndOfMedia)
+              musicPlayer_->pause();
+          });
   for (int index = 0; index < 2; ++index) {
     auto &slot = slots_[index];
     slot.player = new QMediaPlayer(this);
@@ -94,6 +109,25 @@ const StudioSpan *StudioPlayback::spanFor(quint64 clipId) const {
   return nullptr;
 }
 
+void StudioPlayback::setMusic(const StudioMusic &music) {
+  project_.music = music;
+  syncMusicSource();
+  updateAudio();
+}
+
+void StudioPlayback::syncMusicSource() {
+  if (project_.music.path == musicPath_)
+    return;
+  musicPath_ = project_.music.path;
+  musicFailed_ = false;
+  musicPlayer_->stop();
+  if (!musicPath_.isEmpty())
+    musicPlayer_->setSource(QUrl::fromLocalFile(musicPath_));
+  else
+    musicPlayer_->setSource({});
+  updateAudio();
+}
+
 void StudioPlayback::setProject(const StudioProject &project,
                                 qint64 desiredPosition) {
   const QString error = validateStudioProject(project);
@@ -128,6 +162,7 @@ void StudioPlayback::setProject(const StudioProject &project,
                   newClip && *oldClip == *newClip;
   }
   project_ = project;
+  syncMusicSource();
   spans_ = studioComposition(project_);
   blendTime_ = -1;
   preview_->setTrack(&project_.zoom);
@@ -311,6 +346,8 @@ void StudioPlayback::seekPosition(qint64 milliseconds, bool retainFrame) {
     emit errorOccurred(slots_[active_].error);
   }
   updateAudio();
+  if (!musicPath_.isEmpty() && !musicFailed_)
+    musicPlayer_->setPosition(target);
   if (slots_[active_].frame.isValid())
     present(active_, slots_[active_].frame, true);
   emit positionChanged(position_);
@@ -516,6 +553,20 @@ void StudioPlayback::synchronize() {
       slot.player->pause();
     }
   }
+  // The song trails the picture clock: re-anchor on drift (a seek that
+  // landed before the media finished loading), never rewind a finished
+  // song into a restart loop.
+  if (!waiting_ && !musicPath_.isEmpty() && !musicFailed_ &&
+      musicPlayer_->mediaStatus() != QMediaPlayer::EndOfMedia) {
+    if (musicPlayer_->playbackState() != QMediaPlayer::PlayingState) {
+      const qint64 drift = musicPlayer_->position() - position_;
+      if (drift < -250 || drift > 250)
+        musicPlayer_->setPosition(position_);
+      musicPlayer_->play();
+    }
+  } else if (musicPlayer_->playbackState() == QMediaPlayer::PlayingState) {
+    musicPlayer_->pause();
+  }
 }
 
 void StudioPlayback::setState(QMediaPlayer::PlaybackState state) {
@@ -545,12 +596,14 @@ void StudioPlayback::pause() {
   for (auto &slot : slots_)
     if (slot.loaded && !slot.priming)
       slot.player->pause();
+  musicPlayer_->pause();
 }
 
 void StudioPlayback::stop() {
   pause();
   position_ = 0;
   setState(QMediaPlayer::StoppedState);
+  musicPlayer_->stop();
   emit positionChanged(position_);
 }
 
@@ -561,6 +614,7 @@ void StudioPlayback::setPlaybackRate(double rate) {
   for (auto &slot : slots_)
     if (const auto *span = spanFor(slot.clipId))
       slot.player->setPlaybackRate(span->speed * rate_);
+  musicPlayer_->setPlaybackRate(rate_);
 }
 
 void StudioPlayback::updateAudio() {
@@ -573,4 +627,7 @@ void StudioPlayback::updateAudio() {
     slots_[i].audio->setMuted(audio_->isMuted() || !contributing(i) ||
                               waiting_ || state_ != QMediaPlayer::PlayingState);
   }
+  musicAudio_->setVolume(audio_->volume() * project_.music.volume / 100.0F);
+  musicAudio_->setMuted(audio_->isMuted() || musicPath_.isEmpty() ||
+                        musicFailed_ || state_ != QMediaPlayer::PlayingState);
 }
