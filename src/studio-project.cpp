@@ -373,8 +373,8 @@ QString validateStudioProject(const StudioProject &p) {
       p.style.background >= StudioStyle::backgroundCount ||
       p.style.padding < 0 || p.style.padding > 40 || p.style.radius < 0 ||
       p.style.radius > 100 || p.style.aspect < 0 ||
-      p.style.aspect >= StudioStyle::aspectCount ||
-      p.style.wallpaperPath.size() > 32768 ||
+      p.style.aspect >= StudioStyle::aspectCount || p.style.shadow < 0 ||
+      p.style.shadow > 100 || p.style.wallpaperPath.size() > 32768 ||
       p.style.wallpaperPath.contains(QChar::Null))
     return QStringLiteral("Invalid project canvas styling.");
   QSet<quint64> assets;
@@ -476,6 +476,7 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                                        {"padding", p.style.padding},
                                        {"radius", p.style.radius},
                                        {"aspect", p.style.aspect},
+                                       {"shadow", p.style.shadow},
                                        {"wallpaperPath",
                                         p.style.wallpaperPath}}},
                  {"zoom", writeZoomTrack(p.zoom)},
@@ -523,17 +524,22 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
        style["wallpaperPath"].toString().contains(QChar::Null)))
     return malformed;
   // Absent before aspect existed; a present but mistyped value is
-  // malformed, and an out-of-range one fails validation.
+  // malformed, and an out-of-range one fails validation. Shadow, added
+  // later, follows the same rule.
   if (!style["aspect"].isUndefined() && !integer(style["aspect"], 0, 100))
+    return malformed;
+  if (!style["shadow"].isUndefined() && !integer(style["shadow"], 0, 100))
     return malformed;
   const int aspect =
       style["aspect"].isUndefined() ? 0 : style["aspect"].toInt();
+  const int shadow =
+      style["shadow"].isUndefined() ? 0 : style["shadow"].toInt();
   p.canvas = {canvas["width"].toInt(), canvas["height"].toInt()};
   p.fpsNumerator = canvas["fpsNumerator"].toInt();
   p.fpsDenominator = canvas["fpsDenominator"].toInt();
   p.style = {style["background"].toInt(), style["padding"].toInt(),
              style["radius"].toInt(), aspect,
-             style["wallpaperPath"].toString()};
+             style["wallpaperPath"].toString(), shadow};
   for (const auto &value : assets) {
     const auto a = value.toObject();
     const auto s = a["source"].toObject();

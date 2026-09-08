@@ -37,6 +37,17 @@ inline QColor studioStopColor(const StudioGradientStop &stop) {
                           static_cast<float>(stop.green),
                           static_cast<float>(stop.blue));
 }
+// Bettershot shadow geometry shared by preview, GPU, and export: a blurred
+// black card silhouette shifted down, at 36% of the strength opacity.
+struct StudioShadow {
+  double blur;    // Blur radius in canvas pixels.
+  double offsetY; // Downward shift in canvas pixels.
+  double alpha;   // Black opacity 0..1.
+};
+inline StudioShadow studioShadow(double strength, double shortEdge) {
+  return {qMax(2.0, shortEdge * (0.035 + strength * 0.035)),
+          shortEdge * (0.012 + strength * 0.018), strength * 0.36};
+}
 } // namespace
 
 struct StudioStyle {
@@ -51,6 +62,9 @@ struct StudioStyle {
   // absolute path; a missing file surfaces as an export error, like a
   // missing scene source.
   QString wallpaperPath;
+  // Shadow strength in percent, Bettershot strength x 100. Blurs the card
+  // silhouette onto the canvas; invisible without a card to cast it.
+  int shadow = 0;
   bool operator==(const StudioStyle &) const = default;
 
   // Solid background presets matching Bettershot's twelve-color palette.

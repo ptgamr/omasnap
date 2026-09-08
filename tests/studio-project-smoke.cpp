@@ -889,6 +889,18 @@ bool runStudioProjectChecks(QString &error) {
                    decoded.style.aspect == 2,
                QStringLiteral("Aspect does not persist")))
       return false;
+    styled.style.shadow = 30;
+    if (!check(validateStudioProject(styled).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(styled), decoded)
+                           .isEmpty() &&
+                   decoded.style.shadow == 30,
+               QStringLiteral("Shadow does not persist")))
+      return false;
+    styled.style.shadow = 101;
+    if (!check(!validateStudioProject(styled).isEmpty(),
+               QStringLiteral("Out-of-range shadow accepted")))
+      return false;
+    styled.style.shadow = 0;
     auto json =
         QJsonDocument::fromJson(encodeStudioProject(styled)).object();
     auto styleObject = json["style"].toObject();

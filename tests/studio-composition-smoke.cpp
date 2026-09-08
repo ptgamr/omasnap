@@ -886,6 +886,46 @@ bool runStudioCompositionChecks(QString &error) {
                    portrait.pixelColor(160, 285).blue() > 200,
                "9:16 export misplaced the scene or background"))
     return false;
+  // Shadow darkens the canvas just below the card in export and preview
+  // alike, while untouched corners stay bright. 70% reads robustly through
+  // the encode; the halo math is strength-linear.
+  project.style = {1, 10, 0, 0, {}, 70};
+  project.trimInMs = 0;
+  project.trimOutMs = -1;
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto shadowed = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  // Symmetric halo points: a miscentred mask darkens one side only.
+  const auto haloLeft = shadowed.pixelColor(28, 100);
+  const auto haloRight = shadowed.pixelColor(292, 100);
+  if (!require(!shadowed.isNull() &&
+                   std::abs(haloLeft.red() - haloRight.red()) < 12 &&
+                   haloLeft.red() < 235 && haloRight.red() < 235 &&
+                   shadowed.pixelColor(4, 4).red() > 230 &&
+                   shadowed.pixelColor(160, 164).red() < 235 &&
+                   QTest::qWaitFor(
+                       [&] {
+                         const QImage shot = preview.grab()
+                                                 .toImage()
+                                                 .scaled(project.canvas);
+                         return shot.pixelColor(4, 4).red() > 230 &&
+                                shot.pixelColor(160, 164).red() < 238;
+                       },
+                       5000),
+               "shadow did not darken below the card"))
+    return false;
+  // Thin margin plus full strength: the offset silhouette must survive, not
+  // clip against the canvas edge. Export-only; the preview scissor path is
+  // covered above.
+  project.style = {1, 1, 0, 0, {}, 100};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto thinShadow = sample(ffmpeg, path, 0.3, error);
+  if (!require(!thinShadow.isNull() &&
+                   thinShadow.pixelColor(160, 179).red() < 215,
+               "thin-margin shadow lost its offset"))
+    return false;
   // A changing cadence retains timestamps; frame-index-based concatenation
   // would move the blue/green changes and shorten this two-second source.
   const QString vfrPath = scratch.filePath("vfr.mp4");

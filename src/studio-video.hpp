@@ -52,6 +52,8 @@ public:
   std::array<QVector3D, 3> backgroundStops{};
   QPointF backgroundStart{};
   QPointF backgroundEnd{1, 1};
+  // Shadow strength 0..1 darkening the canvas under the content silhouette.
+  float shadowStrength = 0;
   // Stretched wallpaper winning over both, uploaded once per image. The key
   // is the image cache key, so identical pixels never re-upload.
   QImage wallpaper;
@@ -84,6 +86,7 @@ private:
   QOpenGLShaderProgram program_;
   QOpenGLShaderProgram gradientProgram_;
   QOpenGLShaderProgram wallpaperProgram_;
+  QOpenGLShaderProgram shadowProgram_;
   GLuint wallpaperTexture = 0;
   void ensureWallpaperTexture();
 };

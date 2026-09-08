@@ -276,6 +276,7 @@ void StudioPreview::refreshSurface() {
     surface_->content = contentRect();
     surface_->background = style_.color();
     surface_->wallpaper = wallpaper_;
+    surface_->shadowStrength = style_.shadow / 100.0F;
     surface_->backgroundIsGradient =
         StudioStyle::isGradient(style_.background);
     if (surface_->backgroundIsGradient) {
@@ -458,10 +459,36 @@ void StudioPreview::paintEvent(QPaintEvent *) {
     painter.drawImage(canvasRect(), wallpaper_);
   else
     painter.fillRect(canvasRect(), studioBackgroundBrush(style_, canvasRect()));
+  // Layered silhouette under the card: the blur spreads past the offset
+  // content shape and fades out. Exact falloff differs per backend; each is
+  // tested against darkening, not against each other.
+  const QRectF content = contentRect();
+  if (style_.shadow > 0 && !content.isEmpty()) {
+    const StudioShadow shadow =
+        studioShadow(style_.shadow / 100.0,
+                     qMin(canvasRect().width(), canvasRect().height()));
+    const qreal baseRadius = style_.radius * canvasRect().height() / 1080;
+    painter.save();
+    // Canvas-bounded like the GPU scissor and the export frame.
+    painter.setClipRect(canvasRect());
+    painter.setPen(Qt::NoPen);
+    const int steps = 8;
+    for (int i = steps; i >= 1; --i) {
+      const qreal t = i / static_cast<qreal>(steps);
+      QColor black(0, 0, 0);
+      black.setAlphaF(shadow.alpha * 2 * (1 - t) / steps);
+      painter.setBrush(black);
+      const qreal inflate = shadow.blur * t;
+      painter.drawRoundedRect(content.adjusted(-inflate, -inflate,
+                                               inflate, inflate)
+                                  .translated(0, shadow.offsetY),
+                              baseRadius + inflate, baseRadius + inflate);
+    }
+    painter.restore();
+  }
   painter.save();
   // The ring between content and card stays transparent over the styled
   // canvas; the rounded mask follows the content in canvas units.
-  const QRectF content = contentRect();
   if (style_.radius > 0 && !content.isEmpty()) {
     QPainterPath clip;
     const qreal radius = style_.radius * canvasRect().height() / 1080;

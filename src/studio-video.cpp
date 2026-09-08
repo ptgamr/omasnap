@@ -1,10 +1,26 @@
 /** @fileoverview Bounded video preparation and GPU YUV/crop rendering. */
 #include "studio-video.hpp"
+#include "studio-style.hpp"
 
 #include <QOpenGLContext>
 #include <QPainter>
 
 #include <utility>
+
+namespace {
+// Fullscreen triangle mapping to device pixels, y down. Shared by the
+// gradient, wallpaper, and shadow background programs.
+constexpr const char kBackgroundVertex[] = R"(
+    attribute vec2 position;
+    uniform vec2 uSize;
+    varying vec2 vPos;
+    void main() {
+      vPos = vec2((position.x + 1.0) * 0.5 * uSize.x,
+                  (1.0 - (position.y + 1.0) * 0.5) * uSize.y);
+      gl_Position = vec4(position, 0.0, 1.0); }
+  )";
+constexpr GLfloat kBackgroundTriangle[6] = {-1, -1, 3, -1, -1, 3};
+} // namespace
 
 StudioVideoFrame prepareStudioVideoFrame(QVideoFrame frame, bool forceRgba) {
   StudioVideoFrame result;
@@ -95,6 +111,7 @@ void StudioVideoSurface::releaseResources() {
   program_.removeAllShaders();
   gradientProgram_.removeAllShaders();
   wallpaperProgram_.removeAllShaders();
+  shadowProgram_.removeAllShaders();
   if (wallpaperTexture != 0) {
     glDeleteTextures(1, &wallpaperTexture);
     wallpaperTexture = 0;
@@ -187,15 +204,8 @@ void StudioVideoSurface::initializeGL() {
   // Gradient backgrounds get their own trivial program so the solid clear
   // path above stays byte-identical. A link failure here is not fatal: the
   // paint falls back to the flat middle-stop color.
-  gradientProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
-    attribute vec2 position;
-    uniform vec2 uSize;
-    varying vec2 vPos;
-    void main() {
-      vPos = vec2((position.x + 1.0) * 0.5 * uSize.x,
-                  (1.0 - (position.y + 1.0) * 0.5) * uSize.y);
-      gl_Position = vec4(position, 0.0, 1.0); }
-  )");
+  gradientProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex,
+                                             kBackgroundVertex);
   gradientProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
     #ifdef GL_ES
     precision highp float;
@@ -221,15 +231,8 @@ void StudioVideoSurface::initializeGL() {
   // Stretched wallpaper sampling. Same vertex mapping as the gradient
   // program; uv (0,0) is the image top-left, matching the QImage row order
   // uploaded below. Unlinked programs fall back to the flat color.
-  wallpaperProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
-    attribute vec2 position;
-    uniform vec2 uSize;
-    varying vec2 vPos;
-    void main() {
-      vPos = vec2((position.x + 1.0) * 0.5 * uSize.x,
-                  (1.0 - (position.y + 1.0) * 0.5) * uSize.y);
-      gl_Position = vec4(position, 0.0, 1.0); }
-  )");
+  wallpaperProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex,
+                                              kBackgroundVertex);
   wallpaperProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
     #ifdef GL_ES
     precision highp float;
@@ -241,6 +244,29 @@ void StudioVideoSurface::initializeGL() {
       gl_FragColor = texture2D(uTex, (vPos - uCanvas.xy) / uCanvas.zw); }
   )");
   wallpaperProgram_.link();
+  // Blurred black card silhouette under the video quad. The falloff curve
+  // differs from the other backends; each is tested on darkening.
+  shadowProgram_.addShaderFromSourceCode(QOpenGLShader::Vertex,
+                                         kBackgroundVertex);
+  shadowProgram_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
+    #ifdef GL_ES
+    precision highp float;
+    #endif
+    uniform vec4 uContent;
+    uniform float uRadius;
+    uniform float uStrength;
+    uniform float uYOff;
+    uniform float uBlur;
+    varying vec2 vPos;
+    void main() {
+      vec2 local = (vPos - vec2(0.0, uYOff) - uContent.xy) / uContent.zw;
+      vec2 cardSize = uContent.zw;
+      vec2 q = abs(local - 0.5) * cardSize - (cardSize * 0.5 - uRadius);
+      float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - uRadius;
+      float a = uStrength * 0.36 * (1.0 - smoothstep(0.0, uBlur, d));
+      gl_FragColor = vec4(0.0, 0.0, 0.0, a); }
+  )");
+  shadowProgram_.link();
   for (auto &bank : banks_)
     bank.dirty = true;
 }
@@ -285,8 +311,8 @@ void StudioVideoSurface::paintGL() {
                   static_cast<float>(canvas.width() * dpr),
                   static_cast<float>(canvas.height() * dpr)));
     wallpaperProgram_.enableAttributeArray("position");
-    static const GLfloat triangle[6] = {-1, -1, 3, -1, -1, 3};
-    wallpaperProgram_.setAttributeArray("position", GL_FLOAT, triangle, 2);
+    wallpaperProgram_.setAttributeArray("position", GL_FLOAT,
+                                        kBackgroundTriangle, 2);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     wallpaperProgram_.disableAttributeArray("position");
     wallpaperProgram_.release();
@@ -310,8 +336,8 @@ void StudioVideoSurface::paintGL() {
                   static_cast<float>(canvas.width() * dpr),
                   static_cast<float>(canvas.height() * dpr)));
     gradientProgram_.enableAttributeArray("position");
-    static const GLfloat triangle[6] = {-1, -1, 3, -1, -1, 3};
-    gradientProgram_.setAttributeArray("position", GL_FLOAT, triangle, 2);
+    gradientProgram_.setAttributeArray("position", GL_FLOAT,
+                                       kBackgroundTriangle, 2);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     gradientProgram_.disableAttributeArray("position");
     gradientProgram_.release();
@@ -320,6 +346,43 @@ void StudioVideoSurface::paintGL() {
     glClear(GL_COLOR_BUFFER_BIT);
   }
   glDisable(GL_SCISSOR_TEST);
+  const QRectF shadowQuad = content.isEmpty() ? drawn : content;
+  if (shadowStrength > 0 && shadowProgram_.isLinked() &&
+      !shadowQuad.isEmpty()) {
+    const StudioShadow shadow = studioShadow(
+        shadowStrength, qMin(canvas.width(), canvas.height()));
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(qRound(canvas.x() * dpr),
+              qRound((height() - canvas.bottom()) * dpr),
+              qRound(canvas.width() * dpr), qRound(canvas.height() * dpr));
+    shadowProgram_.bind();
+    shadowProgram_.setUniformValue(
+        "uSize", QVector2D(static_cast<float>(width() * dpr),
+                           static_cast<float>(height() * dpr)));
+    shadowProgram_.setUniformValue(
+        "uContent",
+        QVector4D(static_cast<float>(shadowQuad.x() * dpr),
+                  static_cast<float>(shadowQuad.y() * dpr),
+                  static_cast<float>(shadowQuad.width() * dpr),
+                  static_cast<float>(shadowQuad.height() * dpr)));
+    shadowProgram_.setUniformValue("uRadius",
+                                   static_cast<float>(radius * dpr));
+    shadowProgram_.setUniformValue("uStrength", shadowStrength);
+    shadowProgram_.setUniformValue(
+        "uYOff", static_cast<float>(shadow.offsetY * dpr));
+    shadowProgram_.setUniformValue("uBlur",
+                                   static_cast<float>(shadow.blur * dpr));
+    shadowProgram_.enableAttributeArray("position");
+    shadowProgram_.setAttributeArray("position", GL_FLOAT,
+                                     kBackgroundTriangle, 2);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDisable(GL_BLEND);
+    shadowProgram_.disableAttributeArray("position");
+    shadowProgram_.release();
+    glDisable(GL_SCISSOR_TEST);
+  }
   if (banks_[primary].frame.size.isEmpty() ||
       (secondary >= 0 && secondaryOpacity > 0 &&
        banks_[secondary].frame.size.isEmpty()) ||

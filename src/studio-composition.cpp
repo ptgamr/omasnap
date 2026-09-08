@@ -1,6 +1,8 @@
 /** @fileoverview Timestamp-aware, non-destructive multi-source export. */
 #include "studio-composition.hpp"
 
+#include <QtMath>
+
 #include <cmath>
 
 namespace {
@@ -296,8 +298,47 @@ QStringList studioCompositionArguments(const StudioProject &project,
                    .arg(project.fpsNumerator)
                    .arg(project.fpsDenominator);
     }
-    graph << QStringLiteral("[canvas][card]overlay=x=(W-w)/2:y=(H-h)/2:"
-                            "shortest=1:format=auto,format=yuv420p[video]");
+    QString canvasLabel = QStringLiteral("[canvas]");
+    QString cardLabel = QStringLiteral("[card]");
+    if (project.style.shadow > 0) {
+      // Blurred black silhouette of the card under the card itself. The mask
+      // blurs the card alpha, tints it black, and lands shifted down.
+      const StudioShadow shadow = studioShadow(
+          project.style.shadow / 100.0, qMin(width, height));
+      const int yOffset = qRound(shadow.offsetY);
+      graph << QStringLiteral("[card]format=rgba,split=2[cardvideo][cardalpha]");
+      // Pad first: blurring the opaque card alone is a no-op. The offset
+      // positions the silhouette before the blur, so the halo spreads
+      // around its final spot instead of shifting a centred halo down.
+      // The intermediate oversizes for offset plus halo: centring in it
+      // already accounts for the margin, and the crop takes the canvas
+      // window back out.
+      const int margin = qCeil(yOffset + 3 * shadow.blur);
+      graph << QStringLiteral("[cardalpha]alphaextract,"
+                              "pad=%2:%3:(ow-iw)/2:(oh-ih)/2+%4,"
+                              "gblur=sigma=%1,crop=%5:%6:%7:%7[mask]")
+                   .arg(shadow.blur, 0, 'f', 2)
+                   .arg(width + 2 * margin)
+                   .arg(height + 2 * margin)
+                   .arg(yOffset)
+                   .arg(width)
+                   .arg(height)
+                   .arg(margin);
+      graph << QStringLiteral("color=c=black:s=%1x%2:r=%3/%4[shadowbase]")
+                   .arg(width)
+                   .arg(height)
+                   .arg(project.fpsNumerator)
+                   .arg(project.fpsDenominator);
+      graph << QStringLiteral("[shadowbase][mask]alphamerge,"
+                              "colorchannelmixer=aa=%1,format=rgba[shadow]")
+                   .arg(shadow.alpha, 0, 'f', 4);
+      graph << QStringLiteral("[canvas][shadow]overlay=x=0:y=0[withshadow]");
+      canvasLabel = QStringLiteral("[withshadow]");
+      cardLabel = QStringLiteral("[cardvideo]");
+    }
+    graph << QStringLiteral("%1%2overlay=x=(W-w)/2:y=(H-h)/2:"
+                            "shortest=1:format=auto,format=yuv420p[video]")
+                 .arg(canvasLabel, cardLabel);
   } else {
     graph << video + QStringLiteral(",format=yuv420p[video]");
   }

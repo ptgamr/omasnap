@@ -1372,6 +1372,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   radius_ = new QSlider(Qt::Horizontal, canvasPanel_);
   radius_->setRange(0, 64);
   radius_->setObjectName(QStringLiteral("canvasCorners"));
+  shadow_ = new QSlider(Qt::Horizontal, canvasPanel_);
+  shadow_->setRange(0, 100);
+  shadow_->setObjectName(QStringLiteral("canvasShadow"));
   const auto styleSlider = [canvasLayout, this](const QString &text,
                                                 QSlider *slider,
                                                 const QString &unit) {
@@ -1389,13 +1392,14 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   };
   styleSlider(QStringLiteral("Padding"), padding_, QStringLiteral("%"));
   styleSlider(QStringLiteral("Corner radius"), radius_, QStringLiteral(" px"));
+  styleSlider(QStringLiteral("Shadow"), shadow_, QStringLiteral("%"));
   // activated, not currentIndexChanged: re-picking the shown preset must
   // still reach styleChanged (it clears an active wallpaper), while
   // refreshControls restoring the index must not look like a user edit.
   connect(background_, &QComboBox::activated, this,
           &StudioWindow::styleChanged);
   connect(aspect_, &QComboBox::activated, this, &StudioWindow::styleChanged);
-  for (QSlider *slider : {padding_, radius_}) {
+  for (QSlider *slider : {padding_, radius_, shadow_}) {
     connect(slider, &QSlider::valueChanged, this, &StudioWindow::styleChanged);
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
     connect(slider, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
@@ -1553,7 +1557,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(aspect_, wallpaperButton_);
   QWidget::setTabOrder(wallpaperButton_, padding_);
   QWidget::setTabOrder(padding_, radius_);
-  QWidget::setTabOrder(radius_, previewZoomButton_);
+  QWidget::setTabOrder(radius_, shadow_);
+  QWidget::setTabOrder(shadow_, previewZoomButton_);
   QWidget::setTabOrder(previewZoomButton_, zoomSlider_);
   QWidget::setTabOrder(zoomSlider_, easeIn_);
   QWidget::setTabOrder(easeIn_, easeOut_);
@@ -2002,7 +2007,7 @@ void StudioWindow::styleChanged() {
     return;
   StudioStyle style{background_->currentIndex(), padding_->value(),
                     radius_->value(), aspect_->currentIndex(),
-                    style_.wallpaperPath};
+                    style_.wallpaperPath, shadow_->value()};
   // Picking a preset drops the wallpaper; slider moves keep it.
   if (sender() == background_)
     style.wallpaperPath.clear();
@@ -2029,7 +2034,8 @@ void StudioWindow::chooseWallpaper() {
   connect(dialog, &QFileDialog::fileSelected, this, [this](const QString &path) {
     captureCursor();
     commitStyle({background_->currentIndex(), padding_->value(),
-                 radius_->value(), aspect_->currentIndex(), path});
+                 radius_->value(), aspect_->currentIndex(), path,
+                 shadow_->value()});
   });
   dialog->show();
 }
@@ -2372,6 +2378,7 @@ void StudioWindow::refreshControls() {
   wallpaperLabel_->setToolTip(style_.wallpaperPath);
   padding_->setEnabled(editable);
   radius_->setEnabled(editable);
+  shadow_->setEnabled(editable);
   {
     const QSignalBlocker quietBackground(background_);
     background_->setCurrentIndex(style_.background);
@@ -2383,6 +2390,7 @@ void StudioWindow::refreshControls() {
     restoring_ = true;
     padding_->setValue(style_.padding);
     radius_->setValue(style_.radius);
+    shadow_->setValue(style_.shadow);
     restoring_ = previous;
   }
   zoomSlider_->setEnabled(editable && cue != nullptr);

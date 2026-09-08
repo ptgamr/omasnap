@@ -330,6 +330,7 @@ private:
   class QLabel *wallpaperLabel_ = nullptr;
   class QSlider *padding_ = nullptr;
   class QSlider *radius_ = nullptr;
+  class QSlider *shadow_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;
   qint64 pendingSeek_ = -1;
   /** True when a gesture started while playing: release resumes transport. */
