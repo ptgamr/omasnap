@@ -255,6 +255,7 @@ struct StudioCutResult {
 struct StudioEditState {
   StudioProject project;
   quint64 selectedClip = 0;
+  quint64 selectedAudioClip = 0;
   quint64 selectedTransition = 0;
   quint64 selectedCue = 0;
   qint64 rangeIn = -1;
@@ -274,9 +275,9 @@ public:
   [[nodiscard]] bool canRedo() const;
   bool undo();
   bool redo();
-  void setCursor(quint64 selectedClip, quint64 selectedTransition,
-                   quint64 selectedCue, qint64 rangeIn, qint64 rangeOut,
-                   qint64 positionMs);
+  void setCursor(quint64 selectedClip, quint64 selectedAudioClip,
+                   quint64 selectedTransition, quint64 selectedCue,
+                   qint64 rangeIn, qint64 rangeOut, qint64 positionMs);
 
 private:
   QVector<StudioEditState> states_{StudioEditState{}};

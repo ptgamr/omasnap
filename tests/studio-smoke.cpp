@@ -2,6 +2,7 @@
  *  command it builds, where it writes, and the trim timeline's arithmetic
  *  and drag behaviour. */
 #include "studio-composition-smoke.hpp"
+#include "studio-audio-ui-smoke.hpp"
 #include "studio-background-ui-smoke.hpp"
 #include "studio-cuts-ui-smoke.hpp"
 #include "studio-music-ui-smoke.hpp"
@@ -1306,6 +1307,8 @@ bool runStudioInteractionChecks(QString &error) {
   if (!runStudioScenesUiChecks(source, error))
     return false;
   if (!runStudioTransitionsUiChecks(source, error))
+    return false;
+  if (!runStudioAudioUiChecks(source, error))
     return false;
   StudioWindow window(source, nullptr, palettePath);
   window.show();

@@ -339,9 +339,10 @@ private:
   bool panDragged_ = false;
   bool openingMenu_ = false;
 };
-/// The trim bar's row, then the cue lane under it.
+/// The trim bar's row, then the cue lane under it, then the audio lane.
 constexpr qreal kLaneGap = 10.0;
 constexpr qreal kCueLaneHeight = 30.0;
+constexpr qreal kAudioLaneHeight = 30.0;
 constexpr qreal kCueEdgeGrab = 6.0;
 constexpr qreal kTrackHeight = 44.0;
 /// Pointer slack around a handle, in pixels. A 8 px bar is a small target.
@@ -564,6 +565,7 @@ void StudioTimeline::setCuesEditable(bool editable) {
 void StudioTimeline::setSelectedCue(quint64 id) {
   if (id) {
     selectedClip_ = 0;
+    selectedAudioClip_ = 0;
     selectedTransition_ = 0;
     rangeIn_ = rangeOut_ = -1;
   }
@@ -579,7 +581,7 @@ void StudioTimeline::setRange(qint64 start, qint64 end) {
   else {
     rangeIn_ = qBound<qint64>(0, qMin(start, end), duration_);
     rangeOut_ = qBound<qint64>(0, qMax(start, end), duration_);
-    selected_ = selectedClip_ = selectedTransition_ = 0;
+    selected_ = selectedClip_ = selectedAudioClip_ = selectedTransition_ = 0;
   }
   update();
   emit selectionChanged();
@@ -589,6 +591,19 @@ void StudioTimeline::setSelectedClip(quint64 id) {
   selectedClip_ = id;
   if (id) {
     selected_ = 0;
+    selectedAudioClip_ = 0;
+    selectedTransition_ = 0;
+    rangeIn_ = rangeOut_ = -1;
+  }
+  update();
+  emit selectionChanged();
+}
+
+void StudioTimeline::setSelectedAudioClip(quint64 id) {
+  selectedAudioClip_ = id;
+  if (id) {
+    selected_ = 0;
+    selectedClip_ = 0;
     selectedTransition_ = 0;
     rangeIn_ = rangeOut_ = -1;
   }
@@ -601,6 +616,7 @@ void StudioTimeline::setSelectedTransition(quint64 outgoingClipId) {
   if (outgoingClipId) {
     selected_ = 0;
     selectedClip_ = 0;
+    selectedAudioClip_ = 0;
     rangeIn_ = rangeOut_ = -1;
   }
   update();
@@ -623,7 +639,7 @@ void StudioTimeline::clearSelection() {
   draggedScenePreview_ = {};
   showInsertion(0, false);
   unsetCursor();
-  selected_ = selectedClip_ = selectedTransition_ = 0;
+  selected_ = selectedClip_ = selectedAudioClip_ = selectedTransition_ = 0;
   rangeIn_ = rangeOut_ = -1;
   update();
   emit selectionChanged();
@@ -670,6 +686,23 @@ QRectF StudioTimeline::cueLaneRect() const {
   const QRectF track = trackRect();
   return {track.left(), track.bottom() + kLaneGap, track.width(),
           kCueLaneHeight};
+}
+
+QRectF StudioTimeline::audioLaneRect() const {
+  const QRectF lane = cueLaneRect();
+  return {lane.left(), lane.bottom() + kLaneGap, lane.width(),
+          kAudioLaneHeight};
+}
+
+quint64 StudioTimeline::audioClipAt(const QPointF &position) const {
+  if (!project_ || duration_ <= 0)
+    return 0;
+  for (const auto &span : studioAudioComposition(*project_)) {
+    if (position.x() >= xForTime(span.startMs) &&
+        position.x() < xForTime(span.endMs))
+      return span.clipId;
+  }
+  return 0;
 }
 
 QRectF StudioTimeline::transitionRect(const StudioSpan &outgoing,
@@ -1008,6 +1041,11 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
     emit cueSelected(cue);
     return; // A cue lane click never moves the playhead.
   }
+  if (audioLaneRect().contains(event->position())) {
+    grabbed_ = Grab::None;
+    setSelectedAudioClip(project_ ? audioClipAt(event->position()) : 0);
+    return; // An audio lane click never moves the playhead.
+  }
   if (grabbed_ == Grab::Playhead && project_ && selectClip) {
     if (const auto frame = studioFrameAt(
             *project_, qMin(duration_ - 1, timeForX(event->position().x()))))
@@ -1328,11 +1366,79 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
     }
   }
 
-  // The playhead spans both rows, so a cue's position against it is legible.
+  // The audio lane, under the zoom lane: one block per sound, waveform
+  // inside, selected exactly like every other lane selection.
+  const QRectF audio = audioLaneRect();
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(chrome_.surface());
+  painter.drawRect(audio);
+  painter.setPen(chrome_.mutedText());
+  painter.setFont(chromeMonoFont(10));
+  painter.drawText(QRectF(0, audio.top(), audio.left() - 4.0, audio.height()),
+                   Qt::AlignRight | Qt::AlignVCenter, QStringLiteral("audio"));
+  if (project_) {
+    for (const auto &span : studioAudioComposition(*project_)) {
+      // Unclamped geometry: a sound may outrun the video. The block is
+      // intersected with the lane so extra length stops at its edge, and
+      // the waveform maps through the visible source slice — never the
+      // whole source squeezed into the visible width.
+      const auto xUnclamped = [&](qint64 ms) {
+        return track.left() + track.width() * ms / duration_;
+      };
+      const QRectF block(xUnclamped(span.startMs), audio.top(),
+                         xUnclamped(span.endMs) - xUnclamped(span.startMs),
+                         audio.height());
+      const QRectF visible = block.intersected(audio);
+      if (visible.isEmpty())
+        continue;
+      const bool chosen = span.clipId == selectedAudioClip_;
+      painter.save();
+      painter.setClipRect(audio);
+      painter.setPen(Qt::NoPen);
+      painter.setBrush(chosen ? chrome_.accent : chrome_.selected());
+      painter.drawRect(visible);
+      if (chosen) {
+        painter.setBrush(chrome_.onAccent());
+        painter.drawRect(QRectF(visible.left(), visible.top(), 2.5,
+                                visible.height()));
+        painter.drawRect(QRectF(visible.right() - 2.5, visible.top(), 2.5,
+                                visible.height()));
+      }
+      const auto *asset = studioAsset(*project_, span.assetId);
+      const auto *peaks = asset ? audioPeaksFor(span.assetId) : nullptr;
+      if (peaks && !peaks->isEmpty() && asset->source.durationMs > 0) {
+        // Integer column fills, not 1 px lines: antialiased lines at
+        // integer coordinates rasterize partially transparent.
+        const QColor wave = chosen ? chrome_.onAccent() : chrome_.foreground;
+        const qreal mid = audio.center().y();
+        const qreal amp = (audio.height() / 2.0) - 3.0;
+        for (int x = qRound(visible.left()); x < qRound(visible.right()); ++x) {
+          const double compositionMs =
+              (x - audio.left()) / audio.width() * duration_;
+          const double sourceMs =
+              span.inMs + (compositionMs - span.startMs) * span.speed;
+          if (sourceMs < span.inMs || sourceMs >= span.outMs)
+            continue;
+          qsizetype index = static_cast<qsizetype>(
+              sourceMs / asset->source.durationMs * peaks->size());
+          index = qBound<qsizetype>(0, index, peaks->size() - 1);
+          const auto bucket = peaks->at(index);
+          const int top = qRound(mid + bucket.first / 32768.0 * amp);
+          const int bottom =
+              qRound(mid + bucket.second / 32768.0 * amp + 1);
+          if (bottom > top)
+            painter.fillRect(QRectF(x, top, 1, bottom - top), wave);
+        }
+      }
+      painter.restore();
+    }
+  }
+
+  // The playhead spans all rows, so a cue's position against it is legible.
   const qreal playX = xForTime(position_);
   painter.setPen(QPen(chrome_.foreground, 2));
   painter.drawLine(QPointF(playX, track.top() - 9.0),
-                   QPointF(playX, lane.bottom() + 4.0));
+                   QPointF(playX, audio.bottom() + 4.0));
   painter.setPen(Qt::NoPen);
   painter.setBrush(chrome_.foreground);
   painter.drawRect(QRectF(playX - 3, track.top() - 12, 6, 6));
@@ -2316,6 +2422,7 @@ void StudioWindow::captureCursor() {
   if (pendingSeek_ >= 0)
     seekTo(pendingSeek_);
   history_.setCursor(timeline_->selectedClip(),
+                     timeline_->selectedAudioClip(),
                      timeline_->selectedTransition(),
                      timeline_->selectedCue(), timeline_->rangeIn(),
                      timeline_->rangeOut(), player_->position());
@@ -2770,6 +2877,7 @@ StudioEditState StudioWindow::editState() const {
   state.project = project_;
   state.selectedCue = timeline_->selectedCue();
   state.selectedClip = timeline_->selectedClip();
+  state.selectedAudioClip = timeline_->selectedAudioClip();
   state.selectedTransition = timeline_->selectedTransition();
   state.rangeIn = timeline_->rangeIn();
   state.rangeOut = timeline_->rangeOut();
@@ -2816,6 +2924,7 @@ void StudioWindow::restoreEdit() {
   applyProject(false, state.positionMs);
   timeline_->setSelectedCue(state.selectedCue);
   timeline_->setSelectedClip(state.selectedClip);
+  timeline_->setSelectedAudioClip(state.selectedAudioClip);
   if (state.rangeIn >= 0)
     timeline_->setRange(state.rangeIn, state.rangeOut);
   timeline_->setSelectedTransition(state.selectedTransition);

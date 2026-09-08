@@ -757,7 +757,7 @@ bool runStudioProjectChecks(QString &error) {
   StudioEditState initial;
   initial.project = p;
   history.reset(initial);
-  history.setCursor(11, 0, 0, 1200, 1700, 1350);
+  history.setCursor(11, 0, 0, 0, 1200, 1700, 1350);
   const auto beforeEdit = history.current();
   auto afterEdit = beforeEdit;
   afterEdit.project = split;

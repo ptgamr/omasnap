@@ -81,6 +81,9 @@ public:
   }
   void setRange(qint64 start, qint64 end);
   void setSelectedClip(quint64 id);
+  /** Selects an audio-lane clip, clearing every other selection. */
+  void setSelectedAudioClip(quint64 id);
+  [[nodiscard]] quint64 selectedAudioClip() const { return selectedAudioClip_; }
   /** A scene boundary by outgoing clip id; distinct from clip selection. */
   void setSelectedTransition(quint64 outgoingClipId);
   void clearSelection();
@@ -151,6 +154,10 @@ private:
   [[nodiscard]] QRectF trackRect() const;
   /** The zoom cues' row, under it. */
   [[nodiscard]] QRectF cueLaneRect() const;
+  /** The audio clips' row, under the zoom lane. */
+  [[nodiscard]] QRectF audioLaneRect() const;
+  /** The audio clip under `position`, or 0. Caller checks the lane. */
+  [[nodiscard]] quint64 audioClipAt(const QPointF &position) const;
   [[nodiscard]] QRectF cueRect(const ZoomCue &cue) const;
   [[nodiscard]] qreal xForTime(qint64 milliseconds) const;
   [[nodiscard]] qint64 timeForX(qreal x) const;
@@ -169,6 +176,7 @@ private:
   qint64 rangeOut_ = -1;
   qint64 rangeAnchor_ = 0;
   quint64 selectedClip_ = 0;
+  quint64 selectedAudioClip_ = 0;
   quint64 selectedTransition_ = 0;
   QPointF scenePress_;
   QPointF sceneDragOffset_;

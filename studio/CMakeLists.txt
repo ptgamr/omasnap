@@ -56,6 +56,7 @@ if(BUILD_TESTING)
     studio-smoke.cpp
     studio-background-ui-smoke.cpp studio-background-ui-smoke.hpp
     studio-music-ui-smoke.cpp studio-music-ui-smoke.hpp
+    studio-audio-ui-smoke.cpp studio-audio-ui-smoke.hpp
     studio-project-smoke.cpp studio-project-smoke.hpp
     studio-composition-smoke.cpp studio-composition-smoke.hpp
     studio-playback-smoke.cpp studio-playback-smoke.hpp
