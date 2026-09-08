@@ -1373,6 +1373,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
     connect(slider, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
   }
+  // The tweak cards sit at the column bottom, paired with the timeline row;
+  // only the card for the current selection is visible.
+  inspectorLayout->addStretch();
 
   zoomCard_ = new QWidget(inspector_);
   auto *zoomControls = new QVBoxLayout(zoomCard_);
@@ -1442,7 +1445,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   emptyControls->addWidget(emptyHint);
   emptyControls->addStretch();
   inspectorLayout->addWidget(emptyCard_);
-  inspectorLayout->addStretch();
 
   auto *timelinePanel = new QWidget(this);
   timelinePanel->setObjectName(QStringLiteral("timelinePanel"));
