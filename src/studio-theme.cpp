@@ -207,7 +207,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: @background; }
 QToolTip, QMenu { background: @background; color: @text; border: 1px solid @border; border-radius: @radiuspx; padding: 6px; }
 QMenu::item:selected { background: @selected; }
-QSplitter::handle { background: @border; width: 1px; }
+QSplitter::handle { background: @divider; width: 1px; }
 )");
   const QHash<QString, QString> values{
       {QStringLiteral("background"), background.name()},
