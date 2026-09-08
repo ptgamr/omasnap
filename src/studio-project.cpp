@@ -339,8 +339,10 @@ QString validateStudioProject(const StudioProject &p) {
       p.fpsDenominator > 1000000 ||
       static_cast<double>(p.fpsNumerator) / p.fpsDenominator > 240)
     return QStringLiteral("Invalid project canvas or frame rate.");
-  if (p.style.background < 0 || p.style.background > 3 || p.style.padding < 0 ||
-      p.style.padding > 40 || p.style.radius < 0 || p.style.radius > 100)
+  if (p.style.background < 0 ||
+      p.style.background >= StudioStyle::backgroundCount ||
+      p.style.padding < 0 || p.style.padding > 40 || p.style.radius < 0 ||
+      p.style.radius > 100)
     return QStringLiteral("Invalid project canvas styling.");
   QSet<quint64> assets;
   for (const auto &a : p.assets) {

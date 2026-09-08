@@ -5,6 +5,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QTemporaryDir>
 #include <limits>
 
@@ -787,6 +788,36 @@ bool runStudioProjectChecks(QString &error) {
                  decoded == p,
              QStringLiteral("Project serialization not lossless")))
     return false;
+  QSet<QString> backgroundColors;
+  for (int background = 0; background < StudioStyle::backgroundCount;
+       ++background) {
+    if (!check(!StudioStyle::backgroundName(background).isEmpty() &&
+                   StudioStyle{background, 10, 20}.color().isValid(),
+               QStringLiteral("Background preset %1 has no name or color")
+                   .arg(background)))
+      return false;
+    backgroundColors.insert(
+        StudioStyle{background, 10, 20}.color().name());
+    auto styled = p;
+    styled.style.background = background;
+    if (!check(validateStudioProject(styled).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(styled), decoded)
+                       .isEmpty() &&
+                   decoded.style.background == background,
+               QStringLiteral("Background preset %1 does not persist")
+                   .arg(background)))
+      return false;
+  }
+  if (!check(backgroundColors.size() == StudioStyle::backgroundCount,
+             QStringLiteral("Background presets are not distinct")))
+    return false;
+  {
+    auto invalidStyle = p;
+    invalidStyle.style.background = StudioStyle::backgroundCount;
+    if (!check(!validateStudioProject(invalidStyle).isEmpty(),
+               QStringLiteral("Out-of-range background accepted")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&
