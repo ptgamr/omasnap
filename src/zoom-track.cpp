@@ -293,7 +293,30 @@ quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
   // A new cue starts at the playhead and runs for as long as it can without
   // touching the next one, so dropping cues in quick succession never
   // silently produces an overlap the model would have to resolve.
-  const qint64 start = qMax<qint64>(0, atMs);
+  qint64 start = qMax<qint64>(0, atMs);
+  // Creation magnetism: just past a neighbour's end means chained onto it,
+  // so the camera glides directly instead of breathing through the gap.
+  // Inside a cue stays a refusal; the click re-aims through the caller.
+  bool inside = false;
+  for (const ZoomCue &cue : existing) {
+    if (cue.startMs <= start && start < cue.endMs) {
+      inside = true;
+      break;
+    }
+  }
+  if (!inside) {
+    // Sorted and disjoint, so the last qualifying end is the nearest one.
+    // Compared against the unchanged request: docking must never walk
+    // backward onto an older cue and overlap what lies between.
+    qint64 docked = start;
+    for (const ZoomCue &cue : existing) {
+      if (cue.startMs > start)
+        break;
+      if (cue.endMs <= start && start - cue.endMs <= kCueSnapMs)
+        docked = cue.endMs;
+    }
+    start = docked;
+  }
   // Never past the end of the clip: a cue there renders nothing, exports
   // nothing, and sits as an unreachable sliver at the edge of the lane.
   const qint64 limit = limitMs > 0 ? limitMs : start + durationMs;
@@ -324,6 +347,27 @@ quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
   cue.scale = qBound(kMinZoomScale, scale, kMaxZoomScale);
   track.cues.push_back(cue);
   return cue.id;
+}
+
+qint64 snapCueEdgeMs(const QVector<ZoomCue> &cues, quint64 grabbedId,
+                     qint64 timeMs, qint64 playheadMs, qint64 windowMs) {
+  qint64 best = timeMs;
+  qint64 bestGap = qMax<qint64>(0, windowMs);
+  const auto consider = [&](qint64 candidate) {
+    const qint64 gap = qAbs(candidate - timeMs);
+    if (gap <= bestGap) {
+      bestGap = gap;
+      best = candidate;
+    }
+  };
+  for (const ZoomCue &cue : cues) {
+    if (cue.id == grabbedId)
+      continue;
+    consider(cue.startMs);
+    consider(cue.endMs);
+  }
+  consider(playheadMs);
+  return best;
 }
 
 bool removeZoomCue(ZoomTrack &track, quint64 id) {

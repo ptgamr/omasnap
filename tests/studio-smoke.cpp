@@ -1316,6 +1316,19 @@ bool runStudioInteractionChecks(QString &error) {
           error, QStringLiteral("Studio did not finish asynchronous loading")))
     return false;
   QTest::qWait(150);
+  // Chained creation: a cue dropped just past the previous end docks onto
+  // it and says so; undone back to pristine for the checks below.
+  player->setPosition(1000);
+  QTest::keyClick(&window, Qt::Key_Z);
+  player->setPosition(3700);
+  QTest::keyClick(&window, Qt::Key_Z);
+  auto *status = window.findChild<QLabel *>(QStringLiteral("studioStatus"));
+  if (!check(status && status->text().contains(QStringLiteral("chained")),
+             error, QStringLiteral("chained zoom was not announced")))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  player->setPosition(0);
   QTest::keyClick(&window, Qt::Key_Z);
   if (!check(slider->isEnabled(), error,
              QStringLiteral("Z did not create a zoom")))

@@ -728,6 +728,14 @@ qint64 StudioTimeline::timeForX(qreal x) const {
       std::llround(fraction * static_cast<qreal>(duration_)));
 }
 
+qint64 StudioTimeline::cueSnapWindowMs() const {
+  const qreal width = trackRect().width();
+  if (width <= 0 || duration_ <= 0)
+    return 0;
+  return static_cast<qint64>(
+      std::llround(kGrabSlack * static_cast<qreal>(duration_) / width));
+}
+
 StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {
   if (duration_ <= 0)
     return Grab::None;
@@ -1056,8 +1064,14 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
         start = qBound<qint64>(0, time - grabOffsetMs_, latest);
         end = start + length;
       } else if (grabbed_ == Grab::CueStart) {
+        // Snapped before bounding: the minimum length wins over a dock that
+        // would collapse the cue.
+        time = snapCueEdgeMs(track_->cues, grabbedCue_, time, position_,
+                             cueSnapWindowMs());
         start = qBound<qint64>(0, time, qMax<qint64>(0, end - kMinCueMs));
       } else {
+        time = snapCueEdgeMs(track_->cues, grabbedCue_, time, position_,
+                             cueSnapWindowMs());
         end = qBound<qint64>(start + kMinCueMs, time,
                              qMax<qint64>(start + kMinCueMs, duration_));
       }
@@ -1388,6 +1402,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   timeLabel_ = new QLabel(this);
   timeLabel_->setFont(chromeMonoFont(13));
   statusLabel_ = new QLabel(this);
+  statusLabel_->setObjectName(QStringLiteral("studioStatus"));
   statusLabel_->setFont(chromeMonoFont(12));
 
   auto *header = new QWidget(this);
@@ -2120,6 +2135,21 @@ void StudioWindow::zoomChanged() {
   refreshControls();
 }
 
+void StudioWindow::announceChainedZoom(quint64 id) {
+  qint64 start = -1;
+  for (const ZoomCue &cue : zoom_.cues)
+    if (cue.id == id)
+      start = cue.startMs;
+  if (start <= 0)
+    return;
+  for (const ZoomCue &cue : zoom_.cues)
+    if (cue.id != id && cue.endMs == start) {
+      setStatus(QStringLiteral(
+          "Zoom chained — the camera glides from the previous cue"));
+      return;
+    }
+}
+
 void StudioWindow::aimZoom(const QPointF &target) {
   captureCursor();
   // Clicking aims the cue you are inside; outside one it makes a new cue
@@ -2146,6 +2176,7 @@ void StudioWindow::aimZoom(const QPointF &target) {
   }
   timeline_->setSelectedCue(id);
   zoomChanged();
+  announceChainedZoom(id);
 }
 
 void StudioWindow::addZoomAtPlayhead() {
@@ -2163,6 +2194,7 @@ void StudioWindow::addZoomAtPlayhead() {
   }
   timeline_->setSelectedCue(id);
   zoomChanged();
+  announceChainedZoom(id);
 }
 
 void StudioWindow::removeSelectedZoom() {

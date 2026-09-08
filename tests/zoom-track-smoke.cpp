@@ -145,6 +145,67 @@ bool runZoomTrackSmoke(QString &error) {
              error, QStringLiteral("removing a cue is wrong")))
     return false;
 
+  // Creation magnetism: dropped just past a neighbour's end, a cue chains
+  // onto it; further out it stands alone; inside stays a refusal.
+  ZoomTrack chained;
+  const quint64 chainFirst =
+      addZoomCue(chained, 1000, {0.2, 0.2}, 2.0, 2500, 20000);
+  if (!check(chainFirst != 0, error,
+              QStringLiteral("the chain anchor was not placed")))
+    return false;
+  const quint64 chainSecond =
+      addZoomCue(chained, 3700, {0.8, 0.8}, 2.0, 2500, 20000);
+  bool docked = false;
+  for (const ZoomCue &cue : chained.cues)
+    if (cue.id == chainSecond && cue.startMs == 3500)
+      docked = true;
+  if (!check(chainSecond != 0 && chained.cues.size() == 2 && docked, error,
+              QStringLiteral("a cue just past a neighbour did not chain")))
+    return false;
+  const quint64 apart =
+      addZoomCue(chained, 7000, {0.5, 0.5}, 2.0, 2500, 20000);
+  bool standing = false;
+  for (const ZoomCue &cue : chained.cues)
+    if (cue.id == apart && cue.startMs == 7000)
+      standing = true;
+  if (!check(apart != 0 && standing, error,
+              QStringLiteral("a distant cue was chained")))
+    return false;
+  if (!check(addZoomCue(chained, 3600, {0.5, 0.5}, 2.0, 2500, 20000) == 0,
+             error, QStringLiteral("a cue was placed inside another")))
+    return false;
+  // With two neighbours, the request docks onto the nearest end, never an
+  // older one it would then overlap.
+  ZoomTrack neighbours;
+  neighbours.cues = {{1, 0, 1000, 400, 400, {0.5, 0.5}, 2.0},
+                     {2, 1100, 1300, 400, 400, {0.5, 0.5}, 2.0}};
+  const quint64 nearest =
+      addZoomCue(neighbours, 1400, {0.5, 0.5}, 2.0, 2500, 20000);
+  bool nearestDocked = false;
+  for (const ZoomCue &cue : neighbours.cues)
+    if (cue.id == nearest && cue.startMs == 1300)
+      nearestDocked = true;
+  if (!check(nearest != 0 && neighbours.cues.size() == 3 && nearestDocked,
+             error, QStringLiteral("a cue docked onto the older neighbour")))
+    return false;
+
+  // Edge docking: nearest other edge or the playhead wins inside the
+  // window; the grabbed cue never docks to itself; outside stays put.
+  const QVector<ZoomCue> docking{{1, 1000, 2000, 400, 400, {0.5, 0.5}, 2.0},
+                                 {2, 3000, 4000, 400, 400, {0.5, 0.5}, 2.0}};
+  if (!check(snapCueEdgeMs(docking, 2, 2050, 0, 100) == 2000, error,
+              QStringLiteral("a near edge did not dock")))
+    return false;
+  if (!check(snapCueEdgeMs(docking, 2, 2500, 0, 100) == 2500, error,
+              QStringLiteral("a far edge moved without docking")))
+    return false;
+  if (!check(snapCueEdgeMs(docking, 2, 3010, 9000, 100) == 3010, error,
+              QStringLiteral("an own edge or distant playhead won")))
+    return false;
+  if (!check(snapCueEdgeMs(docking, 2, 4500, 4520, 100) == 4520, error,
+              QStringLiteral("a near playhead did not dock")))
+    return false;
+
   // A cue is never created past the end of the clip, where it would render
   // nothing and sit as an unreachable sliver at the edge of the lane.
   ZoomTrack shortClip;

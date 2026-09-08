@@ -59,6 +59,10 @@ inline constexpr qreal kMaxZoomScale = 8.0;
 /// Shortest cue worth having, and the shortest visible ramp.
 inline constexpr qint64 kMinCueMs = 200;
 inline constexpr qint64 kMinEaseMs = 60;
+/// Creation magnetism: a cue dropped this far past a neighbour's end starts
+/// exactly there, chaining the camera glide instead of breathing through
+/// the full frame in the gap. Undoable and announced, like any other edit.
+inline constexpr qint64 kCueSnapMs = 500;
 /// Most cues one clip may carry.
 ///
 /// Keep the generated camera expressions within ffmpeg's parser limits.
@@ -155,6 +159,16 @@ struct ZoomPanExpressions {
  */
 quint64 addZoomCue(ZoomTrack &track, qint64 atMs, const QPointF &target,
                    qreal scale, qint64 durationMs, qint64 limitMs);
+/**
+ * Snaps a dragged cue edge to the nearest other cue edge or the playhead
+ * within `windowMs`, so back-to-back cues chain the camera glide exactly.
+ * Ties prefer the playhead; anything outside the window stays put. The
+ * grabbed cue's own edges never snap, and the caller still bounds the
+ * result against the minimum cue length.
+ */
+[[nodiscard]] qint64 snapCueEdgeMs(const QVector<ZoomCue> &cues,
+                                   quint64 grabbedId, qint64 timeMs,
+                                   qint64 playheadMs, qint64 windowMs);
 /** Removes the cue with `id`; false when there is no such cue. */
 bool removeZoomCue(ZoomTrack &track, quint64 id);
 /** The cue covering `timeMs`, or nullptr. */

@@ -140,6 +140,9 @@ private:
   [[nodiscard]] QRectF cueRect(const ZoomCue &cue) const;
   [[nodiscard]] qreal xForTime(qint64 milliseconds) const;
   [[nodiscard]] qint64 timeForX(qreal x) const;
+  /** Snap window for cue edge drags: the grab slack in pixels as timeline
+   *  milliseconds, so docking feels the same at every magnification. */
+  [[nodiscard]] qint64 cueSnapWindowMs() const;
   [[nodiscard]] Grab grabAt(const QPointF &position) const;
   /** The cue under `position`, or 0. `edge` reports which end was hit. */
   [[nodiscard]] quint64 cueAt(const QPointF &position, Grab *edge) const;
@@ -263,6 +266,8 @@ private:
   /** Clicking the preview aims the cue under the playhead, or makes one. */
   void aimZoom(const QPointF &target);
   void addZoomAtPlayhead();
+  /** Status line when a fresh cue chained onto its neighbour's end. */
+  void announceChainedZoom(quint64 id);
   void removeSelectedZoom();
   void setSelectedZoomScale(qreal scale);
   /** The selected cue the inspector controls act on. */
