@@ -3,6 +3,7 @@
 #include "studio.hpp"
 #include <QAbstractItemView>
 #include <QAudioOutput>
+#include <QLabel>
 #include <QMenu>
 #include <QFile>
 #include <QPushButton>
@@ -49,6 +50,13 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 5700 && duration->value() == 300,
                "Crossfade did not consume a 300ms overlap"))
     return false;
+  auto *direction = window.findChild<QComboBox *>("transitionDirection");
+  auto *title = window.findChild<QLabel *>("transitionTitle");
+  if (!require(direction && title, "Transition direction or title missing"))
+    return false;
+  if (!require(title->text().contains(QStringLiteral("Crossfade")),
+               "Crossfade mapped to the wrong effect"))
+    return false;
   duration->setValue(600);
   if (!require(player->duration() == 5400,
                "Transition duration was not applied"))
@@ -62,23 +70,59 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 5400 && duration->value() == 600,
                "Fade through black changed overlap duration"))
     return false;
-  for (int index = 3; index <= 10; ++index) {
-    const int previous = type->currentIndex();
-    type->setCurrentIndex(index);
-    if (!require(type->currentIndex() == index && player->duration() == 5400 &&
-                     duration->value() == 600,
-                 "Directional transition changed timing or inspector identity"))
+  if (!require(title->text().contains(QStringLiteral("Fade through black")),
+               "Fade through black mapped to the wrong effect"))
+    return false;
+  const struct {
+    int type;
+    int direction;
+    const char *label;
+  } directional[] = {{3, 0, "Wipe Left"},   {3, 1, "Wipe Right"},
+                     {3, 2, "Wipe Up"},     {3, 3, "Wipe Down"},
+                     {4, 0, "Slide Left"},  {4, 1, "Slide Right"},
+                     {4, 2, "Slide Up"},    {4, 3, "Slide Down"}};
+  for (const auto &c : directional) {
+    const int previousType = type->currentIndex();
+    const int previousDirection = direction->currentIndex();
+    type->setCurrentIndex(c.type);
+    direction->setCurrentIndex(c.direction);
+    if (!require(player->duration() == 5400 && duration->value() == 600 &&
+                    title->text().contains(QLatin1String(c.label)),
+                 "Directional transition changed timing or title"))
       return false;
-    QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
-    if (!require(type->currentIndex() == previous && player->duration() == 5400,
+    // Type and direction commit separately: step back until both match.
+    for (int i = 0;
+         i < 2 && (type->currentIndex() != previousType ||
+                   direction->currentIndex() != previousDirection);
+         ++i)
+      QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+    if (!require(type->currentIndex() == previousType &&
+                    direction->currentIndex() == previousDirection &&
+                    player->duration() == 5400,
                  "Undo did not restore directional transition kind"))
       return false;
-    QTest::keyClick(&window, Qt::Key_Z,
-                    Qt::ControlModifier | Qt::ShiftModifier);
-    if (!require(type->currentIndex() == index,
+    for (int i = 0;
+         i < 2 && (type->currentIndex() != c.type ||
+                   direction->currentIndex() != c.direction);
+         ++i)
+      QTest::keyClick(&window, Qt::Key_Z,
+                      Qt::ControlModifier | Qt::ShiftModifier);
+    if (!require(type->currentIndex() == c.type &&
+                    direction->currentIndex() == c.direction &&
+                    title->text().contains(QLatin1String(c.label)),
                  "Redo did not restore directional transition kind"))
       return false;
   }
+  // Direction popup inherits the same Quattro chrome while enabled: the
+  // loop ends on Slide Down, so the control is live here.
+  direction->showPopup();
+  QTest::qWait(100);
+  const auto dirPopup = direction->view()->window()->grab().toImage();
+  const auto dirPopupBackground = dirPopup.pixelColor(dirPopup.width() / 2, 3);
+  direction->hidePopup();
+  if (!require(dirPopupBackground == StudioChrome{}.background,
+               "Direction popup leaked platform-theme chrome"))
+    return false;
   type->setCurrentIndex(2);
   type->showPopup();
   QTest::qWait(100);
@@ -125,17 +169,6 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
     return false;
   if (!require(timeline->selectedClip() == 1,
                "Combo keypress changed scene selection"))
-    return false;
-  auto *sceneIn = window.findChild<QSpinBox *>("sceneIn");
-  if (!require(sceneIn, "Scene trim field missing"))
-    return false;
-  sceneIn->setFocus();
-  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == sceneIn; }, 2000),
-               "scene trim field did not take focus"))
-    return false;
-  QTest::keyClick(sceneIn, Qt::Key_Backspace);
-  if (!require(player->duration() == 5400 && sceneIn->value() == 0,
-               "Scene trim keypress leaked into edits"))
     return false;
   // Typing a duration and pressing Enter applies it as one undo step.
   duration->setFocus();
@@ -254,13 +287,12 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                "T on the last scene abandoned its clip"))
     return false;
   timeline->setSelectedClip(1);
-  QPushButton *later = nullptr;
-  for (auto *button : window.findChildren<QPushButton *>())
-    if (button->text() == QStringLiteral("Later"))
-      later = button;
-  if (!require(later && later->isEnabled(), "Reorder command unavailable"))
-    return false;
-  later->click();
+  // Reorder by dragging: the order buttons are gone, Ctrl+drag arranges.
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
+                    point(1000, 60));
+  QTest::mouseMove(timeline, point(5000, 60), 40);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ControlModifier,
+                      point(5000, 60));
   if (!require(player->duration() == 6000,
                "Reorder attached transition to the wrong pair"))
     return false;

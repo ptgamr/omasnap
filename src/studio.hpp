@@ -44,6 +44,7 @@ public:
   void setSelectedCue(quint64 id);
   /** Whether cues can be moved or resized; off while an export runs. */
   void setCuesEditable(bool editable);
+  [[nodiscard]] bool cuesEditable() const { return cuesEditable_; }
   void cacheThumbnail(StudioThumbnail thumbnail);
   [[nodiscard]] QVector<StudioThumbnail> missingThumbnails() const;
   void setThumbnailViewport(const QRectF &viewport);
@@ -91,6 +92,7 @@ signals:
   void rangeSelectionStarted();
   void splitRequested();
   void deleteRequested();
+  void duplicateRequested();
   void sceneMoveRequested(quint64 id, quint64 before);
   void sceneTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
   void transitionRequested(quint64 outgoingClipId);
@@ -251,7 +253,7 @@ private:
   void moveScene(quint64 id, quint64 before);
   void duplicateScene();
   void trimScene(quint64 id, qint64 inMs, qint64 outMs);
-  void refreshSceneControls(bool force = false);
+  void refreshSceneControls();
   void setupTransitions(class QVBoxLayout *controls);
   void refreshTransitionControls(bool force = false);
   void changeTransition();
@@ -261,8 +263,9 @@ private:
   [[nodiscard]] QString
   transitionAdjustment(const QVector<StudioTransition> &before) const;
   class StudioComboBox *transitionType_ = nullptr;
+  class StudioComboBox *transitionDirection_ = nullptr;
   class QSpinBox *transitionDuration_ = nullptr;
-  class QLabel *transitionLabel_ = nullptr;
+  class QLabel *transitionTitle_ = nullptr;
   class QLabel *overlapHint_ = nullptr;
   [[nodiscard]] bool scenesEditable() const;
   bool importing_ = false;
@@ -270,12 +273,7 @@ private:
   StudioProject gestureProject_;
   QFutureWatcher<StudioProjectLoad> importWatcher_;
   class QPushButton *importButton_ = nullptr;
-  class QPushButton *duplicateButton_ = nullptr;
-  class QPushButton *earlierButton_ = nullptr;
-  class QPushButton *laterButton_ = nullptr;
   class QLabel *sceneLabel_ = nullptr;
-  class QSpinBox *sceneIn_ = nullptr;
-  class QSpinBox *sceneOut_ = nullptr;
   quint64 nextClipId_ = 1;
   class QPushButton *splitButton_ = nullptr;
   class QPushButton *deleteButton_ = nullptr;
@@ -303,20 +301,21 @@ private:
   class QPushButton *playButton_ = nullptr;
   class QPushButton *exportButton_ = nullptr;
   class QPushButton *keepButton_ = nullptr;
-  class QPushButton *addZoomButton_ = nullptr;
-  class QPushButton *removeZoomButton_ = nullptr;
   class QSlider *zoomSlider_ = nullptr;
   class QLabel *zoomLabel_ = nullptr;
   class QTimer *saveTimer_ = nullptr;
   class QPushButton *undoButton_ = nullptr;
   class QPushButton *redoButton_ = nullptr;
-  class QLabel *sourceLabel_ = nullptr;
   class QLabel *fileLabel_ = nullptr;
   class QLabel *shortcutLegend_ = nullptr;
   class QLabel *cueLabel_ = nullptr;
   class QSpinBox *easeIn_ = nullptr;
   class QSpinBox *easeOut_ = nullptr;
   class QWidget *inspector_ = nullptr;
+  class QWidget *zoomCard_ = nullptr;
+  class QWidget *transitionCard_ = nullptr;
+  class QWidget *clipCard_ = nullptr;
+  class QWidget *emptyCard_ = nullptr;
   bool inspectorWanted_ = true;
   StudioComboBox *background_ = nullptr;
   class QSlider *padding_ = nullptr;

@@ -139,7 +139,8 @@ conventions. Establish that foundation before adding editing features.
 - GPU video preview with bounded worker frame preparation and coalesced scrubbing.
 - Non-destructive multi-source composition, range cuts/splits, scene arrangement,
   crossfade/fade-through-black transitions, manual zoom cues, and MP4 export.
-- Thumbnail timeline, transport, and Canvas/Zoom/Clip inspector tabs.
+- Thumbnail timeline, transport, and a contextual tweak panel (canvas styling
+  plus the selected zoom, transition, or scene).
 - Four canvas colors, padding, and rounded corners.
 - Session undo/redo for existing edits and asynchronous sidecar saving.
 - Space transport, frame stepping, five-second seeking, trim/zoom commands,

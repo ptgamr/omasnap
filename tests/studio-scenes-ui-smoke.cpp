@@ -9,10 +9,9 @@
 #include <QDropEvent>
 #include <QFile>
 #include <QFileDialog>
+#include <QMenu>
 #include <QMimeData>
 #include <QPushButton>
-#include <QSpinBox>
-#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
@@ -55,10 +54,7 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   auto *timeline = window.findChild<StudioTimeline *>();
   auto *player = window.findChild<StudioPlayback *>();
   auto *add = window.findChild<QPushButton *>("addScenes");
-  auto *duplicate = window.findChild<QPushButton *>("duplicateScene");
-  auto *in = window.findChild<QSpinBox *>("sceneIn");
-  auto *out = window.findChild<QSpinBox *>("sceneOut");
-  if (!require(timeline && player && add && duplicate && in && out,
+  if (!require(timeline && player && add,
                "scene controls are missing") ||
       !require(
           QTest::qWaitFor(
@@ -74,15 +70,10 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     return false;
   dialog->reject();
   QTest::qWait(30);
-  auto *tabs = window.findChild<QTabWidget *>();
-  for (int i = 0; tabs && i < tabs->count(); ++i)
-    if (tabs->tabText(i) == QStringLiteral("Clip"))
-      tabs->setCurrentIndex(i);
-  QTest::qWait(30);
-  auto *page = window.findChild<QWidget *>("studioScenePage");
+  auto *panel = window.findChild<QWidget *>("studioInspector");
   auto *theme = window.findChild<StudioTheme *>();
-  if (!require(page && theme &&
-                   page->grab().toImage().pixelColor(2, 2) ==
+  if (!require(panel && theme &&
+                   panel->grab().toImage().pixelColor(2, 2) ==
                        theme->chrome().background,
                "scene inspector fell back to desktop palette background"))
     return false;
@@ -107,44 +98,25 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 30000 && timeline->selectedClip() == 5,
                "Ctrl+D did not duplicate and select the scene"))
     return false;
-  in->setValue(500);
-  out->setValue(5500);
-  if (!require(player->duration() == 29000 && in->value() == 500 &&
-                   out->value() == 5500,
-               "scene in/out controls did not trim only the duplicate"))
-    return false;
-  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
-  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
-  if (!require(player->duration() == 30000,
-               "scene edge edits were not undoable"))
-    return false;
-  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
-  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
-  for (const auto *label : {"Earlier", "Later"}) {
-    QPushButton *order = nullptr;
-    for (auto *button : window.findChildren<QPushButton *>())
-      if (button->text() == QLatin1String(label))
-        order = button;
-    if (!require(order && order->isEnabled(),
-                 "scene ordering button was unavailable"))
-      return false;
-    order->click();
-  }
   const auto point = [&](qint64 ms) {
-    return QPoint(64 + qRound((timeline->width() - 80) * ms / 29000.0), 60);
+    return QPoint(64 + qRound((timeline->width() - 80) * ms / 30000.0), 60);
   };
   QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, point(12000));
   QTest::mouseMove(timeline, point(12500), 40);
   QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, point(12500));
-  if (!require(player->duration() < 28700 && player->duration() > 28300 &&
-                   in->value() > 800 && out->value() == 5500,
+  if (!require(player->duration() < 29700 && player->duration() > 29300 &&
+                  timeline->selectedClip() == 5,
                "selected scene edge drag did not trim its source range"))
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
-  if (!require(player->duration() == 29000 && in->value() == 500 &&
-                   out->value() == 5500,
+  if (!require(player->duration() == 30000,
                "one undo did not restore the scene edge drag"))
     return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(player->duration() < 29700 && player->duration() > 29300,
+               "redo did not restore the scene edge drag"))
+    return false;
+  const qint64 trimmed = player->duration();
   // Move the duplicate from between second/third scenes to the final boundary.
   QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
                     point(14500));
@@ -158,41 +130,68 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     return false;
   QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ControlModifier,
                       point(28500));
-  if (!require(player->duration() == 29000 && timeline->selectedClip() == 5,
+  if (!require(player->duration() == trimmed && timeline->selectedClip() == 5,
                "scene drag changed duration or selection"))
     return false;
   const QPoint boundary = timeline->mapTo(&window, point(6000));
   if (!require(timeline->insertionBefore(point(6000).x()) == 2 &&
                    dropFiles(window, {paths[3]}, boundary),
                "drop on a scene boundary was rejected") ||
-      !require(
-          QTest::qWaitFor(
-              [&] { return player->duration() == 35000 && add->isEnabled(); },
-              7000),
-          "boundary drop did not insert the scene"))
+       !require(
+           QTest::qWaitFor(
+               [&] { return player->duration() == trimmed + 6000 && add->isEnabled(); },
+               7000),
+           "boundary drop did not insert the scene"))
     return false;
   const int insertedBoundary =
-      64 + qRound((timeline->width() - 80) * 6000 / 35000.0);
+      64 + qRound((timeline->width() - 80) * 6000 / double(trimmed + 6000));
   if (!require(
           timeline->insertionBefore(insertedBoundary) == 6,
           "boundary drop appended instead of inserting before second scene"))
     return false;
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
-  if (!require(player->duration() == 29000,
+  if (!require(player->duration() == trimmed,
                "boundary insertion was not undoable"))
+    return false;
+  // The clip menu duplicates the selected scene like Ctrl+D.
+  timeline->setSelectedClip(5);
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, point(20000));
+  auto *clipMenu = timeline->findChild<QMenu *>();
+  QAction *duplicateAction = nullptr;
+  if (clipMenu)
+    for (auto *action : clipMenu->actions())
+      if (action->text().startsWith(QStringLiteral("Duplicate scene")))
+        duplicateAction = action;
+  if (!require(clipMenu && clipMenu->isVisible() && duplicateAction &&
+                  duplicateAction->isEnabled(),
+               "Context menu did not offer scene duplication"))
+    return false;
+  duplicateAction->trigger();
+  if (!require(player->duration() > trimmed + 5000 &&
+                  player->duration() < trimmed + 6000 &&
+                  timeline->selectedClip() != 0 &&
+                  timeline->selectedClip() != 5,
+               "Menu duplication did not copy and select the scene"))
+    return false;
+  clipMenu->close();
+  if (!require(QTest::qWaitFor(
+                    [&] { return timeline->findChild<QMenu *>() == nullptr; },
+                    2000),
+               "Closed menu lingered"))
+    return false;
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == trimmed,
+               "Menu duplication was not undoable"))
     return false;
   // A partly-valid batch is atomic: not even its first good file may land.
   if (!require(dropFiles(window, {paths[1], scratch.filePath("missing.mp4")},
                          {100, 100}),
                "invalid import batch was not accepted for asynchronous "
                "validation") ||
-      !require(QTest::qWaitFor([&] { return add->isEnabled(); }, 7000) &&
-                   player->duration() == 29000,
+       !require(QTest::qWaitFor([&] { return add->isEnabled(); }, 7000) &&
+                    player->duration() == trimmed,
                "invalid import partially changed the project"))
-    return false;
-  QTest::keyClick(in, Qt::Key_Space);
-  if (!require(player->playbackState() == QMediaPlayer::PlayingState,
-               "Space from scene timing control did not toggle playback"))
     return false;
   player->pause();
   window.close();
@@ -209,8 +208,9 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   if (!require(ids == QVector<quint64>{1, 2, 3, 4, 5} &&
                    saved.project.clips[1].inMs == 0 &&
                    saved.project.clips[1].outMs == 6000 &&
-                   saved.project.clips[4].inMs == 500 &&
-                   saved.project.clips[4].outMs == 5500,
+                   saved.project.clips[4].inMs >= 300 &&
+                   saved.project.clips[4].inMs <= 700 &&
+                   saved.project.clips[4].outMs == 6000,
                "drag order or independent source ranges did not persist"))
     return false;
   for (int i = 0; i < 4; ++i) {
@@ -225,7 +225,7 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   reopened.show();
   auto *again = reopened.findChild<StudioPlayback *>();
   if (!require(QTest::qWaitFor(
-                   [&] { return again && again->duration() == 29000; }, 7000),
+                   [&] { return again && again->duration() == trimmed; }, 7000),
                "combined scenes did not reopen"))
     return false;
   reopened.close();

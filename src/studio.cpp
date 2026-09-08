@@ -40,7 +40,6 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStandardPaths>
-#include <QTabWidget>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -568,12 +567,16 @@ void StudioTimeline::contextMenuEvent(QContextMenuEvent *event) {
   auto *menu = new QMenu(this);
   menu->setAttribute(Qt::WA_DeleteOnClose);
   auto *split = menu->addAction(QStringLiteral("Split at playhead  ·  S"));
+  auto *duplicate = menu->addAction(QStringLiteral("Duplicate scene  ·  Ctrl+D"));
   auto *remove = menu->addAction(QStringLiteral("Delete selection"));
   split->setEnabled(cuesEditable_ && duration_ > 0);
+  duplicate->setEnabled(cuesEditable_ && selectedClip_);
   remove->setEnabled(cuesEditable_ &&
                      (rangeOut_ > rangeIn_ || selectedClip_ || selected_ ||
                       selectedTransitionDeletable()));
   connect(split, &QAction::triggered, this, &StudioTimeline::splitRequested);
+  connect(duplicate, &QAction::triggered, this,
+          &StudioTimeline::duplicateRequested);
   connect(remove, &QAction::triggered, this, &StudioTimeline::deleteRequested);
   menu->popup(event->globalPos());
 }
@@ -1238,8 +1241,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       TimelineActionButton::Symbol::Play, QStringLiteral("Play / pause"),
       QStringLiteral("Play / pause · Space"), theme_, this);
   playButton_->setObjectName(QStringLiteral("play"));
-  addZoomButton_ = new QPushButton(QStringLiteral("Add zoom"), this);
-  removeZoomButton_ = new QPushButton(QStringLiteral("Remove zoom"), this);
   zoomSlider_ = new QSlider(Qt::Horizontal, this);
   // Tenths of a times, so the slider is integral without feeling steppy.
   zoomSlider_->setRange(static_cast<int>(kMinZoomScale * 10) + 1,
@@ -1286,6 +1287,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
              QStringLiteral("Show / hide inspector · Ctrl+\\"));
   headerLayout->addWidget(help);
   headerLayout->addWidget(inspectorToggle);
+  importButton_ = new QPushButton(QStringLiteral("Add scenes"), header);
+  importButton_->setObjectName(QStringLiteral("addScenes"));
+  importButton_->setToolTip(
+      QStringLiteral("Import video files · Ctrl+O · or drop files here"));
+  connect(importButton_, &QPushButton::clicked, this,
+          &StudioWindow::chooseScenes);
+  headerLayout->addWidget(importButton_);
   headerLayout->addWidget(exportButton_);
   relinkButton_ = button(QStringLiteral("Relink media"),
                          QStringLiteral("Locate a missing project source"));
@@ -1327,129 +1335,37 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       StudioChrome::panelPadding, StudioChrome::panelPadding,
       StudioChrome::panelPadding, StudioChrome::panelPadding);
   inspectorLayout->setSpacing(StudioChrome::gap);
-  auto *inspectorTitle = new QLabel(QStringLiteral("Inspector"), inspector_);
-  inspectorTitle->setFont(chromeMonoFont(16));
-  inspectorLayout->addWidget(inspectorTitle);
-  auto *tabs = new QTabWidget(inspector_);
-  inspectorLayout->addWidget(tabs, 1);
-  auto *zoomPage = new QWidget(tabs);
-  auto *zoomControls = new QVBoxLayout(zoomPage);
-  zoomControls->setContentsMargins(0, 22, 0, 0);
-  zoomControls->setSpacing(14);
-  cueLabel_ = new QLabel(QStringLiteral("Select a zoom"), zoomPage);
-  cueLabel_->setWordWrap(true);
-  cueLabel_->setFont(chromeMonoFont(13));
-  zoomControls->addWidget(cueLabel_);
-  auto *zoomHint = new QLabel(
-      QStringLiteral("Click the preview to place or aim a zoom. Drag a cue on "
-                     "the timeline to move or resize it."),
-      zoomPage);
-  zoomHint->setObjectName(QStringLiteral("muted"));
-  zoomHint->setWordWrap(true);
-  zoomControls->addWidget(zoomHint);
-  auto *scaleRow = new QHBoxLayout;
-  scaleRow->addWidget(new QLabel(QStringLiteral("Magnification"), zoomPage));
-  scaleRow->addStretch();
-  scaleRow->addWidget(zoomLabel_);
-  zoomControls->addLayout(scaleRow);
-  zoomControls->addWidget(zoomSlider_);
-  easeIn_ = new QSpinBox(zoomPage);
-  easeOut_ = new QSpinBox(zoomPage);
-  for (QSpinBox *spin : {easeIn_, easeOut_}) {
-    spin->setRange(60, 3000);
-    spin->setSingleStep(50);
-    spin->setSuffix(QStringLiteral(" ms"));
-    spin->setKeyboardTracking(false);
-    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
-  }
-  const auto timingRow = [zoomControls, zoomPage](const QString &label,
-                                                  QSpinBox *spin) {
-    auto *row = new QHBoxLayout;
-    row->addWidget(new QLabel(label, zoomPage));
-    row->addStretch();
-    row->addWidget(spin);
-    zoomControls->addLayout(row);
-  };
-  timingRow(QStringLiteral("Ease in"), easeIn_);
-  timingRow(QStringLiteral("Ease out"), easeOut_);
-  zoomControls->addWidget(addZoomButton_);
-  zoomControls->addWidget(removeZoomButton_);
-  addZoomButton_->setToolTip(QStringLiteral("Add a zoom at the playhead · Z"));
-  removeZoomButton_->setToolTip(
-      QStringLiteral("Remove selected zoom · Delete"));
-  zoomControls->addStretch();
-  auto *clipPage = new QWidget(tabs);
-  clipPage->setObjectName(QStringLiteral("studioScenePage"));
-  auto *clipControls = new QVBoxLayout(clipPage);
-  clipControls->setContentsMargins(0, 22, 0, 0);
-  clipControls->setSpacing(14);
-  sourceLabel_ = new QLabel(QStringLiteral("Reading recording…"), clipPage);
-  sourceLabel_->setWordWrap(true);
-  sourceLabel_->setFont(chromeMonoFont(12));
-  clipControls->addWidget(sourceLabel_);
-  setupScenes(clipControls);
-  auto *clipHint = new QLabel(
-      QStringLiteral("Drag to scrub · Ctrl+drag to rearrange · drag a scene's "
-                     "edges to trim · Shift+drag selects a range to delete or keep."),
-      clipPage);
-  clipHint->setWordWrap(true);
-  clipHint->setObjectName(QStringLiteral("muted"));
-  clipControls->addWidget(clipHint);
-  clipControls->addStretch();
-  tabs->addTab(zoomPage, QStringLiteral("Zoom"));
-  auto *clipScroll = new QScrollArea(tabs);
-  clipScroll->viewport()->setObjectName(QStringLiteral("studioScrollViewport"));
-  clipScroll->setWidgetResizable(true);
-  clipScroll->setFrameShape(QFrame::NoFrame);
-  clipScroll->setWidget(clipPage);
-  tabs->addTab(clipScroll, QStringLiteral("Clip"));
-  auto *stylePage = new QWidget(tabs);
-  auto *styleControls = new QVBoxLayout(stylePage);
-  styleControls->setContentsMargins(0, 22, 0, 0);
-  styleControls->setSpacing(14);
-  styleControls->addWidget(
-      new QLabel(QStringLiteral("Canvas background"), stylePage));
-  background_ = new StudioComboBox(stylePage);
+  auto *canvasLabel = new QLabel(QStringLiteral("Canvas"), inspector_);
+  canvasLabel->setFont(chromeMonoFont(13));
+  inspectorLayout->addWidget(canvasLabel);
+  background_ = new StudioComboBox(inspector_);
   background_->setChrome(theme_->chrome());
   background_->addItems({QStringLiteral("Midnight"), QStringLiteral("Lavender"),
                          QStringLiteral("Sand"), QStringLiteral("Pearl")});
-  styleControls->addWidget(background_);
-  padding_ = new QSlider(Qt::Horizontal, stylePage);
+  inspectorLayout->addWidget(background_);
+  padding_ = new QSlider(Qt::Horizontal, inspector_);
   padding_->setRange(0, 20);
   padding_->setObjectName(QStringLiteral("canvasPadding"));
-  radius_ = new QSlider(Qt::Horizontal, stylePage);
+  radius_ = new QSlider(Qt::Horizontal, inspector_);
   radius_->setRange(0, 64);
-  const auto styleSlider = [styleControls, stylePage](const QString &text,
-                                                      QSlider *slider,
-                                                      const QString &unit) {
+  radius_->setObjectName(QStringLiteral("canvasCorners"));
+  const auto styleSlider = [inspectorLayout, this](const QString &text,
+                                                       QSlider *slider,
+                                                       const QString &unit) {
     auto *row = new QHBoxLayout;
-    row->addWidget(new QLabel(text, stylePage));
+    row->addWidget(new QLabel(text, inspector_));
     row->addStretch();
-    auto *value = new QLabel(QStringLiteral("0") + unit, stylePage);
+    auto *value = new QLabel(QStringLiteral("0") + unit, inspector_);
     value->setFont(chromeMonoFont(12));
     row->addWidget(value);
-    styleControls->addLayout(row);
-    styleControls->addWidget(slider);
+    inspectorLayout->addLayout(row);
+    inspectorLayout->addWidget(slider);
     QObject::connect(
         slider, &QSlider::valueChanged, value,
         [value, unit](int n) { value->setText(QString::number(n) + unit); });
   };
   styleSlider(QStringLiteral("Padding"), padding_, QStringLiteral("%"));
   styleSlider(QStringLiteral("Corner radius"), radius_, QStringLiteral(" px"));
-  auto *styleHint = new QLabel(
-      QStringLiteral("Add breathing room around the recording. Canvas styling "
-                     "is included in your exported video."),
-      stylePage);
-  styleHint->setWordWrap(true);
-  styleHint->setObjectName(QStringLiteral("muted"));
-  styleControls->addWidget(styleHint);
-  auto *resetStyle =
-      button(QStringLiteral("Reset canvas"),
-             QStringLiteral("Remove padding and rounded corners"));
-  styleControls->addWidget(resetStyle);
-  styleControls->addStretch();
-  tabs->insertTab(0, stylePage, QStringLiteral("Canvas"));
-  tabs->setCurrentIndex(1);
   connect(background_, &QComboBox::currentIndexChanged, this,
           &StudioWindow::styleChanged);
   for (QSlider *slider : {padding_, radius_}) {
@@ -1457,14 +1373,76 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
     connect(slider, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
   }
-  connect(resetStyle, &QPushButton::clicked, this, [this] {
-    if (!background_->isEnabled())
-      return;
-    beginEdit();
-    padding_->setValue(0);
-    radius_->setValue(0);
-    endEdit();
-  });
+
+  zoomCard_ = new QWidget(inspector_);
+  auto *zoomControls = new QVBoxLayout(zoomCard_);
+  zoomControls->setContentsMargins(0, 0, 0, 0);
+  zoomControls->setSpacing(14);
+  cueLabel_ = new QLabel(QStringLiteral("Select a zoom"), zoomCard_);
+  cueLabel_->setWordWrap(true);
+  cueLabel_->setFont(chromeMonoFont(13));
+  zoomControls->addWidget(cueLabel_);
+  auto *zoomHint = new QLabel(
+      QStringLiteral("Click the preview to place or aim a zoom."), zoomCard_);
+  zoomHint->setObjectName(QStringLiteral("muted"));
+  zoomHint->setWordWrap(true);
+  zoomControls->addWidget(zoomHint);
+  auto *scaleRow = new QHBoxLayout;
+  scaleRow->addWidget(new QLabel(QStringLiteral("Magnification"), zoomCard_));
+  scaleRow->addStretch();
+  scaleRow->addWidget(zoomLabel_);
+  zoomControls->addLayout(scaleRow);
+  zoomControls->addWidget(zoomSlider_);
+  easeIn_ = new QSpinBox(zoomCard_);
+  easeOut_ = new QSpinBox(zoomCard_);
+  for (QSpinBox *spin : {easeIn_, easeOut_}) {
+    spin->setRange(60, 3000);
+    spin->setSingleStep(50);
+    spin->setSuffix(QStringLiteral(" ms"));
+    spin->setKeyboardTracking(false);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+  }
+  const auto timingRow = [zoomControls, this](const QString &label,
+                                              QSpinBox *spin) {
+    auto *row = new QHBoxLayout;
+    row->addWidget(new QLabel(label, zoomCard_));
+    row->addStretch();
+    row->addWidget(spin);
+    zoomControls->addLayout(row);
+  };
+  timingRow(QStringLiteral("Ease in"), easeIn_);
+  timingRow(QStringLiteral("Ease out"), easeOut_);
+  zoomControls->addStretch();
+  inspectorLayout->addWidget(zoomCard_);
+
+  transitionCard_ = new QWidget(inspector_);
+  auto *transitionControls = new QVBoxLayout(transitionCard_);
+  transitionControls->setContentsMargins(0, 0, 0, 0);
+  transitionControls->setSpacing(14);
+  setupTransitions(transitionControls);
+  transitionControls->addStretch();
+  inspectorLayout->addWidget(transitionCard_);
+
+  clipCard_ = new QWidget(inspector_);
+  auto *clipControls = new QVBoxLayout(clipCard_);
+  clipControls->setContentsMargins(0, 0, 0, 0);
+  clipControls->setSpacing(14);
+  setupScenes(clipControls);
+  clipControls->addStretch();
+  inspectorLayout->addWidget(clipCard_);
+
+  emptyCard_ = new QWidget(inspector_);
+  auto *emptyControls = new QVBoxLayout(emptyCard_);
+  emptyControls->setContentsMargins(0, 0, 0, 0);
+  auto *emptyHint = new QLabel(
+      QStringLiteral("Click a scene, a boundary badge, or a zoom cue."),
+      emptyCard_);
+  emptyHint->setObjectName(QStringLiteral("muted"));
+  emptyHint->setWordWrap(true);
+  emptyControls->addWidget(emptyHint);
+  emptyControls->addStretch();
+  inspectorLayout->addWidget(emptyCard_);
+  inspectorLayout->addStretch();
 
   auto *timelinePanel = new QWidget(this);
   timelinePanel->setObjectName(QStringLiteral("timelinePanel"));
@@ -1506,30 +1484,23 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(undoButton_, redoButton_);
   QWidget::setTabOrder(redoButton_, help);
   QWidget::setTabOrder(help, inspectorToggle);
-  QWidget::setTabOrder(inspectorToggle, exportButton_);
+  QWidget::setTabOrder(inspectorToggle, importButton_);
+  QWidget::setTabOrder(importButton_, exportButton_);
   QWidget::setTabOrder(exportButton_, relinkButton_);
   QWidget::setTabOrder(relinkButton_, playButton_);
   QWidget::setTabOrder(playButton_, mute);
   QWidget::setTabOrder(mute, splitButton_);
   QWidget::setTabOrder(splitButton_, keepButton_);
   QWidget::setTabOrder(keepButton_, deleteButton_);
-  QWidget::setTabOrder(deleteButton_, addZoomButton_);
-  QWidget::setTabOrder(addZoomButton_, removeZoomButton_);
-  QWidget::setTabOrder(removeZoomButton_, zoomSlider_);
-  QWidget::setTabOrder(zoomSlider_, easeIn_);
-  QWidget::setTabOrder(easeIn_, easeOut_);
-  QWidget::setTabOrder(easeOut_, importButton_);
-  QWidget::setTabOrder(importButton_, sceneIn_);
-  QWidget::setTabOrder(sceneIn_, sceneOut_);
-  QWidget::setTabOrder(sceneOut_, duplicateButton_);
-  QWidget::setTabOrder(duplicateButton_, earlierButton_);
-  QWidget::setTabOrder(earlierButton_, laterButton_);
-  QWidget::setTabOrder(laterButton_, transitionType_);
-  QWidget::setTabOrder(transitionType_, transitionDuration_);
-  QWidget::setTabOrder(transitionDuration_, background_);
+  QWidget::setTabOrder(deleteButton_, background_);
   QWidget::setTabOrder(background_, padding_);
   QWidget::setTabOrder(padding_, radius_);
-  QWidget::setTabOrder(radius_, resetStyle);
+  QWidget::setTabOrder(radius_, zoomSlider_);
+  QWidget::setTabOrder(zoomSlider_, easeIn_);
+  QWidget::setTabOrder(easeIn_, easeOut_);
+  QWidget::setTabOrder(easeOut_, transitionType_);
+  QWidget::setTabOrder(transitionType_, transitionDirection_);
+  QWidget::setTabOrder(transitionDirection_, transitionDuration_);
   connect(splitButton_, &QPushButton::clicked, this,
           &StudioWindow::splitAtPlayhead);
   connect(deleteButton_, &QPushButton::clicked, this,
@@ -1551,6 +1522,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::trimScene);
   connect(timeline_, &StudioTimeline::splitRequested, this,
           &StudioWindow::splitAtPlayhead);
+  connect(timeline_, &StudioTimeline::duplicateRequested, this,
+          &StudioWindow::duplicateScene);
   connect(timeline_, &StudioTimeline::deleteRequested, this,
           &StudioWindow::deleteSelection);
   timelineLayout->addWidget(timelineViewport);
@@ -1620,10 +1593,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::togglePlayback);
   connect(exportButton_, &QPushButton::clicked, this,
           &StudioWindow::startExport);
-  connect(addZoomButton_, &QPushButton::clicked, this,
-          &StudioWindow::addZoomAtPlayhead);
-  connect(removeZoomButton_, &QPushButton::clicked, this,
-          &StudioWindow::removeSelectedZoom);
   connect(zoomSlider_, &QSlider::valueChanged, this,
           [this](int value) { setSelectedZoomScale(value / 10.0); });
   connect(preview_, &StudioPreview::targetPicked, this, &StudioWindow::aimZoom);
@@ -1913,7 +1882,7 @@ void StudioWindow::setSelectedZoomScale(qreal scale) {
 void StudioWindow::setSelectedZoomTiming(bool easeIn, int milliseconds) {
   captureCursor();
   const ZoomCue *current = activeCue();
-  if (!current || !addZoomButton_->isEnabled())
+  if (!current || !timeline_->cuesEditable())
     return;
   for (ZoomCue &cue : zoom_.cues) {
     if (cue.id != current->id)
@@ -2067,13 +2036,6 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
     player_->pause();
   preview_->setTrack(&zoom_);
   preview_->setStyle(style_);
-  sourceLabel_->setText(
-      QStringLiteral("%1 scenes\n%2 × %3\n%4 fps")
-          .arg(project_.clips.size())
-          .arg(project_.canvas.width())
-          .arg(project_.canvas.height())
-          .arg(project_.fpsNumerator / double(qMax(1, project_.fpsDenominator)),
-               0, 'f', 2));
   relinkButton_->setVisible(!missingAssets_.isEmpty());
   restoring_ = false;
   if (resetHistory)
@@ -2268,11 +2230,16 @@ void StudioWindow::refreshControls() {
     radius_->setValue(style_.radius);
     restoring_ = previous;
   }
-  addZoomButton_->setEnabled(editable);
-  removeZoomButton_->setEnabled(editable && cue != nullptr);
   zoomSlider_->setEnabled(editable && cue != nullptr);
   easeIn_->setEnabled(editable && cue != nullptr);
   easeOut_->setEnabled(editable && cue != nullptr);
+  // One tweak card shows the selection: zoom cue, boundary, scene, or none.
+  const bool boundarySelected = timeline_->selectedTransition() != 0;
+  const bool clipSelected = timeline_->selectedClip() != 0;
+  zoomCard_->setVisible(cue != nullptr);
+  transitionCard_->setVisible(cue == nullptr && boundarySelected);
+  clipCard_->setVisible(cue == nullptr && !boundarySelected && clipSelected);
+  emptyCard_->setVisible(cue == nullptr && !boundarySelected && !clipSelected);
   cueLabel_->setText(cue ? QStringLiteral("Zoom  %1\n%2 — %3")
                                .arg(cue->id)
                                .arg(studioTimecode(cue->startMs).mid(3),
@@ -2591,7 +2558,7 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
     action = [this] { splitAtPlayhead(); };
   else if (key == Qt::Key_Z && plain)
     action = [this] {
-      if (addZoomButton_->isEnabled())
+      if (timeline_->cuesEditable())
         addZoomAtPlayhead();
     };
   else if ((key == Qt::Key_Delete || key == Qt::Key_Backspace) && plain)
@@ -2714,6 +2681,8 @@ void StudioWindow::applyChrome() {
     background_->setChrome(chrome);
   if (transitionType_)
     transitionType_->setChrome(chrome);
+  if (transitionDirection_)
+    transitionDirection_->setChrome(chrome);
   if (statusLabel_)
     setStatus(statusLabel_->text(),
               statusLabel_->property("studioError").toBool());

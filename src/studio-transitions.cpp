@@ -1,5 +1,6 @@
 /** @fileoverview Explicit pair-bound transitions and their Quattro inspector.
  */
+#include "overlay-chrome.hpp"
 #include "studio-composition.hpp"
 #include "studio-playback.hpp"
 #include "studio.hpp"
@@ -7,38 +8,92 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
-#include <QTabWidget>
 #include <QVBoxLayout>
 
+namespace {
+// Combo data for the effect picker; directions index Left, Right, Up, Down.
+constexpr int kTransitionNone = -1;
+constexpr int kTransitionCrossfade = 1;
+constexpr int kTransitionFadeBlack = 2;
+constexpr int kTransitionWipe = 3;
+constexpr int kTransitionSlide = 4;
+
+int transitionDirectionFor(StudioTransitionKind kind) {
+  switch (kind) {
+  case StudioTransitionKind::WipeRight:
+  case StudioTransitionKind::SlideRight:
+    return 1;
+  case StudioTransitionKind::WipeUp:
+  case StudioTransitionKind::SlideUp:
+    return 2;
+  case StudioTransitionKind::WipeDown:
+  case StudioTransitionKind::SlideDown:
+    return 3;
+  default:
+    return 0;
+  }
+}
+
+int transitionTypeFor(StudioTransitionKind kind) {
+  switch (kind) {
+  case StudioTransitionKind::Crossfade:
+    return kTransitionCrossfade;
+  case StudioTransitionKind::FadeBlack:
+    return kTransitionFadeBlack;
+  case StudioTransitionKind::WipeLeft:
+  case StudioTransitionKind::WipeRight:
+  case StudioTransitionKind::WipeUp:
+  case StudioTransitionKind::WipeDown:
+    return kTransitionWipe;
+  default:
+    return kTransitionSlide;
+  }
+}
+
+StudioTransitionKind transitionKindFor(int type, int direction) {
+  if (type == kTransitionCrossfade)
+    return StudioTransitionKind::Crossfade;
+  if (type == kTransitionFadeBlack)
+    return StudioTransitionKind::FadeBlack;
+  const int dir = qBound(0, direction, 3);
+  if (type == kTransitionWipe)
+    return static_cast<StudioTransitionKind>(
+        static_cast<int>(StudioTransitionKind::WipeLeft) + dir);
+  return static_cast<StudioTransitionKind>(
+      static_cast<int>(StudioTransitionKind::SlideLeft) + dir);
+}
+} // namespace
+
 void StudioWindow::setupTransitions(QVBoxLayout *controls) {
-  transitionLabel_ =
-      new QLabel(QStringLiteral("Transition to next scene"), this);
-  transitionLabel_->setWordWrap(true);
-  controls->addWidget(transitionLabel_);
+  transitionTitle_ =
+      new QLabel(QStringLiteral("Transition"), this);
+  transitionTitle_->setObjectName(QStringLiteral("transitionTitle"));
+  transitionTitle_->setWordWrap(true);
+  transitionTitle_->setFont(chromeMonoFont(13));
+  controls->addWidget(transitionTitle_);
   transitionType_ = new StudioComboBox(this);
   transitionType_->setObjectName(QStringLiteral("transitionType"));
   transitionType_->setChrome(theme_->chrome());
-  transitionType_->addItem(QStringLiteral("Hard cut"), -1);
-  const std::pair<const char *, StudioTransitionKind> kinds[] = {
-      {"Crossfade", StudioTransitionKind::Crossfade},
-      {"Fade through black", StudioTransitionKind::FadeBlack},
-      {"Wipe left", StudioTransitionKind::WipeLeft},
-      {"Wipe right", StudioTransitionKind::WipeRight},
-      {"Wipe up", StudioTransitionKind::WipeUp},
-      {"Wipe down", StudioTransitionKind::WipeDown},
-      {"Slide left", StudioTransitionKind::SlideLeft},
-      {"Slide right", StudioTransitionKind::SlideRight},
-      {"Slide up", StudioTransitionKind::SlideUp},
-      {"Slide down", StudioTransitionKind::SlideDown}};
-  for (const auto &[label, kind] : kinds)
-    transitionType_->addItem(QString::fromLatin1(label),
-                             static_cast<int>(kind));
+  transitionType_->addItem(QStringLiteral("Hard cut"), kTransitionNone);
+  transitionType_->addItem(QStringLiteral("Crossfade"), kTransitionCrossfade);
+  transitionType_->addItem(QStringLiteral("Fade through black"),
+                           kTransitionFadeBlack);
+  transitionType_->addItem(QStringLiteral("Wipe"), kTransitionWipe);
+  transitionType_->addItem(QStringLiteral("Slide"), kTransitionSlide);
   transitionType_->setToolTip(QStringLiteral(
       "Transition from the selected scene to its next neighbor · T"));
   controls->addWidget(transitionType_);
+  transitionDirection_ = new StudioComboBox(this);
+  transitionDirection_->setObjectName(QStringLiteral("transitionDirection"));
+  transitionDirection_->setChrome(theme_->chrome());
+  transitionDirection_->addItems({QStringLiteral("Left"),
+                                  QStringLiteral("Right"),
+                                  QStringLiteral("Up"),
+                                  QStringLiteral("Down")});
+  transitionDirection_->setToolTip(QStringLiteral("Wipe/slide direction"));
+  controls->addWidget(transitionDirection_);
   transitionDuration_ = new QSpinBox(this);
   transitionDuration_->setObjectName(QStringLiteral("transitionDuration"));
   transitionDuration_->setKeyboardTracking(false);
@@ -54,6 +109,8 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
   overlapHint_->setObjectName(QStringLiteral("muted"));
   controls->addWidget(overlapHint_);
   connect(transitionType_, &QComboBox::currentIndexChanged, this,
+          &StudioWindow::changeTransition);
+  connect(transitionDirection_, &QComboBox::currentIndexChanged, this,
           &StudioWindow::changeTransition);
   connect(transitionDuration_, &QSpinBox::valueChanged, this,
           &StudioWindow::changeTransition);
@@ -76,13 +133,17 @@ void StudioWindow::refreshTransitionControls(bool force) {
   if (!transitionType_)
     return;
   transitionType_->setChrome(theme_->chrome());
+  transitionDirection_->setChrome(theme_->chrome());
   const QSignalBlocker quietType(transitionType_),
-      quietDuration(transitionDuration_);
+      quietDirection(transitionDirection_), quietDuration(transitionDuration_);
   const auto [outgoing, incoming] = transitionPair();
+  qsizetype outgoingIndex = -1, incomingIndex = -1;
   QString name;
   for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
     if (project_.clips[i].id == outgoing &&
         project_.clips[i + 1].id == incoming) {
+      outgoingIndex = i;
+      incomingIndex = i + 1;
       if (const auto *asset =
               studioAsset(project_, project_.clips[i + 1].assetId))
         name = QFileInfo(asset->path).fileName();
@@ -91,11 +152,19 @@ void StudioWindow::refreshTransitionControls(bool force) {
   const auto *transition = studioTransition(project_, outgoing, incoming);
   const qint64 maximum = studioTransitionMaximum(project_, outgoing, incoming);
   const bool editable = scenesEditable() && incoming && !editGesture_;
+  const bool directional =
+      transition &&
+      (transitionTypeFor(transition->kind) == kTransitionWipe ||
+       transitionTypeFor(transition->kind) == kTransitionSlide);
   transitionType_->setEnabled(editable);
+  transitionDirection_->setEnabled(editable && directional);
   transitionDuration_->setEnabled(editable && transition && maximum > 0);
   transitionType_->setCurrentIndex(
-      transition ? transitionType_->findData(static_cast<int>(transition->kind))
+      transition ? transitionType_->findData(transitionTypeFor(transition->kind))
                  : 0);
+  if (transition)
+    transitionDirection_->setCurrentIndex(
+        transitionDirectionFor(transition->kind));
   // Never wipe a value being typed: the model write waits for Enter, and a
   // refresh in between must not replace the field from behind. Commits pass
   // force so the field reconciles with normalization or rejection.
@@ -108,10 +177,27 @@ void StudioWindow::refreshTransitionControls(bool force) {
         transition ? transition->durationMs
                    : qMin<qint64>(300, qMax<qint64>(1, maximum))));
   }
-  transitionLabel_->setText(QStringLiteral("Transition to next scene"));
-  transitionLabel_->setToolTip(
-      incoming ? QStringLiteral("%1 · maximum %2 ms overlap").arg(name).arg(maximum)
-               : QStringLiteral("Select a scene with a following neighbor"));
+  QString effect = QStringLiteral("Hard cut");
+  if (transition) {
+    effect = transitionType_->currentText();
+    if (directional)
+      effect += QStringLiteral(" ") + transitionDirection_->currentText();
+  }
+  if (transitionTitle_) {
+    transitionTitle_->setText(
+        incoming
+            ? QStringLiteral("Scene %1 → %2 · %3%4")
+                  .arg(outgoingIndex + 1)
+                  .arg(incomingIndex + 1)
+                  .arg(effect)
+                  .arg(transition ? QStringLiteral(" · %1 ms").arg(
+                                        transition->durationMs)
+                                  : QString())
+            : QStringLiteral("Transition"));
+    transitionTitle_->setToolTip(
+        incoming ? QStringLiteral("%1 · maximum %2 ms overlap").arg(name).arg(maximum)
+                 : QStringLiteral("Select a boundary badge on the timeline"));
+  }
   if (overlapHint_)
     overlapHint_->setText(
         QStringLiteral("Maximum %1 ms · overlaps kept frames").arg(maximum));
@@ -147,15 +233,8 @@ void StudioWindow::showTransitionEditor(quint64 id) {
         break;
       }
   }
-  auto *tabs = inspector_->findChild<QTabWidget *>();
-  if (tabs)
-    for (int i = 0; i < tabs->count(); ++i)
-      if (tabs->tabText(i) == QStringLiteral("Clip"))
-        tabs->setCurrentIndex(i);
   inspectorWanted_ = true;
   inspector_->show();
-  if (auto *scroll = inspector_->findChild<QScrollArea *>())
-    scroll->ensureWidgetVisible(transitionType_);
   transitionType_->setFocus();
 }
 
@@ -171,11 +250,12 @@ void StudioWindow::changeTransition() {
   const auto anchor = studioFrameAt(project_, player_->position());
   QString error;
   const bool changed =
-      requestedType == -1
+      requestedType == kTransitionNone
           ? studioRemoveTransition(project_, outgoing, incoming, error)
           : studioSetTransition(
                 project_, outgoing, incoming,
-                static_cast<StudioTransitionKind>(requestedType),
+                transitionKindFor(requestedType,
+                                  transitionDirection_->currentIndex()),
                 requestedDuration, error);
   if (!changed) {
     if (!error.isEmpty())
