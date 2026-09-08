@@ -307,6 +307,8 @@ private:
   class QPushButton *importButton_ = nullptr;
   class QLabel *sceneLabel_ = nullptr;
   quint64 nextClipId_ = 1;
+  void changeClipSpeed();
+  class StudioComboBox *clipSpeed_ = nullptr;
   class QPushButton *splitButton_ = nullptr;
   class QPushButton *deleteButton_ = nullptr;
   [[nodiscard]] StudioEditState editState() const;

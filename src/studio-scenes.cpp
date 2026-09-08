@@ -1,7 +1,10 @@
 /** @fileoverview Asynchronous scene import and non-destructive arrangement. */
 #include "studio-playback.hpp"
 #include "studio.hpp"
+#include "overlay-chrome.hpp"
+#include "studio-theme.hpp"
 #include <QApplication>
+#include <QComboBox>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDropEvent>
@@ -17,6 +20,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrentRun>
+
+#include <limits>
 
 namespace {
 QStringList localVideos(const QMimeData *mime) {
@@ -42,6 +47,23 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
       new QLabel(QStringLiteral("Select a scene on the video lane"), this);
   sceneLabel_->setWordWrap(true);
   controls->addWidget(sceneLabel_);
+  auto *selectedLabel = new QLabel(QStringLiteral("Selected Clip"), this);
+  selectedLabel->setFont(chromeMonoFont(13));
+  controls->addWidget(selectedLabel);
+  auto *speedRow = new QHBoxLayout;
+  speedRow->addWidget(new QLabel(QStringLiteral("Speed"), this));
+  speedRow->addStretch();
+  clipSpeed_ = new StudioComboBox(this);
+  clipSpeed_->setObjectName(QStringLiteral("clipSpeed"));
+  clipSpeed_->setToolTip(
+      QStringLiteral("Playback speed of the selected scene"));
+  for (const double speed :
+       {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0})
+    clipSpeed_->addItem(QStringLiteral("%1×").arg(speed), speed);
+  speedRow->addWidget(clipSpeed_);
+  controls->addLayout(speedRow);
+  connect(clipSpeed_, &QComboBox::activated, this,
+          &StudioWindow::changeClipSpeed);
   connect(&importWatcher_, &QFutureWatcher<StudioProjectLoad>::finished, this,
           [this] {
             importing_ = false;
@@ -74,6 +96,24 @@ void StudioWindow::refreshSceneControls() {
     }
   const auto *asset =
       selected ? studioAsset(project_, selected->assetId) : nullptr;
+  const bool speedEditable = scenesEditable() && !editGesture_ && selected;
+  clipSpeed_->setEnabled(speedEditable);
+  if (selected) {
+    // Display-only mapping: the model admits any 0.125..8 speed, the combo
+    // offers presets. Show the nearest preset without touching the model.
+    int nearest = 0;
+    double best = std::numeric_limits<double>::max();
+    for (int i = 0; i < clipSpeed_->count(); ++i) {
+      const double gap =
+          qAbs(clipSpeed_->itemData(i).toDouble() - selected->speed);
+      if (gap < best) {
+        best = gap;
+        nearest = i;
+      }
+    }
+    const QSignalBlocker quiet(clipSpeed_);
+    clipSpeed_->setCurrentIndex(nearest);
+  }
   if (!selected || !asset) {
     sceneLabel_->setText(QStringLiteral("Ctrl+click a clip to see its filename and details"));
     return;
@@ -222,6 +262,32 @@ void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
   timeline_->setSelectedClip(id);
   rememberEdit();
   setStatus(QStringLiteral("Scene trimmed — Ctrl+Z to undo") +
+            transitionAdjustment(transitions));
+}
+
+void StudioWindow::changeClipSpeed() {
+  if (!scenesEditable() || editGesture_ || !clipSpeed_ ||
+      !clipSpeed_->isEnabled())
+    return;
+  const quint64 id = timeline_->selectedClip();
+  if (!id)
+    return;
+  captureCursor();
+  const double speed = clipSpeed_->currentData().toDouble();
+  const auto transitions = project_.transitions;
+  QString error;
+  if (!studioSetClipSpeed(project_, id, speed, error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    refreshSceneControls();
+    return;
+  }
+  player_->pause();
+  applyProject(false, player_->position());
+  timeline_->setSelectedClip(id);
+  rememberEdit();
+  setStatus(QStringLiteral("Scene speed %1 — Ctrl+Z to undo")
+                .arg(clipSpeed_->currentText()) +
             transitionAdjustment(transitions));
 }
 

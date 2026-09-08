@@ -187,8 +187,13 @@ struct StudioCutResult {
 [[nodiscard]] bool studioDuplicateClip(StudioProject &, quint64 clipId,
                                        quint64 newClipId, QString &error);
 [[nodiscard]] bool studioTrimClip(StudioProject &, quint64 clipId,
-                                  qint64 sourceInMs, qint64 sourceOutMs,
-                                  QString &error);
+                                   qint64 sourceInMs, qint64 sourceOutMs,
+                                   QString &error);
+/** Retimes one scene: duration becomes (out-in)/speed with source-anchored
+ *  zoom remapping via finishSceneChange. Speeds outside 0.125..8 or
+ *  non-finite values are rejected; unchanged speeds are a no-op. */
+[[nodiscard]] bool studioSetClipSpeed(StudioProject &, quint64 clipId,
+                                      double speed, QString &error);
 
 struct StudioEditState {
   StudioProject project;

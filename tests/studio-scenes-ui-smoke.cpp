@@ -5,6 +5,7 @@
 #include "studio.hpp"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFile>
@@ -117,6 +118,28 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
   if (!require(player->duration() == 30000 && timeline->selectedClip() == 5,
                "Ctrl+D did not duplicate and select the scene"))
     return false;
+  {
+    // Doubling the selected scene halves its 6000 ms to 3000 ms; undo
+    // restores the full project for the trim checks below.
+    auto *speed = window.findChild<QComboBox *>(QStringLiteral("clipSpeed"));
+    if (!require(speed && speed->isEnabled() &&
+                     speed->currentText() == QStringLiteral("1×"),
+                 "clip speed control missing or not on 1x"))
+      return false;
+    const int twoX = speed->findText(QStringLiteral("2×"));
+    if (!require(twoX >= 0, "2x speed preset missing"))
+      return false;
+    speed->setCurrentIndex(twoX);
+    speed->activated(twoX);
+    if (!require(player->duration() == 27000 &&
+                     timeline->selectedClip() == 5,
+                 "2x speed did not halve the selected scene"))
+      return false;
+    QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+    if (!require(player->duration() == 30000,
+                 "speed change was not undoable"))
+      return false;
+  }
   const auto point = [&](qint64 ms) {
     return QPoint(64 + qRound((timeline->width() - 80) * ms / 30000.0), 60);
   };

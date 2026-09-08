@@ -1712,6 +1712,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(previewTransitionButton_, transitionType_);
   QWidget::setTabOrder(transitionType_, transitionDirection_);
   QWidget::setTabOrder(transitionDirection_, transitionDuration_);
+  QWidget::setTabOrder(transitionDuration_, clipSpeed_);
   connect(splitButton_, &QPushButton::clicked, this,
           &StudioWindow::splitAtPlayhead);
   connect(deleteButton_, &QPushButton::clicked, this,
@@ -3247,6 +3248,8 @@ void StudioWindow::applyChrome() {
     transitionType_->setChrome(chrome);
   if (transitionDirection_)
     transitionDirection_->setChrome(chrome);
+  if (clipSpeed_)
+    clipSpeed_->setChrome(chrome);
   if (statusLabel_)
     setStatus(statusLabel_->text(),
               statusLabel_->property("studioError").toBool());

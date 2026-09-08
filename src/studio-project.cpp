@@ -1029,6 +1029,26 @@ bool studioTrimClip(StudioProject &p, quint64 id, qint64 in, qint64 out,
   edited.clips[index].outMs = out;
   return finishSceneChange(p, std::move(edited), error);
 }
+bool studioSetClipSpeed(StudioProject &p, quint64 id, double speed,
+                        QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = clipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The scene to retime no longer exists.");
+    return false;
+  }
+  if (!std::isfinite(speed) || speed < 0.125 || speed > 8) {
+    error = QStringLiteral("Speed must be between 0.125x and 8x.");
+    return false;
+  }
+  if (p.clips[index].speed == speed)
+    return false;
+  auto edited = p;
+  edited.clips[index].speed = speed;
+  return finishSceneChange(p, std::move(edited), error);
+}
 bool studioSetTransition(StudioProject &p, quint64 outgoing, quint64 incoming,
                          StudioTransitionKind kind, qint64 requested,
                          QString &error) {

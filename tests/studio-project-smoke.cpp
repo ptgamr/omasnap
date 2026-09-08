@@ -912,6 +912,44 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("Missing aspect does not default to Original")))
       return false;
   }
+  {
+    // Retiming one scene halves its duration at 2x and persists.
+    auto retimed = p;
+    const qint64 before = studioDuration(retimed);
+    QString speedError;
+    if (!check(studioSetClipSpeed(retimed, retimed.clips[0].id, 2.0,
+                                  speedError) &&
+                   speedError.isEmpty() &&
+                   retimed.clips[0].speed == 2.0 &&
+                   studioDuration(retimed) < before &&
+                   decodeStudioProject(encodeStudioProject(retimed), decoded)
+                           .isEmpty() &&
+                   decoded.clips[0].speed == 2.0,
+               QStringLiteral("Scene speed change did not persist")))
+      return false;
+    if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id, 2.0,
+                                   speedError) &&
+                   speedError.isEmpty(),
+               QStringLiteral("Unchanged speed is not a no-op")))
+      return false;
+    for (const double bad : {0.0, -1.0, 100.0}) {
+      if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id, bad,
+                                     speedError) &&
+                     !speedError.isEmpty(),
+                 QStringLiteral("Out-of-range speed %1 accepted").arg(bad)))
+        return false;
+    }
+    if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id,
+                                   std::numeric_limits<double>::quiet_NaN(),
+                                   speedError) &&
+                   !speedError.isEmpty(),
+               QStringLiteral("Non-finite speed accepted")))
+      return false;
+    if (!check(!studioSetClipSpeed(retimed, 999999, 2.0, speedError) &&
+                   !speedError.isEmpty(),
+               QStringLiteral("Speed change on a missing scene accepted")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&
