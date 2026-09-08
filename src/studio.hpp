@@ -260,6 +260,8 @@ private:
   /** Boundary under edit: selected boundary first, else selected clip. */
   [[nodiscard]] std::pair<quint64, quint64> transitionPair() const;
   void showTransitionEditor(quint64 outgoingClipId);
+  void previewTransition();
+  void previewZoom();
   [[nodiscard]] QString
   transitionAdjustment(const QVector<StudioTransition> &before) const;
   class StudioComboBox *transitionType_ = nullptr;
@@ -301,6 +303,8 @@ private:
   class QPushButton *playButton_ = nullptr;
   class QPushButton *exportButton_ = nullptr;
   class QPushButton *keepButton_ = nullptr;
+  class QPushButton *previewZoomButton_ = nullptr;
+  class QPushButton *previewTransitionButton_ = nullptr;
   class QSlider *zoomSlider_ = nullptr;
   class QLabel *zoomLabel_ = nullptr;
   class QTimer *saveTimer_ = nullptr;

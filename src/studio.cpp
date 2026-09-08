@@ -1395,7 +1395,17 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   cueLabel_ = new QLabel(QStringLiteral("Select a zoom"), zoomCard_);
   cueLabel_->setWordWrap(true);
   cueLabel_->setFont(chromeMonoFont(13));
-  zoomControls->addWidget(cueLabel_);
+  auto *zoomTitleRow = new QHBoxLayout;
+  zoomTitleRow->addWidget(cueLabel_, 1);
+  previewZoomButton_ = new QPushButton(QStringLiteral("Preview"), zoomCard_);
+  previewZoomButton_->setObjectName(QStringLiteral("previewZoom"));
+  previewZoomButton_->setToolTip(
+      QStringLiteral("Play from just before the selected zoom"));
+  previewZoomButton_->setAccessibleName(QStringLiteral("Preview zoom"));
+  connect(previewZoomButton_, &QPushButton::clicked, this,
+          &StudioWindow::previewZoom);
+  zoomTitleRow->addWidget(previewZoomButton_);
+  zoomControls->addLayout(zoomTitleRow);
   auto *zoomHint = new QLabel(
       QStringLiteral("Click the preview to place or aim a zoom."), zoomCard_);
   zoomHint->setObjectName(QStringLiteral("muted"));
@@ -1514,10 +1524,12 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(deleteButton_, background_);
   QWidget::setTabOrder(background_, padding_);
   QWidget::setTabOrder(padding_, radius_);
-  QWidget::setTabOrder(radius_, zoomSlider_);
+  QWidget::setTabOrder(radius_, previewZoomButton_);
+  QWidget::setTabOrder(previewZoomButton_, zoomSlider_);
   QWidget::setTabOrder(zoomSlider_, easeIn_);
   QWidget::setTabOrder(easeIn_, easeOut_);
-  QWidget::setTabOrder(easeOut_, transitionType_);
+  QWidget::setTabOrder(easeOut_, previewTransitionButton_);
+  QWidget::setTabOrder(previewTransitionButton_, transitionType_);
   QWidget::setTabOrder(transitionType_, transitionDirection_);
   QWidget::setTabOrder(transitionDirection_, transitionDuration_);
   connect(splitButton_, &QPushButton::clicked, this,
@@ -2261,6 +2273,7 @@ void StudioWindow::refreshControls() {
   zoomSlider_->setEnabled(editable && cue != nullptr);
   easeIn_->setEnabled(editable && cue != nullptr);
   easeOut_->setEnabled(editable && cue != nullptr);
+  previewZoomButton_->setEnabled(editable && cue != nullptr);
   // One tweak card shows the selection: zoom cue, boundary, scene, or none.
   const bool boundarySelected = timeline_->selectedTransition() != 0;
   const bool clipSelected = timeline_->selectedClip() != 0;
@@ -2327,6 +2340,33 @@ void StudioWindow::togglePlayback() {
   if (player_->position() < start || player_->position() >= end)
     seekTo(start);
   player_->play();
+}
+
+void StudioWindow::previewTransition() {
+  if (!previewTransitionButton_->isEnabled())
+    return;
+  const auto [outgoing, incoming] = transitionPair();
+  if (!outgoing || !incoming)
+    return;
+  for (const auto &span : studioComposition(project_))
+    if (span.clipId == incoming) {
+      // Start just before the overlap so the blend plays in context.
+      seekTo(span.startMs - 500);
+      if (player_->playbackState() != QMediaPlayer::PlayingState)
+        player_->play();
+      return;
+    }
+}
+
+void StudioWindow::previewZoom() {
+  if (!previewZoomButton_->isEnabled())
+    return;
+  const ZoomCue *cue = activeCue();
+  if (!cue)
+    return;
+  seekTo(cue->startMs - 500);
+  if (player_->playbackState() != QMediaPlayer::PlayingState)
+    player_->play();
 }
 
 void StudioWindow::seekBy(qint64 milliseconds) {

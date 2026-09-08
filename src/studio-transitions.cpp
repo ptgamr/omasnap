@@ -72,7 +72,18 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
   transitionTitle_->setObjectName(QStringLiteral("transitionTitle"));
   transitionTitle_->setWordWrap(true);
   transitionTitle_->setFont(chromeMonoFont(13));
-  controls->addWidget(transitionTitle_);
+  auto *titleRow = new QHBoxLayout;
+  titleRow->addWidget(transitionTitle_, 1);
+  previewTransitionButton_ = new QPushButton(QStringLiteral("Preview"), this);
+  previewTransitionButton_->setObjectName(QStringLiteral("previewTransition"));
+  previewTransitionButton_->setToolTip(
+      QStringLiteral("Play from just before the transition"));
+  previewTransitionButton_->setAccessibleName(
+      QStringLiteral("Preview transition"));
+  connect(previewTransitionButton_, &QPushButton::clicked, this,
+          &StudioWindow::previewTransition);
+  titleRow->addWidget(previewTransitionButton_);
+  controls->addLayout(titleRow);
   transitionType_ = new StudioComboBox(this);
   transitionType_->setObjectName(QStringLiteral("transitionType"));
   transitionType_->setChrome(theme_->chrome());
@@ -163,6 +174,7 @@ void StudioWindow::refreshTransitionControls(bool force) {
   transitionType_->setEnabled(editable);
   transitionDirection_->setEnabled(editable && directional);
   transitionDuration_->setEnabled(editable && transition && maximum > 0);
+  previewTransitionButton_->setEnabled(editable && !mediaFailed_);
   transitionType_->setCurrentIndex(
       transition ? transitionType_->findData(transitionTypeFor(transition->kind))
                  : 0);

@@ -224,6 +224,24 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   if (!require(QTest::qWaitFor([&] { return player->position() == 2400; }, 4000),
                "Boundary selection did not park at the overlap start"))
     return false;
+  // Preview plays from just before the effect, not from the parked edge.
+  auto *previewTransition = window.findChild<QPushButton *>("previewTransition");
+  if (!require(previewTransition && previewTransition->isEnabled(),
+               "Preview transition unavailable"))
+    return false;
+  QTest::mouseClick(previewTransition, Qt::LeftButton);
+  if (!require(player->position() == 1900,
+               "Preview did not seek before the transition"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Preview did not play the transition"))
+    return false;
+  player->pause();
   // Delete with a boundary selected removes the transition, not the scene,
   // and the boundary stays selected as a hard cut. Focus leaves the Type
   // field first: hotkeys stay suspended while typing.
@@ -286,6 +304,27 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                   timeline->selectedTransition() == 0,
                "T on the last scene abandoned its clip"))
     return false;
+  // A zoom cue previews from just before it starts.
+  QTest::keyClick(&window, Qt::Key_Z);
+  auto *previewZoom = window.findChild<QPushButton *>("previewZoom");
+  if (!require(timeline->selectedCue() != 0 && previewZoom &&
+                  previewZoom->isEnabled(),
+               "Zoom cue or its preview unavailable"))
+    return false;
+  const qint64 zoomFrom = player->position();
+  QTest::mouseClick(previewZoom, Qt::LeftButton);
+  if (!require(player->position() < zoomFrom,
+               "Preview did not seek before the zoom"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Preview did not play the zoom"))
+    return false;
+  player->pause();
   timeline->setSelectedClip(1);
   // Reorder by dragging: the order buttons are gone, Ctrl+drag arranges.
   QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
@@ -325,5 +364,41 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                    studioDuration(saved.project) == 5400,
                "Transition pair, kind, or duration did not persist"))
     return false;
-  return true;
+  // Missing media disables Preview like the main transport.
+  StudioProject gone = saved.project;
+  for (auto &asset : gone.assets)
+    asset.path = scratch.filePath(QStringLiteral("missing.mp4"));
+  const QString gonePath = scratch.filePath(QStringLiteral("gone.omasnap.json"));
+  if (!require(saveStudioProject(gonePath, gone).isEmpty(),
+               "could not write missing-media project"))
+    return false;
+  StudioWindow goneWindow(gonePath, nullptr, scratch.filePath("palette.toml"));
+  goneWindow.show();
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      for (auto *button :
+                           goneWindow.findChildren<QPushButton *>())
+                        if (button->text() == QStringLiteral("Relink media") &&
+                            button->isVisible())
+                          return true;
+                      return false;
+                    },
+                    5000),
+               "Missing media did not expose relink"))
+    return false;
+  auto *goneTimeline = goneWindow.findChild<StudioTimeline *>();
+  goneTimeline->setSelectedClip(1);
+  QTest::keyClick(&goneWindow, Qt::Key_T);
+  if (!require(goneTimeline->selectedTransition() == 1,
+               "Boundary selection needs no media"))
+    return false;
+  auto *gonePreview = goneWindow.findChild<QPushButton *>("previewTransition");
+  auto *gonePlay = goneWindow.findChild<QPushButton *>("play");
+  if (!require(gonePreview && gonePlay && !gonePreview->isEnabled() &&
+                  !gonePlay->isEnabled(),
+               "Preview stayed enabled after media failure"))
+    return false;
+  goneWindow.close();
+  return require(QTest::qWaitFor([&] { return !goneWindow.isVisible(); }, 5000),
+                 "Missing-media window did not close");
 }
