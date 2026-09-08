@@ -2350,6 +2350,42 @@ void StudioWindow::stepFrame(int direction) {
   seekTo(qRound64(static_cast<double>(index + direction) * frameMs));
 }
 
+void StudioWindow::dumpLayoutDebug() {
+  fprintf(stderr, "DBG Qt=%s platform=%s window=%dx%d+%d+%d\n", qVersion(),
+          qPrintable(QApplication::platformName()), width(), height(), x(),
+          y());
+  auto *panel = findChild<QWidget *>(QStringLiteral("timelinePanel"));
+  if (panel)
+    fprintf(stderr, "DBG timelinePanel geo=%dx%d+%d+%d\n", panel->width(),
+            panel->height(), panel->x(), panel->y());
+  if (!inspector_) {
+    fprintf(stderr, "DBG no inspector\n");
+    return;
+  }
+  fprintf(stderr, "DBG inspector geo=%dx%d+%d+%d visible=%d\n",
+          inspector_->width(), inspector_->height(), inspector_->x(),
+          inspector_->y(), (int)inspector_->isVisible());
+  const auto *box = qobject_cast<const QBoxLayout *>(inspector_->layout());
+  if (!box) {
+    fprintf(stderr, "DBG inspector layout is not a box\n");
+    return;
+  }
+  fprintf(stderr, "DBG inspector items=%d\n", box->count());
+  for (int i = 0; i < box->count(); ++i) {
+    const QLayoutItem *item = box->itemAt(i);
+    const QWidget *w = item ? item->widget() : nullptr;
+    if (w)
+      fprintf(stderr, "DBG [%d] %s(%s) geo=%dx%d+%d+%d vis=%d\n", i,
+              w->metaObject()->className(), qPrintable(w->objectName()),
+              w->width(), w->height(), w->x(), w->y(), (int)w->isVisible());
+    else if (item)
+      fprintf(stderr, "DBG [%d] spacer min=%dx%d\n", i,
+              item->minimumSize().width(), item->minimumSize().height());
+    else
+      fprintf(stderr, "DBG [%d] null\n", i);
+  }
+}
+
 void StudioWindow::extendRangeSelection(int direction) {
   if (!playButton_->isEnabled() || !media_.usable())
     return;
@@ -2612,6 +2648,11 @@ bool StudioWindow::eventFilter(QObject *object, QEvent *event) {
        event->type() != QEvent::ShortcutOverride))
     return QWidget::eventFilter(object, event);
   auto *key = static_cast<QKeyEvent *>(event);
+  // Temporary xcb layout diagnostic (F12): dump first, then fall through to
+  // the input guard so the key never edits anything.
+  if (event->type() == QEvent::KeyPress && key->key() == Qt::Key_F12 &&
+      key->modifiers() == Qt::NoModifier)
+    dumpLayoutDebug();
   // Value editing keeps its native behavior: arrows move the cursor, digits
   // replace the value, Backspace deletes text. Space still transports from
   // any control.
