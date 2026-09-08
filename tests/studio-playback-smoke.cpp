@@ -5,6 +5,7 @@
 #include <QGuiApplication>
 #include <QProcess>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QtConcurrentRun>
@@ -146,6 +147,88 @@ bool runStudioPlaybackChecks(const QString &mediaPath, QString &error) {
                    playback.playbackState() == QMediaPlayer::StoppedState,
                "empty project retained stale media transport"))
     return false;
+
+  // Audio lane follower: plays the span under the clock, silent in gaps,
+  // and re-resolves when the window pushes new clips.
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  if (!ffmpeg.isEmpty()) {
+    QTemporaryDir songScratch;
+    if (!require(songScratch.isValid(), "could not create follower scratch"))
+      return false;
+    const QString song = songScratch.filePath(QStringLiteral("song.m4a"));
+    auto encodedSong = QtConcurrent::run([song] {
+      QProcess encoder;
+      encoder.start(
+          QStringLiteral("ffmpeg"),
+          {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-f"),
+           QStringLiteral("lavfi"), QStringLiteral("-i"),
+           QStringLiteral("sine=frequency=440:sample_rate=48000"),
+           QStringLiteral("-t"), QStringLiteral("3"), QStringLiteral("-c:a"),
+           QStringLiteral("aac"), song});
+      return encoder.waitForFinished(10000) && encoder.exitCode() == 0;
+    });
+    if (!require(QTest::qWaitFor([&] { return encodedSong.isFinished(); },
+                                 12000) &&
+                     encodedSong.result(),
+                 "could not generate follower fixture"))
+      return false;
+    StudioSource songSource;
+    songSource.durationMs = 3000;
+    songSource.audioStreams = 1;
+    StudioProject scored;
+    scored.assets = {asset, {2, song, songSource}};
+    scored.canvas = {320, 180};
+    scored.clips = {{1, 1, 0, 2000, 1.0}};
+    scored.audioClips = {{11, 2, 0, 1000, 1.0, 100}};
+    playback.setProject(scored);
+    auto *follower = playback.audioPlayerForTest();
+    playback.setPosition(900);
+    playback.play();
+    if (!require(QTest::qWaitFor(
+                     [&] {
+                       return follower->source().toLocalFile() == song &&
+                              follower->playbackState() ==
+                                  QMediaPlayer::PlayingState &&
+                              qAbs(follower->position() - 900) < 700;
+                     },
+                     5000),
+                 "follower did not play the lane span"))
+      return false;
+    // Seeking under playback re-anchors: backward, so the drift is always
+    // past the correction threshold rather than racing it.
+    playback.setPosition(100);
+    if (!require(QTest::qWaitFor(
+                     [&] { return qAbs(follower->position() - 100) < 700; },
+                     5000),
+                 "playing seek left the follower behind"))
+      return false;
+    playback.setPosition(1500);
+    if (!require(QTest::qWaitFor(
+                     [&] {
+                       return follower->playbackState() !=
+                              QMediaPlayer::PlayingState;
+                     },
+                     5000),
+                 "follower played through a lane gap"))
+      return false;
+    playback.setAudioClips({});
+    playback.setPosition(500);
+    if (!require(follower->playbackState() != QMediaPlayer::PlayingState,
+                 "cleared lane kept playing"))
+      return false;
+    playback.setAudioClips(scored.audioClips);
+    if (!require(QTest::qWaitFor(
+                     [&] {
+                       return follower->playbackState() ==
+                              QMediaPlayer::PlayingState;
+                     },
+                     5000),
+                 "pushed lane did not resume"))
+      return false;
+    playback.pause();
+    playback.setProject(StudioProject{});
+  }
 
   QTemporaryDir scratch;
   StudioProject mixed;

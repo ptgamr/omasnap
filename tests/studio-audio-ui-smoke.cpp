@@ -173,6 +173,17 @@ bool runStudioAudioUiChecks(const QString &source, QString &error) {
   if (!require(timeline->selectedAudioClip() == 12,
                "move lost the audio selection"))
     return false;
+  // The reordered lane reaches playback: 500 ms is the epic now, not the
+  // song the stale order would play there.
+  player->setPosition(500);
+  auto *follower = player->audioPlayerForTest();
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     return follower->source().toLocalFile() == epic;
+                   },
+                   5000),
+               "reordered lane did not reach playback"))
+    return false;
   // Split the long sound at the playhead, then delete the tail.
   player->setPosition(3000);
   QTest::keyClick(&window, Qt::Key_S);

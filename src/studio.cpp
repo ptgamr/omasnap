@@ -3558,6 +3558,7 @@ void StudioWindow::splitAtPlayhead() {
     }
     timeline_->setSelectedAudioClip(id);
     timeline_->update();
+    player_->setAudioClips(project_.audioClips);
     rememberEdit();
     setStatus(QStringLiteral("Sound split — Ctrl+Z to undo"));
     return;

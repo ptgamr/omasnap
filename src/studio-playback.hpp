@@ -43,6 +43,12 @@ public:
   [[nodiscard]] QMediaPlayer *activePlayer() const;
   /** Light music update: no decoder reload, volume applies immediately. */
   void setMusic(const StudioMusic &music);
+  /** Light audio-lane update: the follower re-resolves without reloading
+   *  video decoders. */
+  void setAudioClips(const QVector<StudioAudioClip> &clips);
+  [[nodiscard]] QMediaPlayer *audioPlayerForTest() const {
+    return audioPlayer_;
+  }
 
 signals:
   void positionChanged(qint64 milliseconds);
@@ -78,6 +84,9 @@ private:
   void updateAudio();
   /** Reloads the song only when its path changed; silent when missing. */
   void syncMusicSource();
+  /** Re-resolves the lane span under the clock; reloads and seeks only on
+   *  change or drift, so scrubbing never stutters a settled song. */
+  void syncAudio();
   void refreshComposition();
   void synchronize();
   [[nodiscard]] const StudioSpan *nextSpan() const;
@@ -96,6 +105,14 @@ private:
   QAudioOutput *musicAudio_ = nullptr;
   QString musicPath_;
   bool musicFailed_ = false;
+  // The audio lane follower: one more dumb player on the active lane span,
+  // silent in gaps and on failure, retimed per span like the scene slots.
+  QMediaPlayer *audioPlayer_ = nullptr;
+  QAudioOutput *audioAudio_ = nullptr;
+  QString audioPath_;
+  quint64 audioClipId_ = 0;
+  bool audioFailed_ = false;
+  float audioGain_ = 0;
   QTimer timer_;
   QElapsedTimer frameClock_;
   QElapsedTimer seekClock_;

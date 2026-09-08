@@ -377,6 +377,7 @@ void StudioWindow::moveAudioClip(quint64 id, quint64 before) {
     return;
   }
   timeline_->update();
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
 }
 
@@ -394,6 +395,7 @@ void StudioWindow::duplicateAudioClip() {
   }
   timeline_->setSelectedAudioClip(id);
   timeline_->update();
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
   setStatus(QStringLiteral("Sound duplicated — Ctrl+Z to undo"));
 }
@@ -411,6 +413,7 @@ void StudioWindow::trimAudioClip(quint64 id, qint64 inMs, qint64 outMs) {
   }
   timeline_->setSelectedAudioClip(id);
   timeline_->update();
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
   refreshControls();
 }
@@ -428,6 +431,7 @@ void StudioWindow::deleteAudioClip() {
   }
   timeline_->setSelectedAudioClip(0);
   timeline_->update();
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
   refreshControls();
   setStatus(QStringLiteral("Sound deleted — Ctrl+Z to undo"));
@@ -446,6 +450,7 @@ void StudioWindow::changeAudioGain() {
       setStatus(error, true);
     return;
   }
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
   refreshControls();
 }
@@ -466,6 +471,7 @@ void StudioWindow::changeAudioSpeed() {
     return;
   }
   timeline_->update();
+  player_->setAudioClips(project_.audioClips);
   rememberEdit();
   refreshControls();
 }
