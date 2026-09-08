@@ -214,8 +214,6 @@ private:
   void seekTo(qint64 milliseconds);
   void stepFrame(int direction);
   void extendRangeSelection(int direction);
-  /** Temporary xcb diagnostic: stderr geometry of the inspector column. */
-  void dumpLayoutDebug();
   void beginEdit();
   void endEdit();
   void rememberEdit();

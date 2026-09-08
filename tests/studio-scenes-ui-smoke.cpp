@@ -95,8 +95,8 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     return false;
   timeline->setSelectedClip(2);
   QTest::keyClick(&window, Qt::Key_D, Qt::ControlModifier);
-  // Layouts settle asynchronously: the tweak card must end up paired with
-  // the timeline row at the column bottom.
+  // Layouts settle asynchronously: the tweak card must end up hugging its
+  // content at the column bottom, paired with the timeline row.
   QTest::qWait(200);
   {
     auto *inspector = window.findChild<QWidget *>("studioInspector");
@@ -105,7 +105,8 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
       return false;
     const int bottom = clipCard->y() + clipCard->height();
     if (!require(bottom <= inspector->height() &&
-                    bottom >= inspector->height() - 18 - 8,
+                    bottom >= inspector->height() - 18 - 8 &&
+                    clipCard->height() <= clipCard->sizeHint().height() + 8,
                  "tweak card is not bottom-aligned with the timeline row"))
       return false;
   }
