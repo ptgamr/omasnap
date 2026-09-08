@@ -1,6 +1,7 @@
 /** @fileoverview Timestamp-aware, non-destructive multi-source export. */
 #include "studio-composition.hpp"
 
+#include <QFileInfo>
 #include <QtMath>
 
 #include <cmath>
@@ -158,6 +159,18 @@ QStringList studioCompositionArguments(const StudioProject &project,
   if (wallpaper)
     args << QStringLiteral("-loop") << QStringLiteral("1") << QStringLiteral("-i")
          << project.style.wallpaperPath;
+  // Music rides as one more audio input from composition zero, like the
+  // scenes. A missing file fails here with guidance, the same way a
+  // missing scene source does.
+  const bool scored = !project.music.path.isEmpty();
+  if (scored) {
+    if (!QFileInfo::exists(project.music.path)) {
+      error = QStringLiteral(
+          "Background music is missing. Remove it or pick the file again.");
+      return {};
+    }
+    args << QStringLiteral("-i") << project.music.path;
+  }
   if (!transitions) {
     // Leave the timestamp-aware hard-cut path alone: it does not need a
     // per-scene CFR conversion, RGB intermediate, or overlapping decoders.
@@ -342,9 +355,25 @@ QStringList studioCompositionArguments(const StudioProject &project,
   } else {
     graph << video + QStringLiteral(",format=yuv420p[video]");
   }
+  QString soundLabel = QStringLiteral("[sound]");
+  if (scored) {
+    // Trimmed to the composition, padded with silence when short, then
+    // summed unnormalized: amix would otherwise divide both beds.
+    const QString musicIndex =
+        QString::number(spans.size() + (wallpaper ? 1 : 0));
+    graph << QStringLiteral("[%1:a:0]atrim=duration=%2,aresample=48000:"
+                            "async=1:first_pts=0,aformat=sample_fmts=fltp:"
+                            "channel_layouts=stereo,volume=%3,apad,"
+                            "atrim=duration=%2,asetpts=N/SR/TB[music]")
+                 .arg(musicIndex, seconds(duration),
+                      QString::number(project.music.volume / 100.0, 'g', 6));
+    graph << QStringLiteral("[sound][music]amix=inputs=2:duration=first:"
+                            "dropout_transition=0:normalize=0[mixed]");
+    soundLabel = QStringLiteral("[mixed]");
+  }
   graph << QStringLiteral(
-               "[sound]atrim=start=%1:end=%2,asetpts=PTS-STARTPTS[audio]")
-               .arg(seconds(exportIn), seconds(exportOut));
+               "%1atrim=start=%2:end=%3,asetpts=PTS-STARTPTS[audio]")
+               .arg(soundLabel, seconds(exportIn), seconds(exportOut));
   args << QStringLiteral("-filter_complex") << graph.join(QLatin1Char(';'))
        << QStringLiteral("-map") << QStringLiteral("[video]")
        << QStringLiteral("-map") << QStringLiteral("[audio]")

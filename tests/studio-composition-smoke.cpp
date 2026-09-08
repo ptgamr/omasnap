@@ -4,6 +4,7 @@
 #include "studio-preview.hpp"
 
 #include <QImage>
+#include <QFile>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
@@ -607,6 +608,52 @@ bool runStudioCompositionChecks(QString &error) {
                "empty composition was exportable"))
     return false;
   error.clear();
+  // Music graph shape is pure: no decoder runs to spell it.
+  {
+    QTemporaryDir shapeScratch;
+    if (!require(shapeScratch.isValid(), "could not create music scratch"))
+      return false;
+    const QString song = shapeScratch.filePath(QStringLiteral("song.mp3"));
+    QFile staged(song);
+    if (!require(staged.open(QIODevice::WriteOnly),
+                 "could not stage music fixture"))
+      return false;
+    staged.close();
+    StudioProject scored;
+    scored.canvas = {320, 180};
+    StudioSource shapeSource;
+    shapeSource.size = {320, 180};
+    shapeSource.fpsNumerator = 30;
+    shapeSource.durationMs = 2000;
+    scored.assets.push_back(
+        {1, QStringLiteral("scene.mp4"), shapeSource});
+    scored.clips.push_back({1, 1, 0, 2000, 1});
+    scored.music = {song, 20, 2000};
+    QString shapeError;
+    const QStringList scoredArgs =
+        studioCompositionArguments(scored, "scored.mp4", shapeError);
+    const QString spelled = scoredArgs.join(QLatin1Char(' '));
+    if (!require(!scoredArgs.isEmpty() && shapeError.isEmpty() &&
+                     spelled.contains(QStringLiteral("amix")) &&
+                     spelled.contains(QStringLiteral("volume=0.2")) &&
+                     scoredArgs.contains(song),
+                 "music mix graph is wrong"))
+      return false;
+    scored.music = {shapeScratch.filePath(QStringLiteral("missing.mp3")), 20,
+                    2000};
+    if (!require(studioCompositionArguments(scored, "scored.mp4", shapeError)
+                         .isEmpty() &&
+                     shapeError.contains(QStringLiteral("missing")),
+                 "missing music did not fail loudly"))
+      return false;
+    scored.music = {};
+    const QStringList silentArgs =
+        studioCompositionArguments(scored, "scored.mp4", shapeError);
+    if (!require(!silentArgs.isEmpty() && shapeError.isEmpty() &&
+                     !silentArgs.join(QLatin1Char(' ')).contains("amix"),
+                 "silent project grew a mix"))
+      return false;
+  }
   const QString ffmpeg =
       QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
   const QString ffprobe =
@@ -702,6 +749,28 @@ bool runStudioCompositionChecks(QString &error) {
                    audioEnergy(output, 3.0) > 0.01,
                "retimed audio, silent clip, or project duration differed"))
     return false;
+  // Background music mixes under the scenes: the silent second scene
+  // (0.5–1.5 s) gains energy while duration and timing hold.
+  const QString songPath = scratch.filePath(QStringLiteral("song.m4a"));
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=48000", "-t", "5", "-c:a", "aac",
+            songPath},
+           output, error))
+    return false;
+  project.music = {songPath, 100, 5000};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(std::abs(output.size() / 96000.0 - 4.0) < 0.04 &&
+                   audioEnergy(output, 1.0) > 0.05,
+               "background music did not reach the silent scene"))
+    return false;
+  project.music = {};
   // Fractional frame clip lengths must not accumulate a per-scene rounding
   // error. Audio anchors exact scene milliseconds before one final CFR pass.
   project.clips.clear();
