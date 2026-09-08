@@ -37,6 +37,7 @@ struct StudioThumbnail {
 /** Waveform buckets for one audio asset, decoded on a worker. */
 struct StudioAudioPeakResult {
   quint64 assetId = 0;
+  QString path;
   QVector<QPair<qint16, qint16>> peaks;
 };
 
@@ -69,6 +70,9 @@ public:
   [[nodiscard]] QVector<StudioThumbnail> missingThumbnails() const;
   void cacheAudioPeaks(quint64 assetId,
                        QVector<QPair<qint16, qint16>> peaks);
+  /** Forgets one asset's peaks, cached or failed, so a relinked file
+   *  decodes fresh instead of inheriting the old path's result. */
+  void dropAudioPeaks(quint64 assetId);
   /** Audio asset ids on the lane still waiting for a waveform. */
   [[nodiscard]] QVector<quint64> missingAudioPeaks() const;
   /** Cached buckets for an asset, or nullptr. */
@@ -398,6 +402,7 @@ private:
   QVector<quint64> missingAssets_;
   QSet<QString> missingPaths_;
   bool relinking_ = false;
+  quint64 relinkingAssetId_ = 0;
   class QPushButton *relinkButton_ = nullptr;
   QFutureWatcher<StudioProjectLoad> relinkWatcher_;
   class QLabel *statusLabel_ = nullptr;

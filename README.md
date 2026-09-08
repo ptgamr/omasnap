@@ -307,14 +307,22 @@ composition, trimmed to fit, with its own level. It previews with the mute
 switch, exports mixed under the scenes, and every change is undoable. A
 missing file fails the export with guidance instead of silent audio.
 
+**Audio lane.** **Add media** (`Ctrl+O`) and file drops take audio as well
+as video: songs land as blocks on the audio lane under the zoom lane, with
+waveforms, while scenes import exactly as before. Drag a block by its body
+to reorder, by its edges to trim, select and press `S` to split or `Delete`
+to remove, `Ctrl+D` to duplicate; the Clip inspector tunes gain and speed.
+The lane mixes under scenes and music on export, previews in sync, and
+every edit is undoable. Missing audio relinks like any other source.
+
 **Projects.** Studio stores source assets, ordered clip instances, source ranges,
 speed, project-time zoom cues, and canvas settings in one non-destructive document.
 Open a video or its `.omasnap.json` project directly. Missing sources expose
 **Relink media**; empty projects remain valid. The first source defines the output
 canvas (rounded down to even dimensions) and FPS; other sources fit that canvas.
-Use **Add scenes** in the Clip inspector or `Ctrl+O` to import more recordings.
+Use **Add media** (`Ctrl+O`) to import more recordings and songs.
 Drop local video files onto a marked timeline boundary to insert, or elsewhere
-to append. An invalid import batch leaves the project unchanged.
+to append; audio files always append as sounds. An invalid import batch leaves the project unchanged.
 
 **Arrange scenes.** Click and drag the video lane or ruler
 to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.

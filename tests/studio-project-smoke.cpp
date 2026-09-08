@@ -1092,6 +1092,35 @@ bool runStudioProjectChecks(QString &error) {
                    studioAudioComposition(paced).back().endMs == 1333,
                QStringLiteral("Audio split shifted downstream sounds")))
       return false;
+    // Appending sounds lands them at the lane end, atomically or not at
+    // all; an empty batch is an exact no-op.
+    StudioProject appended = paced;
+    StudioSource secondSong = song;
+    if (!check(studioAppendAudioClips(
+                   appended,
+                   {{2, QStringLiteral("second.mp3"), secondSong}},
+                   {{31, 2, 0, 2000, 1.0, 80}}, audioError) &&
+                   audioError.isEmpty() && appended.assets.size() == 2 &&
+                   appended.audioClips.size() == 3 &&
+                   studioAudioComposition(appended).back().endMs == 3333,
+               QStringLiteral("Audio append did not land at the lane end")))
+      return false;
+    StudioProject untouched = paced;
+    if (!check(!studioAppendAudioClips(untouched, {}, {}, audioError) &&
+                   audioError.isEmpty() && untouched == paced &&
+                   !studioAppendAudioClips(untouched,
+                                           {{2, QStringLiteral("x.mp3"),
+                                             secondSong}},
+                                           {}, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio append emptiness is wrong")))
+      return false;
+    // The lane caps with everything else at a thousand clips.
+    for (int i = 0; i < 1000; ++i)
+      paced.audioClips.push_back({1000 + i, 1, 0, 10, 1.0, 100});
+    if (!check(!validateStudioProject(paced).isEmpty(),
+               QStringLiteral("Overfull audio lane accepted")))
+      return false;
   }
   {
     // Audio lane: audio-only assets validate, clips lay end to end with

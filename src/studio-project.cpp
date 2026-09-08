@@ -1144,6 +1144,27 @@ bool studioInsertScenes(StudioProject &p, const QVector<StudioAsset> &assets,
     edited.clips.insert(index++, clip);
   return finishSceneChange(p, std::move(edited), error);
 }
+bool studioAppendAudioClips(StudioProject &p,
+                            const QVector<StudioAsset> &newAssets,
+                            const QVector<StudioAudioClip> &newClips,
+                            QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  if (newClips.isEmpty()) {
+    if (!newAssets.isEmpty())
+      error = QStringLiteral("Import must contain at least one sound.");
+    return false;
+  }
+  auto edited = p;
+  edited.assets.append(newAssets);
+  edited.audioClips.append(newClips);
+  error = validateStudioProject(edited);
+  if (!error.isEmpty())
+    return false;
+  p = std::move(edited);
+  return true;
+}
 bool studioMoveClip(StudioProject &p, quint64 id, quint64 beforeId,
                     QString &error) {
   error = validateStudioProject(p);

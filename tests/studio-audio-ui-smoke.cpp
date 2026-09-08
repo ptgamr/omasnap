@@ -3,10 +3,19 @@
 #include "studio-playback.hpp"
 #include "studio-project.hpp"
 #include "studio.hpp"
+#include <QApplication>
 #include <QComboBox>
 #include <QDataStream>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFile>
+#include <QFileDialog>
 #include <QLabel>
+#include <QMimeData>
+#include <QProcess>
+#include <QPushButton>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QTest>
@@ -306,6 +315,259 @@ bool runStudioAudioUiChecks(const QString &source, QString &error) {
                "empty lane click kept the audio selection"))
     return false;
   shortWindow.close();
-  return require(QTest::qWaitFor([&] { return !shortWindow.isVisible(); }, 7000),
-                 "short audio project did not close");
+  if (!require(QTest::qWaitFor([&] { return !shortWindow.isVisible(); }, 7000),
+               "short audio project did not close"))
+    return false;
+  // Unified import: audio drops land on the lane, mixed drops split by
+  // probe, and junk changes nothing.
+  StudioWindow importWindow(base, nullptr, scratch.filePath("palette.toml"));
+  importWindow.show();
+  auto *importPlayer = importWindow.findChild<StudioPlayback *>();
+  auto *importTimeline = importWindow.findChild<StudioTimeline *>();
+  if (!require(importTimeline &&
+                   QTest::qWaitFor(
+                       [&] { return importPlayer->duration() == 6000; }, 6000),
+               "import window did not load"))
+    return false;
+  const auto dropFiles = [&](const QStringList &paths) {
+    QMimeData mime;
+    QList<QUrl> urls;
+    for (const auto &path : paths)
+      urls.push_back(QUrl::fromLocalFile(path));
+    mime.setUrls(urls);
+    const QPoint point(100, 100);
+    QDragEnterEvent enter(point, Qt::CopyAction, &mime, Qt::LeftButton,
+                          Qt::NoModifier);
+    QApplication::sendEvent(&importWindow, &enter);
+    if (!enter.isAccepted())
+      return false;
+    QDropEvent drop(point, Qt::CopyAction, &mime, Qt::LeftButton,
+                    Qt::NoModifier);
+    QApplication::sendEvent(&importWindow, &drop);
+    return drop.isAccepted();
+  };
+  const auto laneSelects = [&](qint64 ms) {
+    const QPoint at(64 + qRound((importTimeline->width() - 80) * ms / 6000.0),
+                    147);
+    QTest::mouseClick(importTimeline, Qt::LeftButton, Qt::NoModifier, at);
+    return importTimeline->selectedAudioClip();
+  };
+  if (!require(dropFiles({song}), "audio drop was rejected") ||
+          !require(QTest::qWaitFor(
+                       [&] {
+                         return importTimeline->audioPeaksFor(2) != nullptr;
+                       },
+                       10000),
+                   "dropped audio never decoded") ||
+          !require(laneSelects(1000) != 0, "dropped audio did not land"))
+    return false;
+  // The picker offers audio alongside video.
+  QTest::keyClick(&importWindow, Qt::Key_O, Qt::ControlModifier);
+  auto *mediaPicker = importWindow.findChild<QFileDialog *>();
+  if (!require(mediaPicker && mediaPicker->isVisible(),
+               "Ctrl+O did not open Add media"))
+    return false;
+  if (!require(mediaPicker->nameFilters()
+                   .join(QStringLiteral(" "))
+                   .contains(QStringLiteral("mp3")),
+               "media picker hides audio"))
+    return false;
+  mediaPicker->reject();
+  QTest::qWait(50);
+  const QString second = scratch.filePath(QStringLiteral("second.mp4"));
+  const QString song2 = scratch.filePath(QStringLiteral("song2.wav"));
+  if (!require(QFile::copy(base, second) && writeSquareWav(song2, 1, 1),
+               "could not stage mixed fixtures"))
+    return false;
+  if (!require(dropFiles({second, song2}), "mixed drop was rejected") ||
+          !require(QTest::qWaitFor(
+                       [&] { return importPlayer->duration() == 12000; },
+                       10000),
+                   "mixed drop did not append the scene"))
+    return false;
+  const QPoint mixedAt(
+      64 + qRound((importTimeline->width() - 80) * 2500 / 12000.0), 147);
+  QTest::mouseClick(importTimeline, Qt::LeftButton, Qt::NoModifier, mixedAt);
+  if (!require(importTimeline->selectedAudioClip() != 0,
+               "mixed drop did not append the sound"))
+    return false;
+  // Cover art is not a picture to edit: the probe keeps songs with
+  // pictures on the lane, and the drop adds no scene.
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  if (!require(!ffmpeg.isEmpty(), "ffmpeg missing for cover fixture"))
+    return false;
+  const QString cover = scratch.filePath(QStringLiteral("cover.mp3"));
+  {
+    QProcess picture;
+    picture.start(
+        ffmpeg,
+        {QStringLiteral("-v"), QStringLiteral("error"), QStringLiteral("-y"),
+         QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+         QStringLiteral("sine=frequency=880:sample_rate=48000:d=2"),
+         QStringLiteral("-f"), QStringLiteral("lavfi"), QStringLiteral("-i"),
+         QStringLiteral("color=red:s=64x64:d=1"), QStringLiteral("-map"),
+         QStringLiteral("0:a:0"), QStringLiteral("-map"),
+         QStringLiteral("1:v:0"), QStringLiteral("-c:a"),
+         QStringLiteral("libmp3lame"), QStringLiteral("-c:v"),
+         QStringLiteral("mjpeg"), QStringLiteral("-disposition:v:1"),
+         QStringLiteral("attached_pic"), QStringLiteral("-id3v2_version"),
+         QStringLiteral("3"), cover});
+    if (!require(picture.waitForFinished(30000) &&
+                     picture.exitStatus() == QProcess::NormalExit &&
+                     picture.exitCode() == 0,
+                 "could not stage cover-art fixture"))
+      return false;
+  }
+  const StudioSource coverSource = probeStudioSource(cover);
+  if (!require(!coverSource.usable() && coverSource.usableAudio(),
+               "cover art probed as a video source"))
+    return false;
+  // Asset 5: base, song, second, song2 took 1..4.
+  if (!require(dropFiles({cover}), "cover-art drop was rejected") ||
+          !require(QTest::qWaitFor(
+                       [&] {
+                         return importTimeline->audioPeaksFor(5) != nullptr;
+                       },
+                       10000),
+                   "cover-art song never decoded"))
+    return false;
+  if (!require(importPlayer->duration() == 12000,
+               "cover art added a scene"))
+    return false;
+  const QPoint coverAt(
+      64 + qRound((importTimeline->width() - 80) * 4000 / 12000.0), 147);
+  QTest::mouseClick(importTimeline, Qt::LeftButton, Qt::NoModifier, coverAt);
+  if (!require(importTimeline->selectedAudioClip() != 0,
+               "cover-art song did not land on the lane"))
+    return false;
+  // Junk changes nothing but the status line.
+  const QString junk = scratch.filePath(QStringLiteral("note.txt"));
+  {
+    QFile note(junk);
+    if (!require(note.open(QIODevice::WriteOnly) && note.write("hi") == 2,
+                 "could not stage junk fixture"))
+      return false;
+  }
+  auto *addMedia = importWindow.findChild<QPushButton *>(QStringLiteral("addScenes"));
+  auto *importStatus =
+      importWindow.findChild<QLabel *>(QStringLiteral("studioStatus"));
+  if (!require(addMedia && importStatus, "import controls are missing"))
+    return false;
+  if (!require(dropFiles({junk}), "junk drop was rejected") ||
+          !require(QTest::qWaitFor([&] { return addMedia->isEnabled(); },
+                                   10000) &&
+                       importPlayer->duration() == 12000 &&
+                       importStatus->text().contains(
+                           QStringLiteral("supported")),
+                   "junk drop changed the project"))
+    return false;
+  // Relinking an audio asset recovers its lane without touching scenes.
+  StudioProject lost;
+  lost.assets = {{1, base, probeStudioSource(base)}};
+  StudioSource goneSource;
+  goneSource.durationMs = 2000;
+  goneSource.audioStreams = 1;
+  lost.assets.push_back(
+      {2, scratch.filePath(QStringLiteral("gone.wav")), goneSource});
+  lost.canvas = {320, 180};
+  lost.clips = {{1, 1, 0, 6000, 1}};
+  lost.audioClips = {{11, 2, 0, 2000, 1.0, 100}};
+  const QString lostDocument =
+      scratch.filePath(QStringLiteral("lost-audio.omasnap.json"));
+  if (!saveStudioProject(lostDocument, lost).isEmpty())
+    return false;
+  StudioWindow lostWindow(lostDocument, nullptr,
+                          scratch.filePath("palette.toml"));
+  lostWindow.show();
+  QPushButton *relink = nullptr;
+  for (auto *button : lostWindow.findChildren<QPushButton *>())
+    if (button->text() == QStringLiteral("Relink media"))
+      relink = button;
+  if (!require(relink && QTest::qWaitFor([&] { return relink->isVisible(); },
+                                         7000),
+               "missing audio did not offer relink"))
+    return false;
+  relink->click();
+  auto *relinkDialog = lostWindow.findChild<QFileDialog *>();
+  if (!require(relinkDialog, "relink picker did not open"))
+    return false;
+  relinkDialog->fileSelected(song);
+  auto *lostTimeline = lostWindow.findChild<StudioTimeline *>();
+  if (!require(
+          lostTimeline &&
+              QTest::qWaitFor(
+                  [&] {
+                    const auto *peaks = lostTimeline->audioPeaksFor(2);
+                    return !relink->isVisible() && peaks != nullptr &&
+                           !peaks->isEmpty();
+                  },
+                  10000),
+          "audio relink did not recover the lane"))
+    return false;
+  lostWindow.close();
+  importWindow.close();
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     return !lostWindow.isVisible() &&
+                            !importWindow.isVisible();
+                   },
+                   7000),
+               "import windows did not close"))
+    return false;
+  // A full video lane never blocks sounds: decoupled caps judge actual
+  // additions, not the batch size.
+  StudioProject crowded;
+  crowded.assets = {{1, base, probeStudioSource(base)}};
+  crowded.canvas = {320, 180};
+  for (int i = 0; i < 1000; ++i)
+    crowded.clips.push_back(
+        {static_cast<quint64>(i + 1), 1, 0, 6, 1.0});
+  const QString crowdedDocument =
+      scratch.filePath(QStringLiteral("crowded.omasnap.json"));
+  if (!saveStudioProject(crowdedDocument, crowded).isEmpty())
+    return false;
+  StudioWindow crowdedWindow(crowdedDocument, nullptr,
+                             scratch.filePath("palette.toml"));
+  crowdedWindow.show();
+  auto *crowdedPlayer = crowdedWindow.findChild<StudioPlayback *>();
+  auto *crowdedTimeline = crowdedWindow.findChild<StudioTimeline *>();
+  if (!require(crowdedTimeline &&
+                   QTest::qWaitFor(
+                       [&] { return crowdedPlayer->duration() == 6000; },
+                       6000),
+               "crowded project did not load"))
+    return false;
+  const QPoint crowdedDrop(crowdedWindow.width() / 2, 100);
+  {
+    QMimeData mime;
+    mime.setUrls({QUrl::fromLocalFile(song)});
+    QDragEnterEvent enter(crowdedDrop, Qt::CopyAction, &mime, Qt::LeftButton,
+                          Qt::NoModifier);
+    QApplication::sendEvent(&crowdedWindow, &enter);
+    if (!require(enter.isAccepted(), "crowded drop was rejected"))
+      return false;
+    QDropEvent drop(crowdedDrop, Qt::CopyAction, &mime, Qt::LeftButton,
+                    Qt::NoModifier);
+    QApplication::sendEvent(&crowdedWindow, &drop);
+  }
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     return crowdedTimeline->audioPeaksFor(2) != nullptr;
+                   },
+                   10000),
+               "sound was refused by a full video lane"))
+    return false;
+  const QPoint crowdedAt(
+      64 + qRound((crowdedTimeline->width() - 80) * 1000 / 6000.0), 147);
+  QTest::mouseClick(crowdedTimeline, Qt::LeftButton, Qt::NoModifier,
+                    crowdedAt);
+  if (!require(crowdedTimeline->selectedAudioClip() != 0 &&
+                   crowdedPlayer->duration() == 6000,
+               "sound did not land beside a thousand scenes"))
+    return false;
+  crowdedWindow.close();
+  return require(QTest::qWaitFor(
+                     [&] { return !crowdedWindow.isVisible(); }, 7000),
+                 "crowded project did not close");
 }

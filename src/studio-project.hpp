@@ -235,9 +235,14 @@ struct StudioCutResult {
  * shorter than kMinCueMs cannot form a cue. Exceeding the cue cap is an error,
  * not silent truncation. False with empty error means an exact no-op. */
 [[nodiscard]] bool studioInsertScenes(StudioProject &,
-                                      const QVector<StudioAsset> &newAssets,
-                                      const QVector<StudioClip> &newClips,
-                                      qsizetype insertionIndex, QString &error);
+                                       const QVector<StudioAsset> &newAssets,
+                                       const QVector<StudioClip> &newClips,
+                                       qsizetype insertionIndex, QString &error);
+/** Appends sounds to the lane end. The lane carries no transitions or
+ *  review range, so this validates and swaps directly. */
+[[nodiscard]] bool studioAppendAudioClips(
+    StudioProject &, const QVector<StudioAsset> &newAssets,
+    const QVector<StudioAudioClip> &newClips, QString &error);
 /** beforeClipId == 0 appends; otherwise move immediately before that scene. */
 [[nodiscard]] bool studioMoveClip(StudioProject &, quint64 clipId,
                                   quint64 beforeClipId, QString &error);

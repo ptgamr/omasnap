@@ -128,11 +128,25 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
               return;
             }
             const auto before = project_.transitions;
+            const qsizetype addedScenes =
+                result.project.clips.size() - project_.clips.size();
+            const qsizetype addedSounds =
+                result.project.audioClips.size() - project_.audioClips.size();
             project_ = result.project;
             finishCompositionEdit(player_->position());
-            setStatus(QStringLiteral(
-                          "Scenes added — drag to arrange; Ctrl+Z to undo") +
-                      transitionAdjustment(before));
+            QString added;
+            if (addedScenes > 0 && addedSounds > 0)
+              added = QStringLiteral("%1 scenes and %2 sounds added — drag "
+                                     "to arrange; Ctrl+Z to undo")
+                          .arg(addedScenes)
+                          .arg(addedSounds);
+            else if (addedSounds > 0)
+              added = QStringLiteral(
+                  "Sounds added — drag to arrange; Ctrl+Z to undo");
+            else
+              added = QStringLiteral(
+                  "Scenes added — drag to arrange; Ctrl+Z to undo");
+            setStatus(added + transitionAdjustment(before));
           });
 }
 
@@ -224,12 +238,16 @@ void StudioWindow::refreshSceneControls() {
 void StudioWindow::chooseScenes() {
   if (!scenesEditable() || editGesture_)
     return;
-  auto *dialog = new QFileDialog(this, QStringLiteral("Add scenes"));
+  auto *dialog = new QFileDialog(this, QStringLiteral("Add media"));
   dialog->setAttribute(Qt::WA_DeleteOnClose);
   dialog->setOption(QFileDialog::DontUseNativeDialog);
   dialog->setFileMode(QFileDialog::ExistingFiles);
   dialog->setNameFilters(
-      {QStringLiteral("Video (*.mp4 *.mkv *.mov *.webm *.m4v *.avi)"),
+      {QStringLiteral("Media (*.mp4 *.mkv *.mov *.webm *.m4v *.avi *.mp3 "
+                      "*.m4a *.aac *.wav *.ogg *.opus *.flac)"),
+       QStringLiteral("Video (*.mp4 *.mkv *.mov *.webm *.m4v *.avi)"),
+       QStringLiteral(
+           "Audio (*.mp3 *.m4a *.aac *.wav *.ogg *.opus *.flac)"),
        QStringLiteral("All files (*)")});
   connect(dialog, &QFileDialog::filesSelected, this,
           [this](const QStringList &paths) { importScenes(paths); });
@@ -239,45 +257,62 @@ void StudioWindow::chooseScenes() {
 void StudioWindow::importScenes(const QStringList &paths, quint64 before) {
   if (!scenesEditable() || editGesture_ || paths.isEmpty())
     return;
-  if (paths.size() + project_.clips.size() > 1000) {
-    setStatus(QStringLiteral("A project supports at most 1000 scenes"), true);
+  // More files than both lanes hold together cannot fit however they
+  // split; the per-lane caps below judge the actual additions.
+  if (paths.size() > 2000) {
+    setStatus(QStringLiteral("A project supports at most 1000 scenes and "
+                             "1000 sounds"),
+              true);
     return;
   }
   captureCursor();
   player_->pause();
   importing_ = true;
   refreshControls();
-  setStatus(QStringLiteral("Reading %1 scene(s)…").arg(paths.size()));
+  setStatus(QStringLiteral("Reading %1 file(s)…").arg(paths.size()));
   const auto snapshot = project_;
-  const quint64 assetBase = nextAssetId_, clipBase = nextClipId_;
+  const quint64 assetBase = nextAssetId_, clipBase = nextClipId_,
+                audioBase = nextAudioClipId_;
   nextAssetId_ += paths.size();
   nextClipId_ += paths.size();
+  nextAudioClipId_ += paths.size();
   importWatcher_.setFuture(QtConcurrent::run([snapshot, paths, before,
-                                              assetBase, clipBase] {
+                                              assetBase, clipBase, audioBase] {
     StudioProjectLoad result;
     result.project = snapshot;
-    QVector<StudioAsset> assets;
+    QVector<StudioAsset> assets, audioAssets;
     QVector<StudioClip> clips;
-    for (qsizetype i = 0; i < paths.size(); ++i) {
-      if (!QFileInfo(paths[i]).isFile()) {
+    QVector<StudioAudioClip> audioClips;
+    quint64 assetCount = 0, sceneCount = 0, soundCount = 0;
+    for (const auto &path : paths) {
+      if (!QFileInfo(path).isFile()) {
         result.error =
             QStringLiteral(
                 "Cannot import %1: not a regular file. Project unchanged.")
-                .arg(QFileInfo(paths[i]).fileName());
+                .arg(QFileInfo(path).fileName());
         return result;
       }
-      const auto source = probeStudioSource(paths[i]);
-      if (!source.usable() || source.durationMs <= 0) {
+      const auto source = probeStudioSource(path);
+      const quint64 assetId = assetBase + assetCount;
+      if (source.usable() && source.durationMs > 0) {
+        assets.push_back({assetId, QFileInfo(path).absoluteFilePath(), source});
+        clips.push_back({clipBase + sceneCount++, assets.last().id, 0,
+                         source.durationMs, 1.0});
+      } else if (source.usableAudio()) {
+        audioAssets.push_back(
+            {assetId, QFileInfo(path).absoluteFilePath(), source});
+        audioClips.push_back({audioBase + soundCount++,
+                              audioAssets.last().id, 0, source.durationMs, 1.0,
+                              100});
+      } else {
         result.error =
             QStringLiteral(
-                "Cannot import %1: not a supported video. Project unchanged.")
-                .arg(QFileInfo(paths[i]).fileName());
+                "Cannot import %1: not a supported video or audio file. "
+                "Project unchanged.")
+                .arg(QFileInfo(path).fileName());
         return result;
       }
-      assets.push_back({assetBase + static_cast<quint64>(i),
-                        QFileInfo(paths[i]).absoluteFilePath(), source});
-      clips.push_back({clipBase + static_cast<quint64>(i), assets.last().id, 0,
-                       source.durationMs, 1.0});
+      ++assetCount;
     }
     qsizetype index = snapshot.clips.size();
     for (qsizetype i = 0; i < snapshot.clips.size(); ++i)
@@ -285,10 +320,35 @@ void StudioWindow::importScenes(const QStringList &paths, quint64 before) {
         index = i;
         break;
       }
-    if (!studioInsertScenes(result.project, assets, clips, index,
-                            result.error) &&
-        result.error.isEmpty())
-      result.error = QStringLiteral("No scenes were added");
+    // Each lane is capped on its actual additions: a full video lane never
+    // blocks sounds, and the shared asset list caps the batch as a whole.
+    if (clips.size() + snapshot.clips.size() > 1000) {
+      result.error = QStringLiteral(
+          "A project supports at most 1000 scenes. Project unchanged.");
+      return result;
+    }
+    if (audioClips.size() + snapshot.audioClips.size() > 1000) {
+      result.error = QStringLiteral(
+          "A project supports at most 1000 sounds. Project unchanged.");
+      return result;
+    }
+    if (assets.size() + audioAssets.size() + snapshot.assets.size() > 1000) {
+      result.error = QStringLiteral(
+          "A project supports at most 1000 sources. Project unchanged.");
+      return result;
+    }
+    if (!clips.isEmpty()) {
+      if (!studioInsertScenes(result.project, assets, clips, index,
+                              result.error) &&
+          result.error.isEmpty())
+        result.error = QStringLiteral("No scenes were added");
+    }
+    if (!audioClips.isEmpty() && result.error.isEmpty()) {
+      if (!studioAppendAudioClips(result.project, audioAssets, audioClips,
+                                  result.error) &&
+          result.error.isEmpty())
+        result.error = QStringLiteral("No sounds were added");
+    }
     return result;
   }));
 }

@@ -331,6 +331,12 @@ StudioSource probeStudioSource(const QString &path) {
       ++media.audioStreams;
       continue;
     }
+    // Cover art rides as a video stream; it is not a picture to edit.
+    if (stream.value(QStringLiteral("disposition"))
+            .toObject()
+            .value(QStringLiteral("attached_pic"))
+            .toInt() == 1)
+      continue;
     if (kind != QStringLiteral("video") || foundVideo)
       continue;
     foundVideo = true;
@@ -879,7 +885,16 @@ void StudioTimeline::cacheAudioPeaks(
   // into the missing set and the refresh chain always terminates.
   if (audioPeaks_.size() >= 1024)
     audioPeaks_.removeFirst();
-  audioPeaks_.push_back({assetId, std::move(peaks)});
+  audioPeaks_.push_back({assetId, {}, std::move(peaks)});
+  update();
+}
+
+void StudioTimeline::dropAudioPeaks(quint64 assetId) {
+  for (qsizetype i = 0; i < audioPeaks_.size(); ++i)
+    if (audioPeaks_[i].assetId == assetId) {
+      audioPeaks_.removeAt(i);
+      break;
+    }
   update();
 }
 
@@ -1602,10 +1617,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
              QStringLiteral("Show / hide inspector · Ctrl+\\"));
   headerLayout->addWidget(help);
   headerLayout->addWidget(inspectorToggle);
-  importButton_ = new QPushButton(QStringLiteral("Add scenes"), header);
+  importButton_ = new QPushButton(QStringLiteral("Add media"), header);
   importButton_->setObjectName(QStringLiteral("addScenes"));
   importButton_->setToolTip(
-      QStringLiteral("Import video files · Ctrl+O · or drop files here"));
+      QStringLiteral("Import video and audio · Ctrl+O · or drop files here"));
   connect(importButton_, &QPushButton::clicked, this,
           &StudioWindow::chooseScenes);
   headerLayout->addWidget(importButton_);
@@ -1628,6 +1643,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             relinking_ = false;
             const auto result = relinkWatcher_.result();
             if (!result.error.isEmpty()) {
+              relinkingAssetId_ = 0;
               setStatus(result.error, true);
               refreshControls();
               return;
@@ -1642,6 +1658,14 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             missingAssets_ = result.missingAssets;
             applyProject();
             rememberEdit();
+            // A swapped file invalidates its cached waveform, failed or
+            // not; the in-flight result carries its path and is discarded
+            // on arrival when it no longer matches.
+            if (relinkingAssetId_ != 0) {
+              timeline_->dropAudioPeaks(relinkingAssetId_);
+              relinkingAssetId_ = 0;
+              refreshAudioPeaks();
+            }
             setStatus(
                 missingAssets_.isEmpty()
                     ? QStringLiteral("Media relinked")
@@ -2204,8 +2228,15 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   connect(&audioPeaksWatcher_,
           &QFutureWatcher<StudioAudioPeakResult>::finished, this, [this] {
             const auto result = audioPeaksWatcher_.result();
-            timeline_->cacheAudioPeaks(result.assetId, result.peaks);
             audioPeaksBusy_ = false;
+            // A relink may have swapped the file mid-decode: only the
+            // current path's peaks may land, the rest re-requests.
+            bool current = false;
+            for (const auto &asset : project_.assets)
+              if (asset.id == result.assetId && asset.path == result.path)
+                current = true;
+            if (current)
+              timeline_->cacheAudioPeaks(result.assetId, result.peaks);
             // Asset-keyed like thumbnails: an old lane's work survives edits.
             refreshAudioPeaks();
           });
@@ -3074,7 +3105,8 @@ void StudioWindow::refreshAudioPeaks() {
     return;
   audioPeaksBusy_ = true;
   audioPeaksWatcher_.setFuture(QtConcurrent::run([assetId, path] {
-    return StudioAudioPeakResult{assetId, studioDecodeAudioPeaks(path)};
+    return StudioAudioPeakResult{assetId, path,
+                                 studioDecodeAudioPeaks(path)};
   }));
 }
 
@@ -3094,25 +3126,54 @@ void StudioWindow::relinkAsset() {
         relinking_ = true;
         refreshControls();
         const quint64 id = missingAssets_.first();
+        relinkingAssetId_ = id;
         const StudioProject snapshot = project_;
         relinkWatcher_.setFuture(QtConcurrent::run([snapshot, id, path] {
           StudioProjectLoad result;
           result.project = snapshot;
           const StudioSource source = probeStudioSource(path);
-          if (!source.usable() || source.durationMs <= 0) {
+          const bool needsVideo = std::any_of(
+              snapshot.clips.cbegin(), snapshot.clips.cend(),
+              [id](const StudioClip &clip) { return clip.assetId == id; });
+          const bool needsAudio = std::any_of(
+              snapshot.audioClips.cbegin(), snapshot.audioClips.cend(),
+              [id](const StudioAudioClip &clip) { return clip.assetId == id; });
+          const auto rangesFit = [&] {
+            for (const auto &clip : snapshot.clips)
+              if (clip.assetId == id && clip.outMs > source.durationMs)
+                return false;
+            for (const auto &clip : snapshot.audioClips)
+              if (clip.assetId == id && clip.outMs > source.durationMs)
+                return false;
+            return true;
+          };
+          // Each referencing lane is checked on its own: a shared asset
+          // takes a replacement only when it stays usable for both, so a
+          // silent video cannot orphan the sounds cut from it.
+          if (needsVideo && (!source.usable() || source.durationMs <= 0)) {
             result.error =
                 QStringLiteral("Replacement is not a supported video");
+            return result;
+          }
+          if (needsAudio && !source.usableAudio()) {
+            result.error = QStringLiteral(
+                "Replacement is not a supported audio file");
+            return result;
+          }
+          if (!needsVideo && !needsAudio &&
+              (!source.usable() || source.durationMs <= 0)) {
+            result.error =
+                QStringLiteral("Replacement is not a supported video");
+            return result;
+          }
+          if (!rangesFit()) {
+            result.error = QStringLiteral(
+                "Replacement is shorter than the referenced clip ranges");
             return result;
           }
           for (auto &asset : result.project.assets) {
             if (asset.id != id)
               continue;
-            for (const auto &clip : result.project.clips)
-              if (clip.assetId == id && clip.outMs > source.durationMs) {
-                result.error = QStringLiteral(
-                    "Replacement is shorter than the referenced clip ranges");
-                return result;
-              }
             asset.path = QFileInfo(path).absoluteFilePath();
             asset.source = source;
           }
@@ -3790,7 +3851,7 @@ void StudioWindow::showShortcuts() {
                      "Delete / Backspace    Delete range, clip, or zoom\n"
                      "Ctrl + Z              Undo\n"
                      "Ctrl+Shift+Z / Ctrl+Y  Redo\n"
-                     "Ctrl+O               Add scene files\n"
+                     "Ctrl+O               Add media files\n"
                      "Ctrl+D               Duplicate selected scene\n"
                      "T                    Edit transition to next scene\n"
                      "M                     Mute / unmute preview\n"
