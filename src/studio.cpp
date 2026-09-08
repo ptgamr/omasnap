@@ -485,6 +485,7 @@ void StudioTimeline::setCuesEditable(bool editable) {
 void StudioTimeline::setSelectedCue(quint64 id) {
   if (id) {
     selectedClip_ = 0;
+    selectedTransition_ = 0;
     rangeIn_ = rangeOut_ = -1;
   }
   if (selected_ == id)
@@ -499,7 +500,7 @@ void StudioTimeline::setRange(qint64 start, qint64 end) {
   else {
     rangeIn_ = qBound<qint64>(0, qMin(start, end), duration_);
     rangeOut_ = qBound<qint64>(0, qMax(start, end), duration_);
-    selected_ = selectedClip_ = 0;
+    selected_ = selectedClip_ = selectedTransition_ = 0;
   }
   update();
   emit selectionChanged();
@@ -509,10 +510,33 @@ void StudioTimeline::setSelectedClip(quint64 id) {
   selectedClip_ = id;
   if (id) {
     selected_ = 0;
+    selectedTransition_ = 0;
     rangeIn_ = rangeOut_ = -1;
   }
   update();
   emit selectionChanged();
+}
+
+void StudioTimeline::setSelectedTransition(quint64 outgoingClipId) {
+  selectedTransition_ = outgoingClipId;
+  if (outgoingClipId) {
+    selected_ = 0;
+    selectedClip_ = 0;
+    rangeIn_ = rangeOut_ = -1;
+  }
+  update();
+  emit selectionChanged();
+}
+
+bool StudioTimeline::selectedTransitionDeletable() const {
+  if (!project_ || !selectedTransition_)
+    return false;
+  quint64 incoming = 0;
+  for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i)
+    if (project_->clips[i].id == selectedTransition_)
+      incoming = project_->clips[i + 1].id;
+  return incoming &&
+         studioTransition(*project_, selectedTransition_, incoming) != nullptr;
 }
 
 void StudioTimeline::clearSelection() {
@@ -520,7 +544,7 @@ void StudioTimeline::clearSelection() {
   draggedScenePreview_ = {};
   showInsertion(0, false);
   unsetCursor();
-  selected_ = selectedClip_ = 0;
+  selected_ = selectedClip_ = selectedTransition_ = 0;
   rangeIn_ = rangeOut_ = -1;
   update();
   emit selectionChanged();
@@ -547,7 +571,8 @@ void StudioTimeline::contextMenuEvent(QContextMenuEvent *event) {
   auto *remove = menu->addAction(QStringLiteral("Delete selection"));
   split->setEnabled(cuesEditable_ && duration_ > 0);
   remove->setEnabled(cuesEditable_ &&
-                     (rangeOut_ > rangeIn_ || selectedClip_ || selected_));
+                     (rangeOut_ > rangeIn_ || selectedClip_ || selected_ ||
+                      selectedTransitionDeletable()));
   connect(split, &QAction::triggered, this, &StudioTimeline::splitRequested);
   connect(remove, &QAction::triggered, this, &StudioTimeline::deleteRequested);
   menu->popup(event->globalPos());
@@ -794,7 +819,8 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
     const auto spans = studioComposition(*project_);
     for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i)
       if (transitionRect(spans[i], spans[i + 1]).contains(event->position())) {
-        setSelectedClip(project_->clips[i].id);
+        // The boundary itself is selected, never the outgoing clip: the
+        // editor opens on the transition, not the scene.
         emit transitionRequested(project_->clips[i].id);
         return;
       }
@@ -1091,12 +1117,33 @@ void StudioTimeline::paintEvent(QPaintEvent *) {
     for (qsizetype i = 0; i + 1 < project_->clips.size(); ++i) {
       const auto *transition =
           transitions.value(project_->clips[i].id, nullptr);
+      const bool selectedBoundary =
+          selectedTransition_ == project_->clips[i].id;
       const QRectF badge = transitionRect(spans[i], spans[i + 1]);
-      painter.fillRect(badge, transition ? chrome_.accent : chrome_.background);
-      painter.setPen(QPen(chrome_.foreground, 1));
+      if (selectedBoundary && transition) {
+        // The overlap this transition consumes, on both contributing scenes.
+        QColor overlap = chrome_.accent;
+        overlap.setAlphaF(0.25);
+        painter.fillRect(QRectF(xForTime(spans[i + 1].startMs), track.top(),
+                                xForTime(spans[i].endMs) -
+                                    xForTime(spans[i + 1].startMs),
+                                track.height()),
+                         overlap);
+      }
+      if (selectedBoundary && !transition) {
+        // A hard cut has no width: mark the seam itself.
+        painter.fillRect(QRectF(xForTime(spans[i].endMs) - 1, track.top(), 2,
+                                track.height()),
+                         chrome_.accent);
+      }
+      painter.fillRect(badge, transition || selectedBoundary
+                                 ? chrome_.accent
+                                 : chrome_.background);
+      painter.setPen(QPen(chrome_.foreground, selectedBoundary ? 2 : 1));
       painter.setBrush(Qt::NoBrush);
-      painter.drawRect(badge);
-      painter.setPen(transition ? chrome_.onAccent() : chrome_.foreground);
+      painter.drawRect(selectedBoundary ? badge.adjusted(-1, -1, 1, 1) : badge);
+      painter.setPen((transition || selectedBoundary) ? chrome_.onAccent()
+                                                      : chrome_.foreground);
       painter.drawText(badge, Qt::AlignCenter,
                        !transition ? QStringLiteral("+")
                        : transition->kind == StudioTransitionKind::Crossfade
@@ -1885,9 +1932,10 @@ void StudioWindow::captureCursor() {
     return;
   if (pendingSeek_ >= 0)
     seekTo(pendingSeek_);
-  history_.setCursor(timeline_->selectedClip(), timeline_->selectedCue(),
-                     timeline_->rangeIn(), timeline_->rangeOut(),
-                     player_->position());
+  history_.setCursor(timeline_->selectedClip(),
+                     timeline_->selectedTransition(),
+                     timeline_->selectedCue(), timeline_->rangeIn(),
+                     timeline_->rangeOut(), player_->position());
 }
 
 void StudioWindow::beginEdit() {
@@ -1923,6 +1971,7 @@ StudioEditState StudioWindow::editState() const {
   state.project = project_;
   state.selectedCue = timeline_->selectedCue();
   state.selectedClip = timeline_->selectedClip();
+  state.selectedTransition = timeline_->selectedTransition();
   state.rangeIn = timeline_->rangeIn();
   state.rangeOut = timeline_->rangeOut();
   state.positionMs = player_->position();
@@ -1964,6 +2013,7 @@ void StudioWindow::restoreEdit() {
   timeline_->setSelectedClip(state.selectedClip);
   if (state.rangeIn >= 0)
     timeline_->setRange(state.rangeIn, state.rangeOut);
+  timeline_->setSelectedTransition(state.selectedTransition);
   if (timeline_->hasRange())
     seekTo(state.positionMs);
   saveTimer_->start();
@@ -2199,10 +2249,11 @@ void StudioWindow::refreshControls() {
   refreshSplitAction();
   deleteButton_->setEnabled(
       editable && (timeline_->rangeOut() > timeline_->rangeIn() ||
-                   timeline_->selectedClip() || timeline_->selectedCue()));
+                   timeline_->selectedClip() || timeline_->selectedCue() ||
+                   timeline_->selectedTransitionDeletable()));
   deleteButton_->setToolTip(deleteButton_->isEnabled()
-      ? QStringLiteral("Delete the selected range, clip, or zoom · Delete")
-      : QStringLiteral("Select a clip, zoom, or range to delete"));
+      ? QStringLiteral("Delete the selected range, clip, transition, or zoom · Delete")
+      : QStringLiteral("Select a clip, transition, zoom, or range to delete"));
   background_->setEnabled(editable);
   padding_->setEnabled(editable);
   radius_->setEnabled(editable);
@@ -2442,6 +2493,9 @@ void StudioWindow::deleteSelection() {
   else if (timeline_->selectedCue()) {
     removeSelectedZoom();
     return;
+  } else if (timeline_->selectedTransition()) {
+    removeTransition(timeline_->selectedTransition());
+    return;
   } else if (timeline_->selectedClip())
     result = studioDeleteClip(project_, timeline_->selectedClip());
   if (!result.changed) {
@@ -2528,7 +2582,11 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
   else if (key == Qt::Key_D && ctrl)
     action = [this] { duplicateScene(); };
   else if (key == Qt::Key_T && plain)
-    action = [this] { showTransitionEditor(timeline_->selectedClip()); };
+    action = [this] {
+      showTransitionEditor(timeline_->selectedTransition()
+                               ? timeline_->selectedTransition()
+                               : timeline_->selectedClip());
+    };
   else if (key == Qt::Key_S && plain)
     action = [this] { splitAtPlayhead(); };
   else if (key == Qt::Key_Z && plain)

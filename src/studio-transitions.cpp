@@ -1,10 +1,12 @@
 /** @fileoverview Explicit pair-bound transitions and their Quattro inspector.
  */
+#include "studio-composition.hpp"
 #include "studio-playback.hpp"
 #include "studio.hpp"
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -59,23 +61,33 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
           &StudioWindow::showTransitionEditor);
 }
 
+std::pair<quint64, quint64> StudioWindow::transitionPair() const {
+  const quint64 outgoing = timeline_->selectedTransition()
+                               ? timeline_->selectedTransition()
+                               : timeline_->selectedClip();
+  quint64 incoming = 0;
+  for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
+    if (project_.clips[i].id == outgoing)
+      incoming = project_.clips[i + 1].id;
+  return {outgoing, incoming};
+}
+
 void StudioWindow::refreshTransitionControls(bool force) {
   if (!transitionType_)
     return;
   transitionType_->setChrome(theme_->chrome());
   const QSignalBlocker quietType(transitionType_),
       quietDuration(transitionDuration_);
-  quint64 incoming = 0;
+  const auto [outgoing, incoming] = transitionPair();
   QString name;
   for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
-    if (project_.clips[i].id == timeline_->selectedClip()) {
-      incoming = project_.clips[i + 1].id;
-      const auto *asset = studioAsset(project_, project_.clips[i + 1].assetId);
-      if (asset)
+    if (project_.clips[i].id == outgoing &&
+        project_.clips[i + 1].id == incoming) {
+      if (const auto *asset =
+              studioAsset(project_, project_.clips[i + 1].assetId))
         name = QFileInfo(asset->path).fileName();
       break;
     }
-  const auto outgoing = timeline_->selectedClip();
   const auto *transition = studioTransition(project_, outgoing, incoming);
   const qint64 maximum = studioTransitionMaximum(project_, outgoing, incoming);
   const bool editable = scenesEditable() && incoming && !editGesture_;
@@ -112,7 +124,29 @@ void StudioWindow::showTransitionEditor(quint64 id) {
   if (!id)
     if (const auto frame = studioFrameAt(project_, player_->position()))
       id = frame->span.clipId;
-  timeline_->setSelectedClip(id);
+  if (id) {
+    // The last scene has no outgoing boundary: keep the clip selection and
+    // say so instead of stranding the inspector on nothing editable.
+    bool hasOutgoing = false;
+    for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
+      if (project_.clips[i].id == id)
+        hasOutgoing = true;
+    if (!hasOutgoing) {
+      setStatus(QStringLiteral("The last scene has no outgoing transition"));
+      return;
+    }
+  }
+  timeline_->setSelectedTransition(id);
+  const auto [outgoing, incoming] = transitionPair();
+  if (outgoing && incoming) {
+    // Park the playhead at the overlap start so the blend is on screen.
+    for (const auto &span : studioComposition(project_))
+      if (span.clipId == incoming) {
+        player_->pause();
+        seekTo(span.startMs);
+        break;
+      }
+  }
   auto *tabs = inspector_->findChild<QTabWidget *>();
   if (tabs)
     for (int i = 0; i < tabs->count(); ++i)
@@ -128,11 +162,7 @@ void StudioWindow::showTransitionEditor(quint64 id) {
 void StudioWindow::changeTransition() {
   if (restoring_ || !scenesEditable() || editGesture_)
     return;
-  const quint64 outgoing = timeline_->selectedClip();
-  quint64 incoming = 0;
-  for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
-    if (project_.clips[i].id == outgoing)
-      incoming = project_.clips[i + 1].id;
+  const auto [outgoing, incoming] = transitionPair();
   if (!incoming)
     return;
   const int requestedType = transitionType_->currentData().toInt();
@@ -158,7 +188,7 @@ void StudioWindow::changeTransition() {
           ? studioTimelineTime(project_, anchor->span.clipId, anchor->sourceMs)
           : std::nullopt;
   finishCompositionEdit(position.value_or(player_->position()));
-  timeline_->setSelectedClip(outgoing);
+  timeline_->setSelectedTransition(outgoing);
   rememberEdit();
   refreshTransitionControls(true);
   const auto *transition = studioTransition(project_, outgoing, incoming);
@@ -166,6 +196,38 @@ void StudioWindow::changeTransition() {
                 ? QStringLiteral("Transition: %1 ms overlap — Ctrl+Z to undo")
                       .arg(transition->durationMs)
                 : QStringLiteral("Hard cut restored — Ctrl+Z to undo"));
+}
+
+void StudioWindow::removeTransition(quint64 outgoingClipId) {
+  if (!deleteButton_->isEnabled() || editGesture_ || !outgoingClipId)
+    return;
+  quint64 incoming = 0;
+  for (qsizetype i = 0; i + 1 < project_.clips.size(); ++i)
+    if (project_.clips[i].id == outgoingClipId)
+      incoming = project_.clips[i + 1].id;
+  if (!incoming) {
+    // Stale selection after the pair moved apart: drop it expressly.
+    timeline_->setSelectedTransition(0);
+    setStatus(QStringLiteral("That scene change is gone — select another boundary"));
+    return;
+  }
+  if (!studioTransition(project_, outgoingClipId, incoming)) {
+    setStatus(QStringLiteral("No transition here — pick an effect to add one"));
+    return;
+  }
+  captureCursor();
+  QString error;
+  if (!studioRemoveTransition(project_, outgoingClipId, incoming, error)) {
+    setStatus(error.isEmpty() ? QStringLiteral("Could not remove the transition")
+                              : error,
+              true);
+    return;
+  }
+  finishCompositionEdit(player_->position());
+  // The boundary stays selected as a hard cut, ready for another effect.
+  timeline_->setSelectedTransition(outgoingClipId);
+  rememberEdit();
+  setStatus(QStringLiteral("Transition removed — Ctrl+Z to undo"));
 }
 
 QString StudioWindow::transitionAdjustment(

@@ -15,6 +15,8 @@
 #include <QString>
 #include <QWidget>
 
+#include <utility>
+
 class QAudioOutput;
 class QMediaPlayer;
 class QProcess;
@@ -51,11 +53,16 @@ public:
   }
   void setRange(qint64 start, qint64 end);
   void setSelectedClip(quint64 id);
+  /** A scene boundary by outgoing clip id; distinct from clip selection. */
+  void setSelectedTransition(quint64 outgoingClipId);
   void clearSelection();
   [[nodiscard]] qint64 rangeIn() const { return rangeIn_; }
   [[nodiscard]] qint64 rangeOut() const { return rangeOut_; }
   [[nodiscard]] bool hasRange() const { return rangeIn_ >= 0 && rangeOut_ > rangeIn_; }
   [[nodiscard]] quint64 selectedClip() const { return selectedClip_; }
+  [[nodiscard]] quint64 selectedTransition() const { return selectedTransition_; }
+  /** Whether the selected boundary currently carries a transition. */
+  [[nodiscard]] bool selectedTransitionDeletable() const;
   /** Drop location in the ordered scene list; zero means append. */
   [[nodiscard]] quint64 insertionBefore(qreal x) const;
   void showInsertion(quint64 before, bool visible);
@@ -130,6 +137,7 @@ private:
   qint64 rangeOut_ = -1;
   qint64 rangeAnchor_ = 0;
   quint64 selectedClip_ = 0;
+  quint64 selectedTransition_ = 0;
   QPointF scenePress_;
   QPointF sceneDragOffset_;
   QRectF draggedSceneRect_;
@@ -235,6 +243,7 @@ private:
   void captureCursor();
   void splitAtPlayhead();
   void deleteSelection();
+  void removeTransition(quint64 outgoingClipId);
   void finishCompositionEdit(qint64 position);
   void setupScenes(class QVBoxLayout *controls);
   void chooseScenes();
@@ -246,6 +255,8 @@ private:
   void setupTransitions(class QVBoxLayout *controls);
   void refreshTransitionControls(bool force = false);
   void changeTransition();
+  /** Boundary under edit: selected boundary first, else selected clip. */
+  [[nodiscard]] std::pair<quint64, quint64> transitionPair() const;
   void showTransitionEditor(quint64 outgoingClipId);
   [[nodiscard]] QString
   transitionAdjustment(const QVector<StudioTransition> &before) const;

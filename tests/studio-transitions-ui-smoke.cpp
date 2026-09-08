@@ -3,6 +3,7 @@
 #include "studio.hpp"
 #include <QAbstractItemView>
 #include <QAudioOutput>
+#include <QMenu>
 #include <QFile>
 #include <QPushButton>
 #include <QSpinBox>
@@ -144,6 +145,8 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
   if (!require(duration->value() == 700 && player->duration() == 5300,
                "Typed transition duration did not apply"))
     return false;
+  // Hotkeys need window focus: focus is still in the duration field.
+  window.setFocus();
   QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
   window.setFocus();
   QTest::keyClick(&window, Qt::Key_Space);
@@ -178,9 +181,79 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
     return QPoint(64 + qRound((timeline->width() - 80) * ms / 5400.0), y);
   };
   QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(2700, 75));
-  if (!require(timeline->selectedClip() == 1 && window.focusWidget() == type,
-               "Transition badge did not select its exact outgoing scene"))
+  if (!require(timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0 &&
+                  window.focusWidget() == type,
+               "Transition badge did not select the boundary"))
     return false;
+  // The 600 ms overlap consumes the kept tail/head: incoming scene 2
+  // starts at 2400 of the 5400 ms composition.
+  if (!require(QTest::qWaitFor([&] { return player->position() == 2400; }, 4000),
+               "Boundary selection did not park at the overlap start"))
+    return false;
+  // Delete with a boundary selected removes the transition, not the scene,
+  // and the boundary stays selected as a hard cut. Focus leaves the Type
+  // field first: hotkeys stay suspended while typing.
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Delete);
+  if (!require(player->duration() == 6000 &&
+                  timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0,
+               "Delete did not remove only the transition"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 &&
+                  timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0,
+               "Undo did not restore the transition and its selection"))
+    return false;
+  // The timeline context menu offers the same removal.
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, point(1000, 75));
+  auto *menu = timeline->findChild<QMenu *>();
+  QAction *remove = nullptr;
+  if (menu)
+    for (auto *action : menu->actions())
+      if (action->text().startsWith(QStringLiteral("Delete selection")))
+        remove = action;
+  if (!require(menu && menu->isVisible() && remove && remove->isEnabled(),
+               "Context menu did not offer boundary deletion"))
+    return false;
+  remove->trigger();
+  if (!require(player->duration() == 6000 && timeline->selectedTransition() == 1,
+               "Menu deletion did not remove only the transition"))
+    return false;
+  menu->close();
+  if (!require(QTest::qWaitFor(
+                    [&] { return timeline->findChild<QMenu *>() == nullptr; },
+                    2000),
+               "Closed menu lingered"))
+    return false;
+  // A hard-cut boundary has nothing to delete: the menu offers nothing.
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, point(1000, 75));
+  auto *plainMenu = timeline->findChild<QMenu *>();
+  QAction *plainRemove = nullptr;
+  if (plainMenu)
+    for (auto *action : plainMenu->actions())
+      if (action->text().startsWith(QStringLiteral("Delete selection")))
+        plainRemove = action;
+  if (!require(plainMenu && plainMenu->isVisible() && plainRemove &&
+                  !plainRemove->isEnabled(),
+               "Context menu offered deletion with no transition"))
+    return false;
+  plainMenu->close();
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 && timeline->selectedTransition() == 1,
+               "Undo did not restore the menu-removed transition"))
+    return false;
+  // T on the last scene keeps its clip: there is no outgoing boundary.
+  timeline->setSelectedClip(2);
+  QTest::keyClick(&window, Qt::Key_T);
+  if (!require(timeline->selectedClip() == 2 &&
+                  timeline->selectedTransition() == 0,
+               "T on the last scene abandoned its clip"))
+    return false;
+  timeline->setSelectedClip(1);
   QPushButton *later = nullptr;
   for (auto *button : window.findChildren<QPushButton *>())
     if (button->text() == QStringLiteral("Later"))

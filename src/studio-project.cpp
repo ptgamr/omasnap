@@ -1038,10 +1038,11 @@ bool StudioHistory::redo() {
   ++index_;
   return true;
 }
-void StudioHistory::setCursor(quint64 clip, quint64 cue, qint64 in, qint64 out,
-                              qint64 position) {
+void StudioHistory::setCursor(quint64 clip, quint64 transition, quint64 cue,
+                               qint64 in, qint64 out, qint64 position) {
   auto &s = states_[index_];
   s.selectedClip = clip;
+  s.selectedTransition = transition;
   s.selectedCue = cue;
   s.rangeIn = in;
   s.rangeOut = out;
