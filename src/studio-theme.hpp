@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QFutureWatcher>
 #include <QObject>
+#include <QSlider>
 #include <QString>
 #include <QTimer>
 
@@ -54,6 +55,29 @@ protected:
 private:
   void stylePopup();
   StudioChrome chrome_;
+};
+
+/**
+ * Clicking the groove jumps straight to the click and keeps dragging from
+ * there: Qt's default groove click only moves one pageStep, which reads as
+ * broken next to drag-the-thumb. Presses landing on the style handle rect
+ * keep the default drag untouched.
+ */
+class StudioSlider final : public QSlider {
+public:
+  using QSlider::QSlider;
+
+protected:
+  void mousePressEvent(QMouseEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mouseReleaseEvent(QMouseEvent *event) override;
+
+private:
+  // Absolute value under the cursor, mapped over the groove travel minus the
+  // handle like Qt's own drag math — not over the full widget width, where
+  // rounding can strand the handle off the click and retrigger a page step.
+  void jumpTo(const QPoint &pos);
+  bool grooveDrag_ = false;
 };
 
 /** Bounded, asynchronous palette reads. No shell IPC, hooks, or theme plugins.

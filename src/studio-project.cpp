@@ -1200,6 +1200,188 @@ bool studioTrimClip(StudioProject &p, quint64 id, qint64 in, qint64 out,
   edited.clips[index].outMs = out;
   return finishSceneChange(p, std::move(edited), error);
 }
+namespace {
+// Audio edits validate the swapped copy directly: the lane has no
+// transitions, zooms, or review range to ripple.
+bool commitAudioChange(StudioProject &p, StudioProject edited, QString &error) {
+  error = validateStudioProject(edited);
+  if (!error.isEmpty())
+    return false;
+  p = std::move(edited);
+  return true;
+}
+qsizetype audioClipIndex(const StudioProject &p, quint64 id) {
+  for (qsizetype i = 0; i < p.audioClips.size(); ++i)
+    if (p.audioClips[i].id == id)
+      return i;
+  return -1;
+}
+struct AudioClipSplit {
+  StudioAudioClip left;
+  StudioAudioClip right;
+  qint64 leftMs = 0;
+};
+// Like a scene split: the boundary keeps its source millisecond, and the
+// search keeps candidates whose retimed halves sum back to the whole, so
+// splitting never shifts downstream sounds by a rounding millisecond.
+std::optional<AudioClipSplit> splitAudioAt(const StudioAudioClip &clip,
+                                           qint64 offset) {
+  const qint64 duration = audioClipDuration(clip);
+  if (offset <= 0 || offset >= duration || clip.outMs - clip.inMs < 2)
+    return std::nullopt;
+  const qint64 centre =
+      clip.inMs + qRound64(static_cast<double>(offset) * clip.speed);
+  std::optional<AudioClipSplit> best;
+  const int radius = qCeil(clip.speed);
+  for (int delta = -radius; delta <= radius; ++delta) {
+    const qint64 boundary = centre + delta;
+    if (boundary <= clip.inMs || boundary >= clip.outMs)
+      continue;
+    StudioAudioClip left = clip, right = clip;
+    left.outMs = boundary;
+    right.inMs = boundary;
+    const qint64 leftMs = audioClipDuration(left),
+                 rightMs = audioClipDuration(right);
+    if (leftMs <= 0 || rightMs <= 0 || leftMs + rightMs != duration)
+      continue;
+    if (!best || qAbs(leftMs - offset) < qAbs(best->leftMs - offset))
+      best = AudioClipSplit{left, right, leftMs};
+  }
+  return best;
+}
+bool unusedAudioClipId(const StudioProject &p, quint64 id) {
+  if (!id)
+    return false;
+  for (const auto &clip : p.audioClips)
+    if (clip.id == id)
+      return false;
+  return true;
+}
+} // namespace
+bool studioMoveAudioClip(StudioProject &p, quint64 id, quint64 beforeId,
+                         QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0 || (beforeId && audioClipIndex(p, beforeId) < 0)) {
+    error = QStringLiteral(
+        "The sound to move or insertion boundary no longer exists.");
+    return false;
+  }
+  if (id == beforeId)
+    return false;
+  auto edited = p;
+  const auto clip = edited.audioClips.takeAt(index);
+  const auto destination =
+      beforeId ? audioClipIndex(edited, beforeId) : edited.audioClips.size();
+  edited.audioClips.insert(destination, clip);
+  if (edited.audioClips == p.audioClips)
+    return false;
+  return commitAudioChange(p, std::move(edited), error);
+}
+bool studioDuplicateAudioClip(StudioProject &p, quint64 id, quint64 newId,
+                              QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0 || !unusedAudioClipId(p, newId)) {
+    error = QStringLiteral(
+        "Cannot duplicate a missing sound or reuse its identity.");
+    return false;
+  }
+  auto edited = p;
+  auto copy = edited.audioClips[index];
+  copy.id = newId;
+  edited.audioClips.insert(index + 1, copy);
+  return commitAudioChange(p, std::move(edited), error);
+}
+bool studioTrimAudioClip(StudioProject &p, quint64 id, qint64 in, qint64 out,
+                         QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The sound to trim no longer exists.");
+    return false;
+  }
+  if (p.audioClips[index].inMs == in && p.audioClips[index].outMs == out)
+    return false;
+  auto edited = p;
+  edited.audioClips[index].inMs = in;
+  edited.audioClips[index].outMs = out;
+  return commitAudioChange(p, std::move(edited), error);
+}
+bool studioSplitAudioClip(StudioProject &p, qint64 at, quint64 newId,
+                          QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  if (!unusedAudioClipId(p, newId))
+    return false;
+  const auto spans = studioAudioComposition(p);
+  for (qsizetype i = 0; i < spans.size(); ++i) {
+    if (at <= spans[i].startMs || at >= spans[i].endMs)
+      continue;
+    const auto split = splitAudioAt(p.audioClips[i], at - spans[i].startMs);
+    if (!split)
+      return false;
+    auto edited = p;
+    edited.audioClips[i] = split->left;
+    auto right = split->right;
+    right.id = newId;
+    edited.audioClips.insert(i + 1, right);
+    return commitAudioChange(p, std::move(edited), error);
+  }
+  return false;
+}
+bool studioDeleteAudioClip(StudioProject &p, quint64 id, QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The sound to delete no longer exists.");
+    return false;
+  }
+  auto edited = p;
+  edited.audioClips.removeAt(index);
+  return commitAudioChange(p, std::move(edited), error);
+}
+bool studioSetAudioClipGain(StudioProject &p, quint64 id, int gain,
+                            QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The sound to retune no longer exists.");
+    return false;
+  }
+  if (p.audioClips[index].gain == gain)
+    return false;
+  auto edited = p;
+  edited.audioClips[index].gain = gain;
+  return commitAudioChange(p, std::move(edited), error);
+}
+bool studioSetAudioClipSpeed(StudioProject &p, quint64 id, double speed,
+                             QString &error) {
+  error = validateStudioProject(p);
+  if (!error.isEmpty())
+    return false;
+  const auto index = audioClipIndex(p, id);
+  if (index < 0) {
+    error = QStringLiteral("The sound to retime no longer exists.");
+    return false;
+  }
+  if (p.audioClips[index].speed == speed)
+    return false;
+  auto edited = p;
+  edited.audioClips[index].speed = speed;
+  return commitAudioChange(p, std::move(edited), error);
+}
 bool studioSetClipSpeed(StudioProject &p, quint64 id, double speed,
                         QString &error) {
   error = validateStudioProject(p);

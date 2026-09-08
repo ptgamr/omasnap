@@ -43,13 +43,16 @@ bool StudioWindow::scenesEditable() const {
 
 void StudioWindow::setupScenes(QVBoxLayout *controls) {
   setAcceptDrops(true);
+  sceneSection_ = new QWidget(this);
+  auto *sceneLayout = new QVBoxLayout(sceneSection_);
+  sceneLayout->setContentsMargins(0, 0, 0, 0);
   sceneLabel_ =
       new QLabel(QStringLiteral("Select a scene on the video lane"), this);
   sceneLabel_->setWordWrap(true);
-  controls->addWidget(sceneLabel_);
+  sceneLayout->addWidget(sceneLabel_);
   auto *selectedLabel = new QLabel(QStringLiteral("Selected Clip"), this);
   selectedLabel->setFont(chromeMonoFont(13));
-  controls->addWidget(selectedLabel);
+  sceneLayout->addWidget(selectedLabel);
   auto *speedRow = new QHBoxLayout;
   speedRow->addWidget(new QLabel(QStringLiteral("Speed"), this));
   speedRow->addStretch();
@@ -61,9 +64,60 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
        {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0})
     clipSpeed_->addItem(QStringLiteral("%1×").arg(speed), speed);
   speedRow->addWidget(clipSpeed_);
-  controls->addLayout(speedRow);
+  sceneLayout->addLayout(speedRow);
+  controls->addWidget(sceneSection_);
   connect(clipSpeed_, &QComboBox::activated, this,
           &StudioWindow::changeClipSpeed);
+  audioSection_ = new QWidget(this);
+  auto *audioLayout = new QVBoxLayout(audioSection_);
+  audioLayout->setContentsMargins(0, 0, 0, 0);
+  audioLabel_ =
+      new QLabel(QStringLiteral("Select a sound on the audio lane"), this);
+  audioLabel_->setObjectName(QStringLiteral("audioDetails"));
+  audioLabel_->setWordWrap(true);
+  audioLayout->addWidget(audioLabel_);
+  auto *audioSelectedLabel =
+      new QLabel(QStringLiteral("Selected Audio"), this);
+  audioSelectedLabel->setFont(chromeMonoFont(13));
+  audioLayout->addWidget(audioSelectedLabel);
+  auto *gainRow = new QHBoxLayout;
+  gainRow->addWidget(new QLabel(QStringLiteral("Gain"), this));
+  gainRow->addStretch();
+  auto *gainValue = new QLabel(QStringLiteral("100%"), this);
+  gainValue->setObjectName(QStringLiteral("audioGainValue"));
+  gainValue->setFont(chromeMonoFont(12));
+  audioGainValue_ = gainValue;
+  gainRow->addWidget(gainValue);
+  audioLayout->addLayout(gainRow);
+  audioGain_ = new StudioSlider(Qt::Horizontal, this);
+  audioGain_->setObjectName(QStringLiteral("audioGain"));
+  audioGain_->setRange(0, 100);
+  audioGain_->setToolTip(QStringLiteral("Level of the selected sound"));
+  audioLayout->addWidget(audioGain_);
+  QObject::connect(audioGain_, &QSlider::valueChanged, gainValue,
+                   [gainValue](int n) {
+                     gainValue->setText(QString::number(n) +
+                                        QStringLiteral("%"));
+                   });
+  auto *audioSpeedRow = new QHBoxLayout;
+  audioSpeedRow->addWidget(new QLabel(QStringLiteral("Speed"), this));
+  audioSpeedRow->addStretch();
+  audioSpeed_ = new StudioComboBox(this);
+  audioSpeed_->setObjectName(QStringLiteral("audioSpeed"));
+  audioSpeed_->setToolTip(
+      QStringLiteral("Playback speed of the selected sound"));
+  for (const double speed :
+       {0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0})
+    audioSpeed_->addItem(QStringLiteral("%1×").arg(speed), speed);
+  audioSpeedRow->addWidget(audioSpeed_);
+  audioLayout->addLayout(audioSpeedRow);
+  controls->addWidget(audioSection_);
+  connect(audioGain_, &QSlider::valueChanged, this,
+          &StudioWindow::changeAudioGain);
+  connect(audioGain_, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
+  connect(audioGain_, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
+  connect(audioSpeed_, &QComboBox::activated, this,
+          &StudioWindow::changeAudioSpeed);
   connect(&importWatcher_, &QFutureWatcher<StudioProjectLoad>::finished, this,
           [this] {
             importing_ = false;
@@ -96,23 +150,62 @@ void StudioWindow::refreshSceneControls() {
     }
   const auto *asset =
       selected ? studioAsset(project_, selected->assetId) : nullptr;
-  const bool speedEditable = scenesEditable() && !editGesture_ && selected;
-  clipSpeed_->setEnabled(speedEditable);
-  if (selected) {
+  const StudioAudioClip *selectedAudio = nullptr;
+  for (const auto &clip : project_.audioClips)
+    if (clip.id == timeline_->selectedAudioClip()) {
+      selectedAudio = &clip;
+      break;
+    }
+  const auto *audioAsset =
+      selectedAudio ? studioAsset(project_, selectedAudio->assetId) : nullptr;
+  sceneSection_->setVisible(selectedAudio == nullptr);
+  audioSection_->setVisible(selectedAudio != nullptr);
+  const auto nearestSpeed = [](StudioComboBox *combo, double speed) {
     // Display-only mapping: the model admits any 0.125..8 speed, the combo
-    // offers presets. Show the nearest preset without touching the model.
+    // offers presets. Returns the nearest preset without touching the model.
     int nearest = 0;
     double best = std::numeric_limits<double>::max();
-    for (int i = 0; i < clipSpeed_->count(); ++i) {
-      const double gap =
-          qAbs(clipSpeed_->itemData(i).toDouble() - selected->speed);
+    for (int i = 0; i < combo->count(); ++i) {
+      const double gap = qAbs(combo->itemData(i).toDouble() - speed);
       if (gap < best) {
         best = gap;
         nearest = i;
       }
     }
+    return nearest;
+  };
+  const bool speedEditable = scenesEditable() && !editGesture_ && selected;
+  clipSpeed_->setEnabled(speedEditable);
+  if (selected) {
     const QSignalBlocker quiet(clipSpeed_);
-    clipSpeed_->setCurrentIndex(nearest);
+    clipSpeed_->setCurrentIndex(nearestSpeed(clipSpeed_, selected->speed));
+  }
+  const bool audioEditable = scenesEditable() && selectedAudio;
+  audioGain_->setEnabled(audioEditable);
+  audioSpeed_->setEnabled(scenesEditable() && !editGesture_ && selectedAudio);
+  if (selectedAudio && audioAsset) {
+    audioLabel_->setText(
+        QStringLiteral("%1\n%2")
+            .arg(QFileInfo(audioAsset->path).fileName(),
+                 studioTimecode(qRound64((selectedAudio->outMs -
+                                         selectedAudio->inMs) /
+                                        selectedAudio->speed))
+                     .mid(3)));
+    // No blocker: the value signal repaints the percentage label, and the
+    // commit is a no-op when the model already matches. The label still
+    // follows the model explicitly: restoring an unchanged value emits no
+    // signal, which once left a zero-gain sound showing 100%.
+    audioGain_->setValue(selectedAudio->gain);
+    if (audioGainValue_) {
+      audioGainValue_->setText(QString::number(selectedAudio->gain) +
+                               QStringLiteral("%"));
+    }
+    const QSignalBlocker quietSpeed(audioSpeed_);
+    audioSpeed_->setCurrentIndex(
+        nearestSpeed(audioSpeed_, selectedAudio->speed));
+  } else {
+    audioLabel_->setText(
+        QStringLiteral("Click a sound on the audio lane to tune it"));
   }
   if (!selected || !asset) {
     sceneLabel_->setText(QStringLiteral("Ctrl+click a clip to see its filename and details"));
@@ -223,7 +316,13 @@ void StudioWindow::moveScene(quint64 id, quint64 before) {
 }
 
 void StudioWindow::duplicateScene() {
-  if (!scenesEditable() || editGesture_ || !timeline_->selectedClip())
+  if (!scenesEditable() || editGesture_)
+    return;
+  if (timeline_->selectedAudioClip() != 0) {
+    duplicateAudioClip();
+    return;
+  }
+  if (!timeline_->selectedClip())
     return;
   captureCursor();
   const auto transitions = project_.transitions;
@@ -263,6 +362,112 @@ void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
   rememberEdit();
   setStatus(QStringLiteral("Scene trimmed — Ctrl+Z to undo") +
             transitionAdjustment(transitions));
+}
+
+void StudioWindow::moveAudioClip(quint64 id, quint64 before) {
+  // No edit-gesture guard: like scene trims, moves arrive live per drag
+  // tick and commit once on release.
+  if (!scenesEditable())
+    return;
+  captureCursor();
+  QString error;
+  if (!studioMoveAudioClip(project_, id, before, error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    return;
+  }
+  timeline_->update();
+  rememberEdit();
+}
+
+void StudioWindow::duplicateAudioClip() {
+  if (!scenesEditable() || editGesture_ || !timeline_->selectedAudioClip())
+    return;
+  captureCursor();
+  QString error;
+  const quint64 id = nextAudioClipId_++;
+  if (!studioDuplicateAudioClip(project_, timeline_->selectedAudioClip(), id,
+                                error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    return;
+  }
+  timeline_->setSelectedAudioClip(id);
+  timeline_->update();
+  rememberEdit();
+  setStatus(QStringLiteral("Sound duplicated — Ctrl+Z to undo"));
+}
+
+void StudioWindow::trimAudioClip(quint64 id, qint64 inMs, qint64 outMs) {
+  if (!scenesEditable() || restoring_)
+    return;
+  captureCursor();
+  QString error;
+  if (!studioTrimAudioClip(project_, id, inMs, outMs, error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    refreshSceneControls();
+    return;
+  }
+  timeline_->setSelectedAudioClip(id);
+  timeline_->update();
+  rememberEdit();
+  refreshControls();
+}
+
+void StudioWindow::deleteAudioClip() {
+  if (!scenesEditable() || editGesture_ || !timeline_->selectedAudioClip())
+    return;
+  captureCursor();
+  QString error;
+  if (!studioDeleteAudioClip(project_, timeline_->selectedAudioClip(),
+                             error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    return;
+  }
+  timeline_->setSelectedAudioClip(0);
+  timeline_->update();
+  rememberEdit();
+  refreshControls();
+  setStatus(QStringLiteral("Sound deleted — Ctrl+Z to undo"));
+}
+
+void StudioWindow::changeAudioGain() {
+  if (restoring_ || !audioGain_ || !audioGain_->isEnabled())
+    return;
+  const quint64 id = timeline_->selectedAudioClip();
+  if (!id)
+    return;
+  captureCursor();
+  QString error;
+  if (!studioSetAudioClipGain(project_, id, audioGain_->value(), error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    return;
+  }
+  rememberEdit();
+  refreshControls();
+}
+
+void StudioWindow::changeAudioSpeed() {
+  if (restoring_ || !audioSpeed_ || !audioSpeed_->isEnabled())
+    return;
+  const quint64 id = timeline_->selectedAudioClip();
+  if (!id)
+    return;
+  captureCursor();
+  QString error;
+  if (!studioSetAudioClipSpeed(project_, id,
+                               audioSpeed_->currentData().toDouble(), error)) {
+    if (!error.isEmpty())
+      setStatus(error, true);
+    refreshSceneControls();
+    return;
+  }
+  timeline_->update();
+  rememberEdit();
+  refreshControls();
 }
 
 void StudioWindow::changeClipSpeed() {

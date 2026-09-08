@@ -96,6 +96,8 @@ public:
   [[nodiscard]] bool selectedTransitionDeletable() const;
   /** Drop location in the ordered scene list; zero means append. */
   [[nodiscard]] quint64 insertionBefore(qreal x) const;
+  /** Drop location in the ordered audio list; zero means append. */
+  [[nodiscard]] quint64 insertionAudioBefore(qreal x) const;
   void showInsertion(quint64 before, bool visible);
   void setChrome(const StudioChrome &chrome) {
     chrome_ = chrome;
@@ -125,6 +127,9 @@ signals:
   void duplicateRequested();
   void sceneMoveRequested(quint64 id, quint64 before);
   void sceneTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
+  /** An audio block is being moved (before == 0 appends) or edge-trimmed. */
+  void audioMoveRequested(quint64 id, quint64 before);
+  void audioTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
   void transitionRequested(quint64 outgoingClipId);
 
 protected:
@@ -142,6 +147,9 @@ private:
     CueBody,
     CueStart,
     CueEnd,
+    AudioBody,
+    AudioStart,
+    AudioEnd,
     RangeStart,
     RangeEnd,
     RangeNew,
@@ -156,8 +164,10 @@ private:
   [[nodiscard]] QRectF cueLaneRect() const;
   /** The audio clips' row, under the zoom lane. */
   [[nodiscard]] QRectF audioLaneRect() const;
-  /** The audio clip under `position`, or 0. Caller checks the lane. */
-  [[nodiscard]] quint64 audioClipAt(const QPointF &position) const;
+  /** The audio clip under `position` (caller checks the lane); `edge`
+   *  reports which end was hit, like cueAt. */
+  [[nodiscard]] quint64 audioClipAt(const QPointF &position,
+                                    Grab *edge = nullptr) const;
   [[nodiscard]] QRectF cueRect(const ZoomCue &cue) const;
   [[nodiscard]] qreal xForTime(qint64 milliseconds) const;
   [[nodiscard]] qint64 timeForX(qreal x) const;
@@ -194,6 +204,10 @@ private:
   qint64 trimOut_ = 0;
   quint64 selected_ = 0;
   quint64 grabbedCue_ = 0;
+  quint64 grabbedAudioClip_ = 0;
+  /** Source range and span of the audio clip under an edge drag. */
+  StudioAudioClip grabbedAudio_;
+  qint64 audioSpanStartMs_ = 0;
   /// Where in the cue the drag started, so moving one does not snap its
   /// start to the pointer.
   qint64 grabOffsetMs_ = 0;
@@ -347,6 +361,19 @@ private:
   quint64 nextClipId_ = 1;
   void changeClipSpeed();
   class StudioComboBox *clipSpeed_ = nullptr;
+  quint64 nextAudioClipId_ = 1;
+  class QWidget *sceneSection_ = nullptr;
+  class QWidget *audioSection_ = nullptr;
+  class QLabel *audioLabel_ = nullptr;
+  class QSlider *audioGain_ = nullptr;
+  class QLabel *audioGainValue_ = nullptr;
+  class StudioComboBox *audioSpeed_ = nullptr;
+  void moveAudioClip(quint64 id, quint64 before);
+  void duplicateAudioClip();
+  void trimAudioClip(quint64 id, qint64 inMs, qint64 outMs);
+  void deleteAudioClip();
+  void changeAudioGain();
+  void changeAudioSpeed();
   void showMusicDialog();
   void chooseMusicFile();
   void removeMusic();

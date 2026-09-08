@@ -246,6 +246,29 @@ struct StudioCutResult {
 [[nodiscard]] bool studioTrimClip(StudioProject &, quint64 clipId,
                                    qint64 sourceInMs, qint64 sourceOutMs,
                                    QString &error);
+/**
+ * Audio-lane structural edits. The lane carries no transitions, zooms, or
+ * review range, so these validate and swap directly instead of routing
+ * through the scene change machinery. False with empty error is an exact
+ * no-op; beforeClipId 0 appends.
+ */
+[[nodiscard]] bool studioMoveAudioClip(StudioProject &, quint64 clipId,
+                                       quint64 beforeClipId, QString &error);
+[[nodiscard]] bool studioDuplicateAudioClip(StudioProject &, quint64 clipId,
+                                            quint64 newClipId, QString &error);
+[[nodiscard]] bool studioTrimAudioClip(StudioProject &, quint64 clipId,
+                                       qint64 sourceInMs, qint64 sourceOutMs,
+                                       QString &error);
+[[nodiscard]] bool studioSplitAudioClip(StudioProject &, qint64 atMs,
+                                        quint64 newClipId, QString &error);
+[[nodiscard]] bool studioDeleteAudioClip(StudioProject &, quint64 clipId,
+                                         QString &error);
+/** Scalar retunes: gain is percent, speed follows the scene 0.125..8
+ *  range. Unchanged values are exact no-ops. */
+[[nodiscard]] bool studioSetAudioClipGain(StudioProject &, quint64 clipId,
+                                          int gain, QString &error);
+[[nodiscard]] bool studioSetAudioClipSpeed(StudioProject &, quint64 clipId,
+                                           double speed, QString &error);
 /** Retimes one scene: duration becomes (out-in)/speed with source-anchored
  *  zoom remapping via finishSceneChange. Speeds outside 0.125..8 or
  *  non-finite values are rejected; unchanged speeds are a no-op. */

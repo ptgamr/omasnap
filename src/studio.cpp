@@ -165,76 +165,6 @@ private:
  *  broken next to drag-the-thumb. Presses landing on the style handle rect
  *  keep the default drag untouched. The gesture signal fires before the jump
  *  value, so jump-plus-drag commits as one undo entry like a thumb drag. */
-class StudioSlider final : public QSlider {
-public:
-  using QSlider::QSlider;
-
-protected:
-  void mousePressEvent(QMouseEvent *event) override {
-    if (event->button() == Qt::LeftButton && !isSliderDown()) {
-      QStyleOptionSlider opt;
-      initStyleOption(&opt);
-      if (!style()
-               ->subControlRect(QStyle::CC_Slider, &opt,
-                                QStyle::SC_SliderHandle, this)
-               .contains(event->pos())) {
-        grooveDrag_ = true;
-        // setSliderDown emits sliderPressed before the jump value lands, so
-        // beginEdit suppresses history until release: one undo entry.
-        setSliderDown(true);
-        jumpTo(event->pos());
-        event->accept();
-        return;
-      }
-    }
-    QSlider::mousePressEvent(event);
-  }
-  void mouseMoveEvent(QMouseEvent *event) override {
-    if (grooveDrag_) {
-      jumpTo(event->pos());
-      event->accept();
-      return;
-    }
-    QSlider::mouseMoveEvent(event);
-  }
-  void mouseReleaseEvent(QMouseEvent *event) override {
-    if (grooveDrag_ && event->button() == Qt::LeftButton) {
-      grooveDrag_ = false;
-      // Emits sliderReleased for the matching endEdit.
-      setSliderDown(false);
-      event->accept();
-      return;
-    }
-    QSlider::mouseReleaseEvent(event);
-  }
-
-private:
-  // Absolute value under the cursor, mapped over the groove travel minus the
-  // handle like Qt's own drag math — not over the full widget width, where
-  // rounding can strand the handle off the click and retrigger a page step.
-  void jumpTo(const QPoint &pos) {
-    QStyleOptionSlider opt;
-    initStyleOption(&opt);
-    const QRect groove = style()->subControlRect(QStyle::CC_Slider, &opt,
-                                                 QStyle::SC_SliderGroove, this);
-    const QRect handle = style()->subControlRect(QStyle::CC_Slider, &opt,
-                                                 QStyle::SC_SliderHandle, this);
-    const bool horizontal = orientation() == Qt::Horizontal;
-    int span, p;
-    if (horizontal) {
-      span = groove.width() - handle.width();
-      p = pos.x() - groove.left() - handle.width() / 2;
-    } else {
-      span = groove.height() - handle.height();
-      p = pos.y() - groove.top() - handle.height() / 2;
-    }
-    if (span <= 0)
-      return;
-    setValue(style()->sliderValueFromPosition(minimum(), maximum(), p, span,
-                                              !horizontal));
-  }
-  bool grooveDrag_ = false;
-};
 // View-only magnification: clip/selection coordinates continue to use the
 // same timeline time map. No decoder or project state changes on zoom/pan.
 class TimelineViewport final : public QScrollArea {
@@ -555,8 +485,10 @@ void StudioTimeline::setCuesEditable(bool editable) {
   cuesEditable_ = editable;
   if (!editable) {
     grabbedCue_ = 0;
+    grabbedAudioClip_ = 0;
     if (grabbed_ == Grab::CueBody || grabbed_ == Grab::CueStart ||
-        grabbed_ == Grab::CueEnd)
+        grabbed_ == Grab::CueEnd || grabbed_ == Grab::AudioBody ||
+        grabbed_ == Grab::AudioStart || grabbed_ == Grab::AudioEnd)
       grabbed_ = Grab::None;
   }
   update();
@@ -653,6 +585,18 @@ quint64 StudioTimeline::insertionBefore(qreal x) const {
   return 0;
 }
 
+quint64 StudioTimeline::insertionAudioBefore(qreal x) const {
+  if (!project_)
+    return 0;
+  for (const auto &span : studioAudioComposition(*project_)) {
+    if (span.clipId == grabbedAudioClip_)
+      continue;
+    if (x < (xForTime(span.startMs) + xForTime(span.endMs)) / 2)
+      return span.clipId;
+  }
+  return 0;
+}
+
 void StudioTimeline::showInsertion(quint64 before, bool visible) {
   insertionBefore_ = before;
   insertionVisible_ = visible;
@@ -694,13 +638,29 @@ QRectF StudioTimeline::audioLaneRect() const {
           kAudioLaneHeight};
 }
 
-quint64 StudioTimeline::audioClipAt(const QPointF &position) const {
+quint64 StudioTimeline::audioClipAt(const QPointF &position,
+                                      Grab *edge) const {
+  if (edge)
+    *edge = Grab::AudioBody;
   if (!project_ || duration_ <= 0)
     return 0;
   for (const auto &span : studioAudioComposition(*project_)) {
-    if (position.x() >= xForTime(span.startMs) &&
-        position.x() < xForTime(span.endMs))
-      return span.clipId;
+    const qreal left = span.startMs * trackRect().width() / duration_ +
+                       trackRect().left();
+    const qreal right = span.endMs * trackRect().width() / duration_ +
+                        trackRect().left();
+    if (position.x() < left || position.x() >= right)
+      continue;
+    if (edge) {
+      // Same reachable-body rule as cue edges.
+      const qreal grab =
+          qMin<qreal>(kCueEdgeGrab, (right - left) / 3.0);
+      if (position.x() - left <= grab)
+        *edge = Grab::AudioStart;
+      else if (right - position.x() <= grab)
+        *edge = Grab::AudioEnd;
+    }
+    return span.clipId;
   }
   return 0;
 }
@@ -795,6 +755,11 @@ StudioTimeline::Grab StudioTimeline::grabAt(const QPointF &position) const {
   if (cueLaneRect().contains(position)) {
     Grab edge = Grab::CueBody;
     return cueAt(position, &edge) != 0 ? edge : Grab::None;
+  }
+  // The audio lane likewise: blocks drag by body and trim by either edge.
+  if (audioLaneRect().contains(position)) {
+    Grab edge = Grab::AudioBody;
+    return audioClipAt(position, &edge) != 0 ? edge : Grab::None;
   }
   // Unselected video and ruler positions always scrub.
   return Grab::Playhead;
@@ -1042,8 +1007,20 @@ void StudioTimeline::mousePressEvent(QMouseEvent *event) {
     return; // A cue lane click never moves the playhead.
   }
   if (audioLaneRect().contains(event->position())) {
-    grabbed_ = Grab::None;
-    setSelectedAudioClip(project_ ? audioClipAt(event->position()) : 0);
+    Grab edge = Grab::AudioBody;
+    const quint64 clip =
+        project_ ? audioClipAt(event->position(), &edge) : 0;
+    grabbedAudioClip_ = cuesEditable_ ? clip : 0;
+    grabbed_ = grabbedAudioClip_ != 0 ? edge : Grab::None;
+    if (clip != 0 && project_) {
+      for (const auto &entry : project_->audioClips)
+        if (entry.id == clip)
+          grabbedAudio_ = entry;
+      for (const auto &span : studioAudioComposition(*project_))
+        if (span.clipId == clip)
+          audioSpanStartMs_ = span.startMs;
+    }
+    setSelectedAudioClip(clip);
     return; // An audio lane click never moves the playhead.
   }
   if (grabbed_ == Grab::Playhead && project_ && selectClip) {
@@ -1060,12 +1037,15 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
     if (hover != hovered_) {
       hovered_ = hover;
       const bool resizes = hover == Grab::CueStart || hover == Grab::CueEnd ||
+                           hover == Grab::AudioStart ||
+                           hover == Grab::AudioEnd ||
                            hover == Grab::RangeStart ||
                            hover == Grab::RangeEnd ||
                            hover == Grab::SceneStart || hover == Grab::SceneEnd;
       setCursor(resizes                  ? Qt::SizeHorCursor
                 : hover == Grab::CueBody ? Qt::OpenHandCursor
-                                         : Qt::ArrowCursor);
+                : hover == Grab::AudioBody ? Qt::OpenHandCursor
+                                           : Qt::ArrowCursor);
       update();
     }
     return;
@@ -1160,6 +1140,44 @@ void StudioTimeline::mouseMoveEvent(QMouseEvent *event) {
     }
     return;
   }
+  if (grabbed_ == Grab::AudioBody || grabbed_ == Grab::AudioStart ||
+      grabbed_ == Grab::AudioEnd) {
+    if (grabbedAudioClip_ == 0 || !project_)
+      return;
+    if (grabbed_ == Grab::AudioBody) {
+      emit audioMoveRequested(grabbedAudioClip_,
+                              insertionAudioBefore(event->position().x()));
+      return;
+    }
+    // Unclamped pointer time, so overlong sounds trim past the video end.
+    const QRectF laneTrack = trackRect();
+    const qint64 time =
+        qRound64((event->position().x() - laneTrack.left()) /
+                 laneTrack.width() * duration_);
+    if (grabbed_ == Grab::AudioStart) {
+      const qint64 source =
+          grabbedAudio_.inMs +
+          qRound64((time - audioSpanStartMs_) * grabbedAudio_.speed);
+      emit audioTrimRequested(
+          grabbedAudioClip_,
+          qBound<qint64>(0, source, grabbedAudio_.outMs - 1),
+          grabbedAudio_.outMs);
+    } else {
+      const qint64 source =
+          grabbedAudio_.inMs +
+          qRound64((time - audioSpanStartMs_) * grabbedAudio_.speed);
+      const qint64 assetDuration = [this] {
+        if (const auto *asset =
+                studioAsset(*project_, grabbedAudio_.assetId))
+          return asset->source.durationMs;
+        return qint64{0};
+      }();
+      emit audioTrimRequested(
+          grabbedAudioClip_, grabbedAudio_.inMs,
+          qBound<qint64>(grabbedAudio_.inMs + 1, source, assetDuration));
+    }
+    return;
+  }
   switch (grabbed_) {
   case Grab::RangeNew:
   case Grab::RangeStart:
@@ -1197,6 +1215,7 @@ void StudioTimeline::mouseReleaseEvent(QMouseEvent *event) {
   showInsertion(0, false);
   grabbed_ = Grab::None;
   grabbedCue_ = 0;
+  grabbedAudioClip_ = 0;
   draggedScenePreview_ = {};
   unsetCursor();
   emit editFinished();
@@ -1960,6 +1979,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   QWidget::setTabOrder(transitionType_, transitionDirection_);
   QWidget::setTabOrder(transitionDirection_, transitionDuration_);
   QWidget::setTabOrder(transitionDuration_, clipSpeed_);
+  QWidget::setTabOrder(clipSpeed_, audioGain_);
+  QWidget::setTabOrder(audioGain_, audioSpeed_);
   connect(splitButton_, &QPushButton::clicked, this,
           &StudioWindow::splitAtPlayhead);
   connect(deleteButton_, &QPushButton::clicked, this,
@@ -1979,6 +2000,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::moveScene);
   connect(timeline_, &StudioTimeline::sceneTrimRequested, this,
           &StudioWindow::trimScene);
+  connect(timeline_, &StudioTimeline::audioMoveRequested, this,
+          &StudioWindow::moveAudioClip);
+  connect(timeline_, &StudioTimeline::audioTrimRequested, this,
+          &StudioWindow::trimAudioClip);
   connect(timeline_, &StudioTimeline::splitRequested, this,
           &StudioWindow::splitAtPlayhead);
   connect(timeline_, &StudioTimeline::duplicateRequested, this,
@@ -2956,6 +2981,8 @@ void StudioWindow::applyProject(bool resetHistory, qint64 position) {
   restoring_ = true;
   for (const auto &clip : project_.clips)
     nextClipId_ = qMax(nextClipId_, clip.id + 1);
+  for (const auto &clip : project_.audioClips)
+    nextAudioClipId_ = qMax(nextAudioClipId_, clip.id + 1);
   for (const auto &asset : project_.assets)
     nextAssetId_ = qMax(nextAssetId_, asset.id + 1);
   missingAssets_.clear();
@@ -3181,10 +3208,11 @@ void StudioWindow::refreshControls() {
   deleteButton_->setEnabled(
       editable && (timeline_->rangeOut() > timeline_->rangeIn() ||
                    timeline_->selectedClip() || timeline_->selectedCue() ||
+                   timeline_->selectedAudioClip() ||
                    timeline_->selectedTransitionDeletable()));
   deleteButton_->setToolTip(deleteButton_->isEnabled()
-      ? QStringLiteral("Delete the selected range, clip, transition, or zoom · Delete")
-      : QStringLiteral("Select a clip, transition, zoom, or range to delete"));
+      ? QStringLiteral("Delete the selected range, clip, sound, transition, or zoom · Delete")
+      : QStringLiteral("Select a clip, sound, transition, zoom, or range to delete"));
   background_->setEnabled(editable);
   aspect_->setEnabled(editable);
   presets_->setEnabled(editable);
@@ -3253,13 +3281,17 @@ void StudioWindow::refreshControls() {
       zoomPreviewing
           ? QStringLiteral("Stop the zoom preview")
           : QStringLiteral("Play from just before the selected zoom"));
-  // One tweak card shows the selection: zoom cue, boundary, scene, or none.
+  // One tweak card shows the selection: zoom cue, boundary, scene, sound,
+  // or none.
   const bool boundarySelected = timeline_->selectedTransition() != 0;
   const bool clipSelected = timeline_->selectedClip() != 0;
+  const bool audioSelected = timeline_->selectedAudioClip() != 0;
   zoomCard_->setVisible(cue != nullptr);
   transitionCard_->setVisible(cue == nullptr && boundarySelected);
-  clipCard_->setVisible(cue == nullptr && !boundarySelected && clipSelected);
-  emptyCard_->setVisible(cue == nullptr && !boundarySelected && !clipSelected);
+  clipCard_->setVisible(cue == nullptr && !boundarySelected &&
+                        (clipSelected || audioSelected));
+  emptyCard_->setVisible(cue == nullptr && !boundarySelected &&
+                         !clipSelected && !audioSelected);
   cueLabel_->setText(cue ? QStringLiteral("Zoom  %1\n%2 — %3")
                                .arg(cue->id)
                                .arg(studioTimecode(cue->startMs).mid(3),
@@ -3393,6 +3425,12 @@ void StudioWindow::refreshSplitAction() {
     const auto frame = studioFrameAt(project_, at);
     available = editable && frame && at > frame->span.startMs &&
                 at < frame->span.endMs && !studioBlendAt(project_, at);
+    // A selected sound splits on the same key: offer it inside its span.
+    if (!available && timeline_->selectedAudioClip() != 0)
+      for (const auto &span : studioAudioComposition(project_))
+        if (span.clipId == timeline_->selectedAudioClip() &&
+            at > span.startMs && at < span.endMs)
+          available = editable;
   }
   splitButton_->setEnabled(available);
   splitButton_->setToolTip(available
@@ -3497,6 +3535,33 @@ void StudioWindow::splitAtPlayhead() {
   captureCursor();
   const qint64 at = player_->position();
   QString error;
+  // A selected sound owns the key while it is selected, like a cue does —
+  // but only inside itself, never whatever merely sits at the playhead.
+  if (timeline_->selectedAudioClip() != 0) {
+    bool inside = false;
+    for (const auto &span : studioAudioComposition(project_))
+      if (span.clipId == timeline_->selectedAudioClip() &&
+          at > span.startMs && at < span.endMs)
+        inside = true;
+    if (!inside) {
+      setStatus(QStringLiteral(
+          "Move the playhead inside the selected sound to split it"));
+      return;
+    }
+    const quint64 id = nextAudioClipId_++;
+    if (!studioSplitAudioClip(project_, at, id, error)) {
+      setStatus(error.isEmpty()
+                    ? QStringLiteral(
+                          "Choose a representable point inside the sound to split")
+                    : error);
+      return;
+    }
+    timeline_->setSelectedAudioClip(id);
+    timeline_->update();
+    rememberEdit();
+    setStatus(QStringLiteral("Sound split — Ctrl+Z to undo"));
+    return;
+  }
   if (!studioSplitClip(project_, at, nextClipId_++, &error)) {
     setStatus(error.isEmpty()
                   ? QStringLiteral(
@@ -3528,6 +3593,9 @@ void StudioWindow::deleteSelection() {
     return;
   } else if (timeline_->selectedTransition()) {
     removeTransition(timeline_->selectedTransition());
+    return;
+  } else if (timeline_->selectedAudioClip()) {
+    deleteAudioClip();
     return;
   } else if (timeline_->selectedClip())
     result = studioDeleteClip(project_, timeline_->selectedClip());
@@ -3755,6 +3823,8 @@ void StudioWindow::applyChrome() {
     transitionDirection_->setChrome(chrome);
   if (clipSpeed_)
     clipSpeed_->setChrome(chrome);
+  if (audioSpeed_)
+    audioSpeed_->setChrome(chrome);
   if (statusLabel_)
     setStatus(statusLabel_->text(),
               statusLabel_->property("studioError").toBool());

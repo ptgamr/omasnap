@@ -7,8 +7,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QStyleOption>
 #include <QtConcurrentRun>
 
 #include <algorithm>
@@ -271,4 +273,66 @@ void StudioComboBox::paintEvent(QPaintEvent *event) {
   const qreal y = height() / 2.0;
   painter.drawPolyline(
       QPolygonF{{x - 3, y - 1.5}, {x, y + 1.5}, {x + 3, y - 1.5}});
+}
+
+void StudioSlider::mousePressEvent(QMouseEvent *event) {
+  if (event->button() == Qt::LeftButton && !isSliderDown()) {
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    if (!style()
+             ->subControlRect(QStyle::CC_Slider, &opt,
+                              QStyle::SC_SliderHandle, this)
+             .contains(event->pos())) {
+      grooveDrag_ = true;
+      // setSliderDown emits sliderPressed before the jump value lands, so
+      // beginEdit suppresses history until release: one undo entry.
+      setSliderDown(true);
+      jumpTo(event->pos());
+      event->accept();
+      return;
+    }
+  }
+  QSlider::mousePressEvent(event);
+}
+
+void StudioSlider::mouseMoveEvent(QMouseEvent *event) {
+  if (grooveDrag_) {
+    jumpTo(event->pos());
+    event->accept();
+    return;
+  }
+  QSlider::mouseMoveEvent(event);
+}
+
+void StudioSlider::mouseReleaseEvent(QMouseEvent *event) {
+  if (grooveDrag_ && event->button() == Qt::LeftButton) {
+    grooveDrag_ = false;
+    // Emits sliderReleased for the matching endEdit.
+    setSliderDown(false);
+    event->accept();
+    return;
+  }
+  QSlider::mouseReleaseEvent(event);
+}
+
+void StudioSlider::jumpTo(const QPoint &pos) {
+  QStyleOptionSlider opt;
+  initStyleOption(&opt);
+  const QRect groove = style()->subControlRect(QStyle::CC_Slider, &opt,
+                                               QStyle::SC_SliderGroove, this);
+  const QRect handle = style()->subControlRect(QStyle::CC_Slider, &opt,
+                                               QStyle::SC_SliderHandle, this);
+  const bool horizontal = orientation() == Qt::Horizontal;
+  int span, p;
+  if (horizontal) {
+    span = groove.width() - handle.width();
+    p = pos.x() - groove.left() - handle.width() / 2;
+  } else {
+    span = groove.height() - handle.height();
+    p = pos.y() - groove.top() - handle.height() / 2;
+  }
+  if (span <= 0)
+    return;
+  setValue(style()->sliderValueFromPosition(minimum(), maximum(), p, span,
+                                            !horizontal));
 }

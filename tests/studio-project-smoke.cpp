@@ -996,6 +996,104 @@ bool runStudioProjectChecks(QString &error) {
       return false;
   }
   {
+    // Audio structural edits: move, duplicate, trim, split, delete, and
+    // scalar retunes, each undoable through the project value.
+    StudioProject scored;
+    StudioSource song;
+    song.durationMs = 10000;
+    song.audioStreams = 1;
+    scored.assets = {{1, QStringLiteral("song.mp3"), song}};
+    scored.audioClips = {{11, 1, 0, 4000, 1.0, 100},
+                         {12, 1, 4000, 8000, 1.0, 100},
+                         {13, 1, 8000, 10000, 1.0, 100}};
+    QString audioError;
+    if (!check(studioMoveAudioClip(scored, 13, 11, audioError) &&
+                   audioError.isEmpty() &&
+                   scored.audioClips[0].id == 13 &&
+                   scored.audioClips[1].id == 11,
+               QStringLiteral("Audio move did not reorder")))
+      return false;
+    if (!check(!studioMoveAudioClip(scored, 13, 13, audioError) &&
+                   !studioMoveAudioClip(scored, 13, 11, audioError) &&
+                   scored.audioClips[0].id == 13 &&
+                   !studioMoveAudioClip(scored, 99, 11, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio move no-op or missing scene is wrong")))
+      return false;
+    if (!check(studioDuplicateAudioClip(scored, 11, 21, audioError) &&
+                   audioError.isEmpty() && scored.audioClips[2].id == 21 &&
+                   scored.audioClips[2].inMs == 0,
+               QStringLiteral("Audio duplicate did not copy after")))
+      return false;
+    if (!check(!studioDuplicateAudioClip(scored, 11, 21, audioError) &&
+                   !audioError.isEmpty() &&
+                   !studioDuplicateAudioClip(scored, 99, 22, audioError),
+               QStringLiteral("Audio duplicate identity is wrong")))
+      return false;
+    if (!check(studioTrimAudioClip(scored, 21, 500, 3000, audioError) &&
+                   audioError.isEmpty(),
+               QStringLiteral("Audio trim refused")))
+      return false;
+    if (!check(!studioTrimAudioClip(scored, 21, 500, 3000, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioTrimAudioClip(scored, 99, 0, 100, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio trim no-op or missing scene is wrong")))
+      return false;
+    if (!check(studioSplitAudioClip(scored, 1000, 31, audioError) &&
+                   audioError.isEmpty(),
+               QStringLiteral("Audio split refused")))
+      return false;
+    bool anchored = false;
+    for (const auto &clip : scored.audioClips)
+      if (clip.id == 31 && clip.inMs == 9000 && clip.outMs == 10000)
+        anchored = true;
+    const StudioAudioClip *left = nullptr;
+    for (const auto &clip : scored.audioClips)
+      if (clip.id == 13 && clip.outMs == 9000)
+        left = &clip;
+    if (!check(anchored && left,
+               QStringLiteral("Audio split boundary is not source-anchored")))
+      return false;
+    if (!check(!studioSplitAudioClip(scored, 1000, 32, audioError) &&
+                   !studioSplitAudioClip(scored, 20000, 32, audioError) &&
+                   !studioSplitAudioClip(scored, 1500, 31, audioError),
+               QStringLiteral("Audio split inside, outside, or reuse is wrong")))
+      return false;
+    if (!check(studioDeleteAudioClip(scored, 31, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioDeleteAudioClip(scored, 99, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio delete is wrong")))
+      return false;
+    if (!check(studioSetAudioClipGain(scored, 11, 50, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 11, 50, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 11, 101, audioError) &&
+                   !audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 99, 50, audioError),
+               QStringLiteral("Audio gain is wrong")))
+      return false;
+    if (!check(studioSetAudioClipSpeed(scored, 11, 2.0, audioError) &&
+                   audioError.isEmpty() &&
+                   studioAudioComposition(scored)[1].endMs == 3000 &&
+                   !studioSetAudioClipSpeed(scored, 11, 2.0, audioError) &&
+                   !studioSetAudioClipSpeed(scored, 11, 0.0, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio speed is wrong")))
+      return false;
+    // Splitting conserves rounded duration: 1000 ms at 0.75x stays 1333.
+    StudioProject paced;
+    paced.assets = {{1, QStringLiteral("song.mp3"), song}};
+    paced.audioClips = {{11, 1, 0, 1000, 0.75, 100}};
+    if (!check(studioSplitAudioClip(paced, 2, 21, audioError) &&
+                   audioError.isEmpty() &&
+                   studioAudioComposition(paced).back().endMs == 1333,
+               QStringLiteral("Audio split shifted downstream sounds")))
+      return false;
+  }
+  {
     // Audio lane: audio-only assets validate, clips lay end to end with
     // speed and gain, and everything persists.
     StudioProject scored;

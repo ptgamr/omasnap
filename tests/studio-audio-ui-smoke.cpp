@@ -3,8 +3,11 @@
 #include "studio-playback.hpp"
 #include "studio-project.hpp"
 #include "studio.hpp"
+#include <QComboBox>
 #include <QDataStream>
 #include <QFile>
+#include <QLabel>
+#include <QSlider>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QWidget>
@@ -65,7 +68,7 @@ bool runStudioAudioUiChecks(const QString &source, QString &error) {
   project.assets.push_back({3, epic, epicSource});
   project.canvas = {320, 180};
   project.clips = {{1, 1, 0, 6000, 1}};
-  project.audioClips = {{11, 2, 0, 1500, 1.0, 100},
+  project.audioClips = {{11, 2, 0, 1500, 1.0, 0},
                         {12, 3, 0, 10000, 1.0, 100}};
   const QString document = scratch.filePath(QStringLiteral("audio.omasnap.json"));
   if (!saveStudioProject(document, project).isEmpty())
@@ -113,6 +116,17 @@ bool runStudioAudioUiChecks(const QString &source, QString &error) {
   if (!require(pixelAt(lanePoint(1000).x(), 133) == theme->chrome().accent,
                "selected audio clip is not painted"))
     return false;
+  auto *gain = window.findChild<QSlider *>(QStringLiteral("audioGain"));
+  auto *gainValue =
+      window.findChild<QLabel *>(QStringLiteral("audioGainValue"));
+  if (!require(gain && gainValue, "audio gain controls are missing"))
+    return false;
+  // The fixture clip sits at zero gain, selected first: the slider starts
+  // at zero too, so no signal fires and only the explicit sync can read 0%.
+  if (!require(gain->value() == 0 &&
+                   gainValue->text() == QStringLiteral("0%"),
+               "zero gain reads 100%"))
+    return false;
   // The overlong clip maps its visible slice: 5500 ms shows source 3500 ms
   // (loud), not the source squeezed into view (silent past 6000 ms). Off
   // the midline, where silent buckets paint nothing.
@@ -136,13 +150,114 @@ bool runStudioAudioUiChecks(const QString &source, QString &error) {
                    timeline->selectedAudioClip() == 0,
                "scene selection did not clear the audio selection"))
     return false;
+  // Trim the first sound shorter by its right edge.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, lanePoint(500));
+  const QPoint trimPress(
+      64 + qRound((timeline->width() - 80) * 1480 / 6000.0), 147);
+  const QPoint trimDrop(
+      64 + qRound((timeline->width() - 80) * 1000 / 6000.0), 147);
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, trimPress);
+  QTest::mouseMove(timeline, trimDrop);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, trimDrop);
+  if (!require(timeline->selectedAudioClip() == 11,
+               "trim lost the audio selection"))
+    return false;
+  // Move the long sound first by its body.
+  const QPoint movePress(
+      64 + qRound((timeline->width() - 80) * 3000 / 6000.0), 147);
+  const QPoint moveDrop(
+      64 + qRound((timeline->width() - 80) * 200 / 6000.0), 147);
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, movePress);
+  QTest::mouseMove(timeline, moveDrop);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, moveDrop);
+  if (!require(timeline->selectedAudioClip() == 12,
+               "move lost the audio selection"))
+    return false;
+  // Split the long sound at the playhead, then delete the tail.
+  player->setPosition(3000);
+  QTest::keyClick(&window, Qt::Key_S);
+  if (!require(timeline->selectedAudioClip() == 13,
+               "split did not select the incoming sound"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Delete);
+  if (!require(timeline->selectedAudioClip() == 0,
+               "delete kept the audio selection"))
+    return false;
+  // Duplicate the selected sound, then tune the copy.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, lanePoint(500));
+  QTest::keyClick(&window, Qt::Key_D, Qt::ControlModifier);
+  if (!require(timeline->selectedAudioClip() == 14,
+               "duplicate did not select the new sound"))
+    return false;
+  auto *speed = window.findChild<QComboBox *>(QStringLiteral("audioSpeed"));
+  if (!require(speed, "audio speed control is missing"))
+    return false;
+  gain->setValue(50);
+  const int twice = speed->findText(QStringLiteral("2×"));
+  if (!require(twice >= 0, "2x audio speed preset missing"))
+    return false;
+  speed->setCurrentIndex(twice);
+  speed->activated(twice);
+  // Undo restores the speed; redo brings the tuned copy back for saving.
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(speed->currentText() == QStringLiteral("1×"),
+               "audio speed change was not undoable"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z,
+                  Qt::ControlModifier | Qt::ShiftModifier);
+  if (!require(speed->currentText() == QStringLiteral("2×"),
+               "audio speed change was not redoable"))
+    return false;
+  // S with the playhead outside the selected sound refuses instead of
+  // cutting whatever sits there.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, lanePoint(4750));
+  player->setPosition(1000);
+  QTest::keyClick(&window, Qt::Key_S);
+  if (!require(timeline->selectedAudioClip() == 11,
+               "split cut the unselected sound"))
+    return false;
+  // Gain drags stay live mid-gesture as one undo step, readout included.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, lanePoint(4250));
+  if (!require(timeline->selectedAudioClip() == 14,
+               "gain target did not select"))
+    return false;
+  const QPoint grip(gain->rect().left() + 10, gain->rect().center().y());
+  QTest::mousePress(gain, Qt::LeftButton, Qt::NoModifier, grip);
+  QTest::mouseMove(gain, grip + QPoint(20, 0));
+  if (!require(gain->isEnabled() && gain->value() != 50,
+               "gain drag stalled mid-gesture"))
+    return false;
+  QTest::mouseMove(gain, grip + QPoint(40, 0));
+  QTest::mouseRelease(gain, Qt::LeftButton, Qt::NoModifier,
+                      grip + QPoint(40, 0));
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(gain->value() == 50 &&
+                   gainValue->text() == QStringLiteral("50%"),
+               "gain drag was not one undo step"))
+    return false;
   window.close();
   if (!require(QTest::qWaitFor([&] { return !window.isVisible(); }, 7000),
                "audio project did not close"))
     return false;
   const auto saved = loadStudioProject(document);
-  if (!require(saved.error.isEmpty() && saved.project.audioClips.size() == 2,
-               "audio lane did not survive a save"))
+  const bool orderOk = saved.project.audioClips.size() == 3 &&
+                       saved.project.audioClips[0].id == 12 &&
+                       saved.project.audioClips[1].id == 14 &&
+                       saved.project.audioClips[2].id == 11;
+  const auto &tuned =
+      saved.project.audioClips.size() == 3 ? saved.project.audioClips[1]
+                                           : saved.project.audioClips[0];
+  const auto &trimmed =
+      saved.project.audioClips.size() == 3 ? saved.project.audioClips[2]
+                                           : saved.project.audioClips[0];
+  // The duplicate copies the split clip 12 (outMs exactly 3000: the
+  // split boundary is playhead minus span start at speed 1), then gains 50
+  // and doubles speed; the trimmed clip 11 keeps its dragged-out range.
+  if (!require(saved.error.isEmpty() && orderOk &&
+                   trimmed.outMs >= 985 && trimmed.outMs <= 1015 &&
+                   tuned.gain == 50 && tuned.speed == 2.0 &&
+                   tuned.inMs == 0 && tuned.outMs == 3000,
+               "audio gestures did not persist"))
     return false;
   // A lane shorter than the video leaves empty space; clicking it clears.
   StudioProject shortLane;
