@@ -48,6 +48,12 @@ qint64 clipDuration(const StudioClip &clip) {
     return 0;
   return qRound64(static_cast<double>(clip.outMs - clip.inMs) / clip.speed);
 }
+qint64 audioClipDuration(const StudioAudioClip &clip) {
+  if (!std::isfinite(clip.speed) || clip.speed < 0.125 || clip.speed > 8 ||
+      clip.inMs < 0 || clip.outMs <= clip.inMs || clip.outMs > maxDuration)
+    return 0;
+  return qRound64(static_cast<double>(clip.outMs - clip.inMs) / clip.speed);
+}
 struct ClipSplit {
   StudioClip left;
   StudioClip right;
@@ -161,8 +167,11 @@ quint64 idFrom(const QJsonValue &value) {
   return ok ? id : 0;
 }
 QJsonObject sourceJson(const StudioSource &s) {
-  return {{"width", s.size.width()},
-          {"height", s.size.height()},
+  // Invalid dimensions encode as zero: audio-only sources have no picture,
+  // and the decode bounds below admit zero so they round-trip. Validation,
+  // not the codec, decides what is usable.
+  return {{"width", qMax(0, s.size.width())},
+          {"height", qMax(0, s.size.height())},
           {"fpsNumerator", s.fpsNumerator},
           {"fpsDenominator", s.fpsDenominator},
           {"rotation", s.rotation},
@@ -272,6 +281,19 @@ QVector<StudioSpan> studioComposition(const StudioProject &p) {
   }
   return spans;
 }
+QVector<StudioAudioSpan> studioAudioComposition(const StudioProject &p) {
+  QVector<StudioAudioSpan> spans;
+  qint64 position = 0;
+  for (const auto &clip : p.audioClips) {
+    const qint64 duration = audioClipDuration(clip);
+    if (position < 0 || duration <= 0 || duration > maxDuration - position)
+      return {};
+    spans.push_back({clip.id, clip.assetId, position, position + duration,
+                     clip.inMs, clip.outMs, clip.speed, clip.gain});
+    position += duration;
+  }
+  return spans;
+}
 std::optional<StudioBlend> studioBlendAt(const StudioProject &p, qint64 time) {
   const auto spans = studioComposition(p);
   for (qsizetype i = 1; i < spans.size(); ++i) {
@@ -360,7 +382,8 @@ QSize studioEffectiveCanvas(const StudioProject &p) {
   return {width, evenCeil(width / ratio)};
 }
 QString validateStudioProject(const StudioProject &p) {
-  if (p.assets.size() > maxItems || p.clips.size() > maxItems)
+  if (p.assets.size() > maxItems || p.clips.size() > maxItems ||
+      p.audioClips.size() > maxItems)
     return QStringLiteral("Project exceeds the 1000 asset/scene limit.");
   if (p.canvas.width() < 2 || p.canvas.height() < 2 ||
       p.canvas.width() % 2 != 0 || p.canvas.height() % 2 != 0 ||
@@ -386,7 +409,8 @@ QString validateStudioProject(const StudioProject &p) {
   for (const auto &a : p.assets) {
     if (!a.id || assets.contains(a.id) || a.path.isEmpty() ||
         a.path.size() > 32768 || a.path.contains(QChar::Null) ||
-        !a.source.usable() || a.source.size.width() > 32768 ||
+        (!a.source.usable() && !a.source.usableAudio()) ||
+        a.source.size.width() > 32768 ||
         a.source.size.height() > 32768 || a.source.fpsNumerator > 1000000 ||
         a.source.fpsDenominator > 1000000 || a.source.durationMs <= 0 ||
         a.source.durationMs > maxDuration || a.source.audioStreams < 0 ||
@@ -401,12 +425,27 @@ QString validateStudioProject(const StudioProject &p) {
   for (const auto &c : p.clips) {
     const auto *a = studioAsset(p, c.assetId);
     const auto duration = clipDuration(c);
-    if (!c.id || clips.contains(c.id) || !a || duration <= 0 ||
-        c.outMs > a->source.durationMs || duration > maxDuration - total)
+    if (!c.id || clips.contains(c.id) || !a || !a->source.usable() ||
+        duration <= 0 || c.outMs > a->source.durationMs ||
+        duration > maxDuration - total)
       return QStringLiteral(
           "Invalid scene identity, source range, speed, or duration.");
     clips.insert(c.id);
     total += duration;
+  }
+  QSet<quint64> audioClips;
+  qint64 audioTotal = 0;
+  for (const auto &c : p.audioClips) {
+    const auto *a = studioAsset(p, c.assetId);
+    const auto duration = audioClipDuration(c);
+    if (!c.id || audioClips.contains(c.id) || !a ||
+        !a->source.usableAudio() || duration <= 0 ||
+        c.outMs > a->source.durationMs || c.gain < 0 || c.gain > 100 ||
+        duration > maxDuration - audioTotal)
+      return QStringLiteral(
+          "Invalid audio clip identity, source range, speed, or gain.");
+    audioClips.insert(c.id);
+    audioTotal += duration;
   }
   if (p.transitions.size() > qMax<qsizetype>(0, p.clips.size() - 1))
     return QStringLiteral("Too many scene transitions.");
@@ -450,7 +489,7 @@ QString validateStudioProject(const StudioProject &p) {
   return {};
 }
 QByteArray encodeStudioProject(const StudioProject &p) {
-  QJsonArray assets, clips, transitions;
+  QJsonArray assets, clips, transitions, audioClips;
   for (const auto &a : p.assets)
     assets.append(QJsonObject{{"id", QString::number(a.id)},
                               {"path", a.path},
@@ -467,12 +506,20 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                     {"incomingClipId", QString::number(t.incomingClipId)},
                     {"kind", studioTransitionName(t.kind)},
                     {"durationMs", t.durationMs}});
+  for (const auto &c : p.audioClips)
+    audioClips.append(QJsonObject{{"id", QString::number(c.id)},
+                                  {"assetId", QString::number(c.assetId)},
+                                  {"inMs", c.inMs},
+                                  {"outMs", c.outMs},
+                                  {"speed", c.speed},
+                                  {"gain", c.gain}});
   return QJsonDocument(
              QJsonObject{
                  {"schema", StudioProject::kSchema},
-                 {"assets", assets},
-                 {"clips", clips},
-                 {"transitions", transitions},
+                  {"assets", assets},
+                  {"clips", clips},
+                  {"transitions", transitions},
+                  {"audioClips", audioClips},
                  {"canvas", QJsonObject{{"width", p.canvas.width()},
                                         {"height", p.canvas.height()},
                                         {"fpsNumerator", p.fpsNumerator},
@@ -511,7 +558,10 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
     return malformed;
   const auto assets = root["assets"].toArray(), clips = root["clips"].toArray();
   if (assets.size() > maxItems || clips.size() > maxItems ||
-      root["transitions"].toArray().size() > maxItems)
+      root["transitions"].toArray().size() > maxItems ||
+      (!root["audioClips"].isUndefined() &&
+       (!root["audioClips"].isArray() ||
+        root["audioClips"].toArray().size() > maxItems)))
     return QStringLiteral("Project exceeds the 1000 asset/scene limit.");
   StudioProject p;
   p.trimInMs = root["trimInMs"].toInteger();
@@ -572,10 +622,14 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
       return malformed;
     for (const auto *key :
          {"width", "height", "fpsNumerator", "fpsDenominator"})
-      if (!integer(s[key], 1, 1000000))
+      if (!integer(s[key], 0, 1000000))
         return malformed;
     StudioSource source;
     source.size = {s["width"].toInt(), s["height"].toInt()};
+    // The encoder writes zero for picturless sources; no real stream is
+    // 0x0, so empty decodes back to invalid and the round trip is lossless.
+    if (source.size.isEmpty())
+      source.size = {};
     source.fpsNumerator = s["fpsNumerator"].toInt();
     source.fpsDenominator = s["fpsDenominator"].toInt();
     source.rotation = s["rotation"].toInt();
@@ -601,6 +655,17 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
     p.transitions.push_back({idFrom(t["outgoingClipId"]),
                              idFrom(t["incomingClipId"]), *kind,
                              t["durationMs"].toInteger()});
+  }
+  // Absent before the audio lane existed.
+  for (const auto &value : root["audioClips"].toArray()) {
+    const auto c = value.toObject();
+    if (!value.isObject() || !integer(c["inMs"], 0, maxDuration) ||
+        !integer(c["outMs"], 0, maxDuration) || !c["speed"].isDouble() ||
+        !integer(c["gain"], 0, 100))
+      return malformed;
+    p.audioClips.push_back({idFrom(c["id"]), idFrom(c["assetId"]),
+                            c["inMs"].toInteger(), c["outMs"].toInteger(),
+                            c["speed"].toDouble(), c["gain"].toInt()});
   }
   const auto zoom = root["zoom"].toObject();
   if (!zoom["cues"].isArray() || zoom["cues"].toArray().size() > kMaxZoomCues)

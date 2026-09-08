@@ -993,6 +993,82 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("Missing music does not default to silence")))
       return false;
   }
+  {
+    // Audio lane: audio-only assets validate, clips lay end to end with
+    // speed and gain, and everything persists.
+    StudioProject scored;
+    StudioSource song;
+    song.durationMs = 10000;
+    song.audioStreams = 1;
+    scored.assets = {{1, QStringLiteral("song.mp3"), song}};
+    scored.audioClips = {{11, 1, 1000, 6000, 1.0, 100},
+                         {12, 1, 0, 2000, 2.0, 50}};
+    if (!check(validateStudioProject(scored).isEmpty(),
+               QStringLiteral("Valid audio lane rejected")))
+      return false;
+    const auto spans = studioAudioComposition(scored);
+    if (!check(spans.size() == 2 && spans[0].startMs == 0 &&
+                   spans[0].endMs == 5000 && spans[0].gain == 100 &&
+                   spans[1].startMs == 5000 && spans[1].endMs == 6000 &&
+                   spans[1].gain == 50 && spans[1].inMs == 0,
+               QStringLiteral("Audio composition layout is wrong")))
+      return false;
+    if (!check(decodeStudioProject(encodeStudioProject(scored), decoded)
+                       .isEmpty() &&
+                   decoded == scored,
+               QStringLiteral("Audio lane does not persist")))
+      return false;
+    auto videoOnly = scored;
+    videoOnly.audioClips.clear();
+    videoOnly.clips = {{7, 1, 0, 1000, 1.0}};
+    if (!check(!validateStudioProject(videoOnly).isEmpty(),
+               QStringLiteral("Scene on an audio-only asset accepted")))
+      return false;
+    for (const auto bad :
+         {StudioAudioClip{13, 1, 0, 1000, 1.0, 101},
+          StudioAudioClip{13, 1, 0, 1000, 1.0, -1},
+          StudioAudioClip{13, 1, 0, 1000, 0.0, 100},
+          StudioAudioClip{13, 1, 5000, 4000, 1.0, 100},
+          StudioAudioClip{13, 1, 0, 11000, 1.0, 100},
+          StudioAudioClip{13, 99, 0, 1000, 1.0, 100},
+          StudioAudioClip{11, 1, 0, 1000, 1.0, 100}}) {
+      auto invalidAudio = scored;
+      invalidAudio.audioClips.push_back(bad);
+      if (!check(!validateStudioProject(invalidAudio).isEmpty(),
+                 QStringLiteral("Invalid audio clip accepted")))
+        return false;
+    }
+    auto silent = scored;
+    silent.assets[0].source.audioStreams = 0;
+    if (!check(!validateStudioProject(silent).isEmpty(),
+               QStringLiteral("Audio clip on a streamless asset accepted")))
+      return false;
+    // Rounded retimed durations hold at validation: 1 ms at 8x is zero.
+    auto subframe = scored;
+    subframe.audioClips.push_back({13, 1, 0, 1, 8.0, 100});
+    if (!check(!validateStudioProject(subframe).isEmpty(),
+               QStringLiteral("Zero-length retimed audio accepted")))
+      return false;
+    // So does the cumulative lane bound: two full-length songs exceed it.
+    StudioProject longLane;
+    StudioSource album;
+    album.durationMs = 604800000;
+    album.audioStreams = 1;
+    longLane.assets = {{1, QStringLiteral("album.mp3"), album}};
+    longLane.audioClips = {{11, 1, 0, 604800000, 1.0, 100},
+                           {12, 1, 0, 1000, 1.0, 100}};
+    if (!check(!validateStudioProject(longLane).isEmpty(),
+               QStringLiteral("Overlong audio lane accepted")))
+      return false;
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    json.remove(QStringLiteral("audioClips"));
+    if (!check(decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.audioClips.isEmpty(),
+               QStringLiteral("Missing audio lane does not default to empty")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&

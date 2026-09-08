@@ -20,6 +20,11 @@ struct StudioSource {
     return size.isValid() && !size.isEmpty() && fpsNumerator > 0 &&
            fpsDenominator > 0 && !unsupportedTransform;
   }
+  /** Audio-only sources (songs, voiceovers): no picture, but a countable
+   *  duration and at least one audio stream. */
+  [[nodiscard]] bool usableAudio() const {
+    return durationMs > 0 && audioStreams > 0;
+  }
   bool operator==(const StudioSource &) const = default;
 };
 
@@ -80,11 +85,37 @@ struct StudioMusic {
   qint64 durationMs = 0;
   bool operator==(const StudioMusic &) const = default;
 };
+/**
+ * One sound on the audio lane: an independent end-to-end sequence on the
+ * shared composition clock, arranged like video scenes but never shifted
+ * by video edits (documented, like music). Gain is percent.
+ */
+struct StudioAudioClip {
+  quint64 id = 0;
+  quint64 assetId = 0;
+  qint64 inMs = 0;
+  qint64 outMs = 0;
+  double speed = 1.0;
+  int gain = 100;
+  bool operator==(const StudioAudioClip &) const = default;
+};
+/** One laid-out sound: half-open [startMs, endMs) on the composition. */
+struct StudioAudioSpan {
+  quint64 clipId = 0;
+  quint64 assetId = 0;
+  qint64 startMs = 0;
+  qint64 endMs = 0;
+  qint64 inMs = 0;
+  qint64 outMs = 0;
+  double speed = 1.0;
+  int gain = 100;
+};
 struct StudioProject {
   static constexpr int kSchema = 2;
   QVector<StudioAsset> assets;
   QVector<StudioClip> clips;
   QVector<StudioTransition> transitions;
+  QVector<StudioAudioClip> audioClips;
   ZoomTrack zoom; // Edited composition time, never source-file time.
   StudioStyle style;
   StudioMusic music;
@@ -136,6 +167,9 @@ struct StudioBlend {
                                           QString &error);
 [[nodiscard]] const StudioAsset *studioAsset(const StudioProject &, quint64 id);
 [[nodiscard]] QVector<StudioSpan> studioComposition(const StudioProject &);
+/** The audio lane laid end to end from composition zero, in clip order. */
+[[nodiscard]] QVector<StudioAudioSpan> studioAudioComposition(
+    const StudioProject &);
 /** The canvas after the style aspect expands it: Original returns the
  *  source size, anything else grows one side to the ratio (even, never
  *  cropping). Preview, playback sizing, and export all use this. */
