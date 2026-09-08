@@ -950,6 +950,49 @@ bool runStudioProjectChecks(QString &error) {
                QStringLiteral("Speed change on a missing scene accepted")))
       return false;
   }
+  {
+    // Music persists, validates, and defaults to silence.
+    if (!check(p.music.path.isEmpty() && p.music.durationMs == 0 &&
+                   validateStudioProject(p).isEmpty(),
+               QStringLiteral("A music-less project is not silent")))
+      return false;
+    auto scored = p;
+    scored.music = {QStringLiteral("/tmp/song.mp3"), 20, 180000};
+    if (!check(validateStudioProject(scored).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(scored), decoded)
+                           .isEmpty() &&
+                   decoded.music == scored.music,
+               QStringLiteral("Background music does not persist")))
+      return false;
+    for (const auto bad :
+         {StudioMusic{QStringLiteral("/tmp/song.mp3"), 101, 180000},
+          StudioMusic{QStringLiteral("/tmp/song.mp3"), -1, 180000},
+          StudioMusic{QStringLiteral("/tmp/song.mp3"), 20, 0},
+          StudioMusic{{}, 20, 180000}}) {
+      auto invalidMusic = p;
+      invalidMusic.music = bad;
+      if (!check(!validateStudioProject(invalidMusic).isEmpty(),
+                 QStringLiteral("Invalid background music accepted")))
+        return false;
+    }
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    auto musicObject = json["music"].toObject();
+    musicObject.remove(QStringLiteral("volume"));
+    json["music"] = musicObject;
+    if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty(),
+               QStringLiteral("Mistyped music accepted")))
+      return false;
+    json = QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    auto noMusic = json;
+    noMusic.remove(QStringLiteral("music"));
+    if (!check(decodeStudioProject(QJsonDocument(noMusic).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.music == StudioMusic{},
+               QStringLiteral("Missing music does not default to silence")))
+      return false;
+  }
   StudioProject empty;
   if (!check(
           decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&

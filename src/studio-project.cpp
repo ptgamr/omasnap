@@ -377,6 +377,11 @@ QString validateStudioProject(const StudioProject &p) {
       p.style.shadow > 100 || p.style.wallpaperPath.size() > 32768 ||
       p.style.wallpaperPath.contains(QChar::Null))
     return QStringLiteral("Invalid project canvas styling.");
+  if (p.music.volume < 0 || p.music.volume > 100 ||
+      p.music.durationMs < 0 || p.music.durationMs > maxDuration ||
+      p.music.path.size() > 32768 || p.music.path.contains(QChar::Null) ||
+      (p.music.path.isEmpty() != (p.music.durationMs == 0)))
+    return QStringLiteral("Invalid background music.");
   QSet<quint64> assets;
   for (const auto &a : p.assets) {
     if (!a.id || assets.contains(a.id) || a.path.isEmpty() ||
@@ -480,6 +485,9 @@ QByteArray encodeStudioProject(const StudioProject &p) {
                                        {"wallpaperPath",
                                         p.style.wallpaperPath}}},
                  {"zoom", writeZoomTrack(p.zoom)},
+                 {"music", QJsonObject{{"path", p.music.path},
+                                       {"volume", p.music.volume},
+                                       {"durationMs", p.music.durationMs}}},
                  {"trimInMs", p.trimInMs},
                  {"trimOutMs", p.trimOutMs}})
       .toJson(QJsonDocument::Indented);
@@ -540,6 +548,20 @@ QString decodeStudioProject(const QByteArray &data, StudioProject &out) {
   p.style = {style["background"].toInt(), style["padding"].toInt(),
              style["radius"].toInt(), aspect,
              style["wallpaperPath"].toString(), shadow};
+  // Absent before music existed, when the default silence applies; present
+  // values follow the same mistyped is malformed, out-of-range fails
+  // validation rule aspect and shadow.
+  if (!root["music"].isUndefined()) {
+    const auto music = root["music"].toObject();
+    if (!root["music"].isObject() || !integer(music["volume"], 0, 100) ||
+        !integer(music["durationMs"], 0, maxDuration) ||
+        !music["path"].isString() ||
+        music["path"].toString().size() > 32768 ||
+        music["path"].toString().contains(QChar::Null))
+      return malformed;
+    p.music = {music["path"].toString(), music["volume"].toInt(),
+               music["durationMs"].toInteger()};
+  }
   for (const auto &value : assets) {
     const auto a = value.toObject();
     const auto s = a["source"].toObject();

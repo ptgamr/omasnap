@@ -68,6 +68,18 @@ struct StudioTransition {
   qint64 durationMs = 0;
   bool operator==(const StudioTransition &) const = default;
 };
+/**
+ * Optional background music: one audio file under the whole composition,
+ * from composition zero, trimmed to fit. Empty path means silence.
+ * Volume is percent; durationMs is probed at import, never on the GUI
+ * thread.
+ */
+struct StudioMusic {
+  QString path;
+  int volume = 20;
+  qint64 durationMs = 0;
+  bool operator==(const StudioMusic &) const = default;
+};
 struct StudioProject {
   static constexpr int kSchema = 2;
   QVector<StudioAsset> assets;
@@ -75,6 +87,7 @@ struct StudioProject {
   QVector<StudioTransition> transitions;
   ZoomTrack zoom; // Edited composition time, never source-file time.
   StudioStyle style;
+  StudioMusic music;
   QSize canvas{1920, 1080};
   int fpsNumerator = 30;
   int fpsDenominator = 1;
