@@ -2,6 +2,7 @@
 #include "studio-playback.hpp"
 #include "studio.hpp"
 #include <QAbstractItemView>
+#include <QAudioOutput>
 #include <QFile>
 #include <QPushButton>
 #include <QSpinBox>
@@ -91,6 +92,77 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                "Space from transition duration did not transport"))
     return false;
   player->pause();
+  // Inspector fields keep native editing: hotkeys must not fire from them.
+  player->setPosition(1000);
+  timeline->setSelectedClip(1);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 1000; }, 4000),
+               "playhead did not settle before input checks"))
+    return false;
+  duration->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == duration; }, 2000),
+               "duration field did not take focus"))
+    return false;
+  QTest::keyClick(duration, Qt::Key_Backspace);
+  QTest::keyClick(duration, Qt::Key_S);
+  QTest::keyClick(duration, Qt::Key_Z);
+  QTest::keyClick(duration, Qt::Key_M);
+  QTest::keyClick(duration, Qt::Key_Left);
+  if (!require(player->duration() == 5400 && duration->value() == 600 &&
+                  timeline->selectedClip() == 1 &&
+                  timeline->selectedCue() == 0 &&
+                  player->position() == 1000 &&
+                  !player->audioOutput()->isMuted(),
+               "Inspector keypress leaked into transport or edits"))
+    return false;
+  type->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == type; }, 2000),
+               "transition type did not take focus"))
+    return false;
+  QTest::keyClick(type, Qt::Key_Backspace);
+  if (!require(player->duration() == 5400,
+               "Combo keypress changed project duration"))
+    return false;
+  if (!require(timeline->selectedClip() == 1,
+               "Combo keypress changed scene selection"))
+    return false;
+  auto *sceneIn = window.findChild<QSpinBox *>("sceneIn");
+  if (!require(sceneIn, "Scene trim field missing"))
+    return false;
+  sceneIn->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == sceneIn; }, 2000),
+               "scene trim field did not take focus"))
+    return false;
+  QTest::keyClick(sceneIn, Qt::Key_Backspace);
+  if (!require(player->duration() == 5400 && sceneIn->value() == 0,
+               "Scene trim keypress leaked into edits"))
+    return false;
+  // Typing a duration and pressing Enter applies it as one undo step.
+  duration->setFocus();
+  QTest::keyClick(duration, Qt::Key_A, Qt::ControlModifier);
+  QTest::keyClicks(duration, QStringLiteral("700"));
+  QTest::keyClick(duration, Qt::Key_Enter);
+  if (!require(duration->value() == 700 && player->duration() == 5300,
+               "Typed transition duration did not apply"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Space);
+  player->pause();
+  if (!require(player->duration() == 5400 && duration->value() == 600,
+               "Typed duration was not one undo step"))
+    return false;
+  // A typed duration the export grid normalizes snaps back in the field,
+  // even though the spinbox still has focus.
+  duration->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == duration; }, 2000),
+               "duration field did not take focus"))
+    return false;
+  QTest::keyClick(duration, Qt::Key_A, Qt::ControlModifier);
+  QTest::keyClicks(duration, QStringLiteral("601"));
+  QTest::keyClick(duration, Qt::Key_Enter);
+  if (!require(duration->value() == 600 && player->duration() == 5400,
+               "Normalized duration did not reconcile in the field"))
+    return false;
   player->setPosition(2700);
   QTest::keyClick(&window, Qt::Key_S);
   if (!require(player->duration() == 5400 && timeline->selectedClip() == 1,

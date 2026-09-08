@@ -4,6 +4,7 @@
 #include "studio.hpp"
 #include <QFileInfo>
 #include <QLabel>
+#include <QLineEdit>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -40,17 +41,16 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
   transitionDuration_->setObjectName(QStringLiteral("transitionDuration"));
   transitionDuration_->setKeyboardTracking(false);
   transitionDuration_->setButtonSymbols(QAbstractSpinBox::NoButtons);
+  transitionDuration_->setSingleStep(100);
   transitionDuration_->setRange(1, 5000);
   transitionDuration_->setValue(300);
   transitionDuration_->setSuffix(QStringLiteral(" ms overlap"));
   controls->addWidget(transitionDuration_);
-  auto *hint = new QLabel(
-      QStringLiteral("Transitions overlap kept frames. Remove a transition "
-                     "before cutting through its overlap."),
-      this);
-  hint->setWordWrap(true);
-  hint->setObjectName(QStringLiteral("muted"));
-  controls->addWidget(hint);
+  overlapHint_ =
+      new QLabel(QStringLiteral("Maximum 300 ms · overlaps kept frames"), this);
+  overlapHint_->setWordWrap(true);
+  overlapHint_->setObjectName(QStringLiteral("muted"));
+  controls->addWidget(overlapHint_);
   connect(transitionType_, &QComboBox::currentIndexChanged, this,
           &StudioWindow::changeTransition);
   connect(transitionDuration_, &QSpinBox::valueChanged, this,
@@ -59,7 +59,7 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
           &StudioWindow::showTransitionEditor);
 }
 
-void StudioWindow::refreshTransitionControls() {
+void StudioWindow::refreshTransitionControls(bool force) {
   if (!transitionType_)
     return;
   transitionType_->setChrome(theme_->chrome());
@@ -84,16 +84,25 @@ void StudioWindow::refreshTransitionControls() {
   transitionType_->setCurrentIndex(
       transition ? transitionType_->findData(static_cast<int>(transition->kind))
                  : 0);
-  transitionDuration_->setMaximum(static_cast<int>(qMax<qint64>(1, maximum)));
-  transitionDuration_->setValue(static_cast<int>(
-      transition ? transition->durationMs
-                 : qMin<qint64>(300, qMax<qint64>(1, maximum))));
-  transitionLabel_->setText(
-      incoming ? QStringLiteral(
-                     "Transition to %1\nMaximum %2 ms · frame-snapped overlap")
-                     .arg(name)
-                     .arg(maximum)
+  // Never wipe a value being typed: the model write waits for Enter, and a
+  // refresh in between must not replace the field from behind. Commits pass
+  // force so the field reconciles with normalization or rejection.
+  const auto *durationEdit = transitionDuration_->findChild<QLineEdit *>();
+  const bool typingDuration = transitionDuration_->hasFocus() ||
+                              (durationEdit && durationEdit->hasFocus());
+  if (force || !typingDuration) {
+    transitionDuration_->setMaximum(static_cast<int>(qMax<qint64>(1, maximum)));
+    transitionDuration_->setValue(static_cast<int>(
+        transition ? transition->durationMs
+                   : qMin<qint64>(300, qMax<qint64>(1, maximum))));
+  }
+  transitionLabel_->setText(QStringLiteral("Transition to next scene"));
+  transitionLabel_->setToolTip(
+      incoming ? QStringLiteral("%1 · maximum %2 ms overlap").arg(name).arg(maximum)
                : QStringLiteral("Select a scene with a following neighbor"));
+  if (overlapHint_)
+    overlapHint_->setText(
+        QStringLiteral("Maximum %1 ms · overlaps kept frames").arg(maximum));
   transitionDuration_->setToolTip(QStringLiteral(
       "Consumes the kept tail/head of both scenes; short scenes clamp the "
       "duration. No excluded source frames are revealed."));
@@ -141,7 +150,7 @@ void StudioWindow::changeTransition() {
   if (!changed) {
     if (!error.isEmpty())
       setStatus(error, true);
-    refreshTransitionControls();
+    refreshTransitionControls(true);
     return;
   }
   const auto position =
@@ -151,6 +160,7 @@ void StudioWindow::changeTransition() {
   finishCompositionEdit(position.value_or(player_->position()));
   timeline_->setSelectedClip(outgoing);
   rememberEdit();
+  refreshTransitionControls(true);
   const auto *transition = studioTransition(project_, outgoing, incoming);
   setStatus(transition
                 ? QStringLiteral("Transition: %1 ms overlap — Ctrl+Z to undo")

@@ -57,6 +57,19 @@
 namespace {
 
 constexpr int kTimelineHeight = 176;
+// True while typing in a value field, whether the key event targets the
+// field itself or an ancestor it bubbled to after the field ignored it.
+// Spinbox focus lands on the spinbox rather than its inner line edit, so
+// checking QLineEdit alone leaks keys into video edits either way.
+bool studioHotkeysSuspended(QObject *target) {
+  const auto isInput = [](QWidget *candidate) {
+    return qobject_cast<QLineEdit *>(candidate) != nullptr ||
+           qobject_cast<QAbstractSpinBox *>(candidate) != nullptr ||
+           qobject_cast<QComboBox *>(candidate) != nullptr;
+  };
+  return isInput(qobject_cast<QWidget *>(target)) ||
+         isInput(QApplication::focusWidget());
+}
 class TimelineActionButton final : public QPushButton {
 public:
   enum class Symbol { Split, Delete, Keep, Play, Pause, SoundOn, SoundOff };
@@ -1329,10 +1342,8 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   clipControls->addWidget(sourceLabel_);
   setupScenes(clipControls);
   auto *clipHint = new QLabel(
-      QStringLiteral("Drag to scrub; Ctrl+drag scenes to arrange; drag a "
-                     "selected scene's edges "
-                     "to trim it. Shift+drag selects a range to delete or keep. Originals "
-                     "stay untouched."),
+      QStringLiteral("Drag to scrub · Ctrl+drag to rearrange · drag a scene's "
+                     "edges to trim · Shift+drag selects a range to delete or keep."),
       clipPage);
   clipHint->setWordWrap(true);
   clipHint->setObjectName(QStringLiteral("muted"));
@@ -2217,9 +2228,18 @@ void StudioWindow::refreshControls() {
                                     studioTimecode(cue->endMs).mid(3))
                          : QStringLiteral("No zoom selected"));
   {
-    const QSignalBlocker quietIn(easeIn_), quietOut(easeOut_);
-    easeIn_->setValue(cue ? static_cast<int>(cue->easeInMs) : 400);
-    easeOut_->setValue(cue ? static_cast<int>(cue->easeOutMs) : 400);
+    // Never wipe values being typed: timings commit on Enter, and a refresh
+    // in between must not replace the fields from behind.
+    const auto *inEdit = easeIn_->findChild<QLineEdit *>();
+    const auto *outEdit = easeOut_->findChild<QLineEdit *>();
+    const bool typingTiming =
+        easeIn_->hasFocus() || easeOut_->hasFocus() ||
+        (inEdit && inEdit->hasFocus()) || (outEdit && outEdit->hasFocus());
+    if (!typingTiming) {
+      const QSignalBlocker quietIn(easeIn_), quietOut(easeOut_);
+      easeIn_->setValue(cue ? static_cast<int>(cue->easeInMs) : 400);
+      easeOut_->setValue(cue ? static_cast<int>(cue->easeOutMs) : 400);
+    }
   }
   preview_->setPickable(editable);
   timeline_->setCuesEditable(editable);
@@ -2561,11 +2581,10 @@ bool StudioWindow::eventFilter(QObject *object, QEvent *event) {
        event->type() != QEvent::ShortcutOverride))
     return QWidget::eventFilter(object, event);
   auto *key = static_cast<QKeyEvent *>(event);
-  // Numeric/text editing retains its normal cursor/delete/undo behavior.
-  // Space still transports from a numeric field, button, tab, or slider.
-  const bool textField = qobject_cast<QLineEdit *>(widget) != nullptr;
-  if (textField && !(key->key() == Qt::Key_Space &&
-                     qobject_cast<QAbstractSpinBox *>(widget->parentWidget())))
+  // Value editing keeps its native behavior: arrows move the cursor, digits
+  // replace the value, Backspace deletes text. Space still transports from
+  // any control.
+  if (key->key() != Qt::Key_Space && studioHotkeysSuspended(object))
     return false;
   if (handleShortcut(key, event->type() == QEvent::KeyPress)) {
     event->accept();
@@ -2575,6 +2594,13 @@ bool StudioWindow::eventFilter(QObject *object, QEvent *event) {
 }
 
 void StudioWindow::keyPressEvent(QKeyEvent *event) {
+  // Keys a focused input ignored bubble up here; hotkeys stay suspended for
+  // them exactly as in the event filter above. Space still transports.
+  if (event->key() != Qt::Key_Space &&
+      studioHotkeysSuspended(QApplication::focusWidget())) {
+    QWidget::keyPressEvent(event);
+    return;
+  }
   if (!handleShortcut(event, true))
     QWidget::keyPressEvent(event);
 }

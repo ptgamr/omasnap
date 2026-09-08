@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMimeData>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -117,11 +118,11 @@ void StudioWindow::setupScenes(QVBoxLayout *controls) {
           });
 }
 
-void StudioWindow::refreshSceneControls() {
+void StudioWindow::refreshSceneControls(bool force) {
   if (!importButton_)
     return;
   importButton_->setEnabled(scenesEditable() && !editGesture_);
-  refreshTransitionControls();
+  refreshTransitionControls(force);
   const StudioClip *selected = nullptr;
   qsizetype index = 0;
   for (; index < project_.clips.size(); ++index)
@@ -141,20 +142,29 @@ void StudioWindow::refreshSceneControls() {
     sceneLabel_->setText(QStringLiteral("Ctrl+click a clip to see its filename and details"));
     return;
   }
-  sceneLabel_->setText(
-      QStringLiteral("%1\n%2 · source %3 × %4")
-          .arg(QFileInfo(asset->path).fileName(),
-               studioTimecode(qRound64((selected->outMs - selected->inMs) /
+   sceneLabel_->setText(
+       QStringLiteral("%1\n%2 · source %3 × %4")
+           .arg(QFileInfo(asset->path).fileName(),
+                studioTimecode(qRound64((selected->outMs - selected->inMs) /
                                        selected->speed))
-                   .mid(3))
-          .arg(asset->source.size.width())
-          .arg(asset->source.size.height()));
-  const QSignalBlocker quietIn(sceneIn_), quietOut(sceneOut_);
-  sceneIn_->setRange(0, static_cast<int>(selected->outMs - 1));
-  sceneOut_->setRange(static_cast<int>(selected->inMs + 1),
-                      static_cast<int>(asset->source.durationMs));
-  sceneIn_->setValue(static_cast<int>(selected->inMs));
-  sceneOut_->setValue(static_cast<int>(selected->outMs));
+                    .mid(3))
+               .arg(asset->source.size.width())
+               .arg(asset->source.size.height()));
+  // Never wipe values being typed: trims commit on Enter, and a refresh in
+  // between must not replace the fields from behind.
+  const auto *inEdit = sceneIn_->findChild<QLineEdit *>();
+  const auto *outEdit = sceneOut_->findChild<QLineEdit *>();
+  const bool typingTrim =
+      sceneIn_->hasFocus() || sceneOut_->hasFocus() ||
+      (inEdit && inEdit->hasFocus()) || (outEdit && outEdit->hasFocus());
+  if (!typingTrim || force) {
+    const QSignalBlocker quietIn(sceneIn_), quietOut(sceneOut_);
+    sceneIn_->setRange(0, static_cast<int>(selected->outMs - 1));
+    sceneOut_->setRange(static_cast<int>(selected->inMs + 1),
+                        static_cast<int>(asset->source.durationMs));
+    sceneIn_->setValue(static_cast<int>(selected->inMs));
+    sceneOut_->setValue(static_cast<int>(selected->outMs));
+  }
 }
 
 void StudioWindow::chooseScenes() {
@@ -280,7 +290,7 @@ void StudioWindow::trimScene(quint64 id, qint64 in, qint64 out) {
   const bool changed = studioTrimClip(candidate, id, in, out, error);
   if (!error.isEmpty()) {
     setStatus(error, true);
-    refreshSceneControls();
+    refreshSceneControls(true);
     return;
   }
   if ((!changed && !editGesture_) || candidate == project_)

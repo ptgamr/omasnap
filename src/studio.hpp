@@ -242,9 +242,9 @@ private:
   void moveScene(quint64 id, quint64 before);
   void duplicateScene();
   void trimScene(quint64 id, qint64 inMs, qint64 outMs);
-  void refreshSceneControls();
+  void refreshSceneControls(bool force = false);
   void setupTransitions(class QVBoxLayout *controls);
-  void refreshTransitionControls();
+  void refreshTransitionControls(bool force = false);
   void changeTransition();
   void showTransitionEditor(quint64 outgoingClipId);
   [[nodiscard]] QString
@@ -252,6 +252,7 @@ private:
   class StudioComboBox *transitionType_ = nullptr;
   class QSpinBox *transitionDuration_ = nullptr;
   class QLabel *transitionLabel_ = nullptr;
+  class QLabel *overlapHint_ = nullptr;
   [[nodiscard]] bool scenesEditable() const;
   bool importing_ = false;
   quint64 nextAssetId_ = 1;
