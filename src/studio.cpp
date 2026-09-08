@@ -42,6 +42,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStyleOption>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -158,6 +159,81 @@ protected:
 private:
   Symbol symbol_;
   StudioTheme *theme_;
+};
+/** Clicking the groove jumps straight to the click and keeps dragging from
+ *  there: Qt's default groove click only moves one pageStep, which reads as
+ *  broken next to drag-the-thumb. Presses landing on the style handle rect
+ *  keep the default drag untouched. The gesture signal fires before the jump
+ *  value, so jump-plus-drag commits as one undo entry like a thumb drag. */
+class StudioSlider final : public QSlider {
+public:
+  using QSlider::QSlider;
+
+protected:
+  void mousePressEvent(QMouseEvent *event) override {
+    if (event->button() == Qt::LeftButton && !isSliderDown()) {
+      QStyleOptionSlider opt;
+      initStyleOption(&opt);
+      if (!style()
+               ->subControlRect(QStyle::CC_Slider, &opt,
+                                QStyle::SC_SliderHandle, this)
+               .contains(event->pos())) {
+        grooveDrag_ = true;
+        // setSliderDown emits sliderPressed before the jump value lands, so
+        // beginEdit suppresses history until release: one undo entry.
+        setSliderDown(true);
+        jumpTo(event->pos());
+        event->accept();
+        return;
+      }
+    }
+    QSlider::mousePressEvent(event);
+  }
+  void mouseMoveEvent(QMouseEvent *event) override {
+    if (grooveDrag_) {
+      jumpTo(event->pos());
+      event->accept();
+      return;
+    }
+    QSlider::mouseMoveEvent(event);
+  }
+  void mouseReleaseEvent(QMouseEvent *event) override {
+    if (grooveDrag_ && event->button() == Qt::LeftButton) {
+      grooveDrag_ = false;
+      // Emits sliderReleased for the matching endEdit.
+      setSliderDown(false);
+      event->accept();
+      return;
+    }
+    QSlider::mouseReleaseEvent(event);
+  }
+
+private:
+  // Absolute value under the cursor, mapped over the groove travel minus the
+  // handle like Qt's own drag math — not over the full widget width, where
+  // rounding can strand the handle off the click and retrigger a page step.
+  void jumpTo(const QPoint &pos) {
+    QStyleOptionSlider opt;
+    initStyleOption(&opt);
+    const QRect groove = style()->subControlRect(QStyle::CC_Slider, &opt,
+                                                 QStyle::SC_SliderGroove, this);
+    const QRect handle = style()->subControlRect(QStyle::CC_Slider, &opt,
+                                                 QStyle::SC_SliderHandle, this);
+    const bool horizontal = orientation() == Qt::Horizontal;
+    int span, p;
+    if (horizontal) {
+      span = groove.width() - handle.width();
+      p = pos.x() - groove.left() - handle.width() / 2;
+    } else {
+      span = groove.height() - handle.height();
+      p = pos.y() - groove.top() - handle.height() / 2;
+    }
+    if (span <= 0)
+      return;
+    setValue(style()->sliderValueFromPosition(minimum(), maximum(), p, span,
+                                              !horizontal));
+  }
+  bool grooveDrag_ = false;
 };
 // View-only magnification: clip/selection coordinates continue to use the
 // same timeline time map. No decoder or project state changes on zoom/pan.
@@ -1298,7 +1374,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
       TimelineActionButton::Symbol::Play, QStringLiteral("Play / pause"),
       QStringLiteral("Play / pause · Space"), theme_, this);
   playButton_->setObjectName(QStringLiteral("play"));
-  zoomSlider_ = new QSlider(Qt::Horizontal, this);
+  zoomSlider_ = new StudioSlider(Qt::Horizontal, this);
   // Tenths of a times, so the slider is integral without feeling steppy.
   zoomSlider_->setRange(static_cast<int>(kMinZoomScale * 10) + 1,
                         static_cast<int>(kMaxZoomScale * 10));
@@ -1506,13 +1582,13 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
             gridShownPaths_.clear();
             refreshBackgroundSection();
           });
-  padding_ = new QSlider(Qt::Horizontal, canvasPanel_);
+  padding_ = new StudioSlider(Qt::Horizontal, canvasPanel_);
   padding_->setRange(0, 20);
   padding_->setObjectName(QStringLiteral("canvasPadding"));
-  radius_ = new QSlider(Qt::Horizontal, canvasPanel_);
+  radius_ = new StudioSlider(Qt::Horizontal, canvasPanel_);
   radius_->setRange(0, 64);
   radius_->setObjectName(QStringLiteral("canvasCorners"));
-  shadow_ = new QSlider(Qt::Horizontal, canvasPanel_);
+  shadow_ = new StudioSlider(Qt::Horizontal, canvasPanel_);
   shadow_->setRange(0, 100);
   shadow_->setObjectName(QStringLiteral("canvasShadow"));
   const auto styleSlider = [canvasLayout, this](const QString &text,

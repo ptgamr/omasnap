@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QLabel>
 #include <QPushButton>
+#include <QSignalSpy>
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QTest>
@@ -99,6 +100,17 @@ bool runStudioBackgroundUiChecks(const QString &source, QString &error) {
   padding->setValue(padding->value() + 1);
   if (!require(wallpaperTab->isChecked() && grid->isVisible(),
                "a slider move kicked out wallpaper browsing"))
+    return false;
+  // Groove clicks jump to the click instead of stepping one pageStep, as
+  // one gesture: exactly one pressed/released pair, hence one undo entry.
+  padding->setValue(0);
+  QSignalSpy pressed(padding, &QSlider::sliderPressed);
+  QSignalSpy released(padding, &QSlider::sliderReleased);
+  QTest::mouseClick(padding, Qt::LeftButton, Qt::NoModifier,
+                    QPoint(padding->width() * 3 / 4, padding->height() / 2));
+  if (!require(padding->value() > 10 && pressed.size() == 1 &&
+                   released.size() == 1,
+               "slider groove click did not jump as one gesture"))
     return false;
   // The hidden combo must not corrupt the stored preset.
   gradientTab->click();
