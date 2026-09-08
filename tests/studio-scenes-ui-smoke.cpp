@@ -109,11 +109,9 @@ bool runStudioScenesUiChecks(const QString &source, QString &error) {
     if (!require(tweakTop == laneTop && tweak->height() == lane->height(),
                  "tweak panel left its timeline row"))
       return false;
-    const int bottom = clipCard->y() + clipCard->height();
-    if (!require(bottom <= tweak->height() &&
-                    bottom >= tweak->height() - 8 - 8 &&
+    if (!require(clipCard->y() >= 0 && clipCard->y() <= 12 + 8 &&
                     clipCard->height() <= clipCard->sizeHint().height() + 8,
-                 "tweak card is not bottom-aligned with the timeline row"))
+                 "tweak card is not top-aligned under the divider"))
       return false;
   }
   if (!require(player->duration() == 30000 && timeline->selectedClip() == 5,

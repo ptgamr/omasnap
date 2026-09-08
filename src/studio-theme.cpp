@@ -50,6 +50,9 @@ QColor StudioChrome::selected() const {
   return mix(background, foreground, 0.18);
 }
 QColor StudioChrome::border() const { return mix(background, foreground, 0.4); }
+QColor StudioChrome::divider() const {
+  return mix(background, foreground, 0.15);
+}
 QColor StudioChrome::mutedText() const {
   // Some terminal palettes use color8 for near-invisible text. Keep the hue,
   // but make small Studio labels readable against both chrome surfaces.
@@ -152,8 +155,8 @@ QString StudioChrome::styleSheet() const {
   QString sheet = QStringLiteral(R"(
 QWidget { color: @text; font-family: monospace; }
 QWidget#studioHeader, QWidget#studioInspector, QWidget#studioCanvas, QWidget#timelinePanel, QDialog { background: @background; }
-QWidget#timelinePanel, QWidget#studioInspector { border-top: 1px solid @border; }
-QWidget#studioInspector { border-left: 1px solid @border; }
+QWidget#timelinePanel, QWidget#studioInspector { border-top: 1px solid @divider; }
+QWidget#studioInspector { border-left: 1px solid @divider; }
 QWidget#studioScenePage, QWidget#studioScrollViewport { background: @background; }
 QLabel#muted, QLabel#section { color: @muted; }
 QLabel[studioError="true"] { color: @urgent; }
@@ -218,6 +221,7 @@ QSplitter::handle { background: @border; width: 1px; }
       {QStringLiteral("pressed"), pressed().name()},
       {QStringLiteral("selected"), selected().name()},
       {QStringLiteral("border"), border().name()},
+      {QStringLiteral("divider"), divider().name()},
       {QStringLiteral("borderWidthpx"),
        QString::number(borderWidth) + QStringLiteral("px")},
       {QStringLiteral("radiuspx"),

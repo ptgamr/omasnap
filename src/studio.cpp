@@ -1373,10 +1373,12 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     connect(slider, &QSlider::sliderPressed, this, &StudioWindow::beginEdit);
     connect(slider, &QSlider::sliderReleased, this, &StudioWindow::endEdit);
   }
-  // The tweak panel shares its row with the timeline, so the active card
-  // can never stretch past the preview/timeline divider. Only the card
-  // for the current selection is visible. The spacer needs a real
-  // stretch factor: with factor 0 the layout shares excess space with
+  // Top-packed: leftover height belongs to the tweak row below, never
+  // scattered between these controls.
+  canvasLayout->addStretch(1);
+  // The tweak cards read top-down from the divider: only the card for the
+  // current selection is visible, hugging its content. The spacer needs a
+  // real stretch factor: with factor 0 the layout shares excess space with
   // the Preferred cards and stretches the visible card itself.
   tweakPanel_ = new QWidget(this);
   tweakPanel_->setObjectName(QStringLiteral("studioInspector"));
@@ -1384,7 +1386,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   auto *tweakLayout = new QVBoxLayout(tweakPanel_);
   tweakLayout->setContentsMargins(16, 12, 16, 8);
   tweakLayout->setSpacing(StudioChrome::gap);
-  tweakLayout->addStretch(1);
 
   zoomCard_ = new QWidget(tweakPanel_);
   zoomCard_->setObjectName(QStringLiteral("zoomCard"));
@@ -1411,7 +1412,6 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   for (QSpinBox *spin : {easeIn_, easeOut_}) {
     spin->setRange(60, 3000);
     spin->setSingleStep(50);
-    spin->setSuffix(QStringLiteral(" ms"));
     spin->setKeyboardTracking(false);
     spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
   }
@@ -1421,6 +1421,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
     row->addWidget(new QLabel(label, zoomCard_));
     row->addStretch();
     row->addWidget(spin);
+    auto *unit = new QLabel(QStringLiteral("ms"), zoomCard_);
+    unit->setObjectName(QStringLiteral("muted"));
+    row->addWidget(unit);
     zoomControls->addLayout(row);
   };
   timingRow(QStringLiteral("Ease in"), easeIn_);
@@ -1458,6 +1461,7 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
   emptyControls->addWidget(emptyHint);
   emptyControls->addStretch();
   tweakLayout->addWidget(emptyCard_);
+  tweakLayout->addStretch(1);
 
   auto *timelinePanel = new QWidget(this);
   timelinePanel->setObjectName(QStringLiteral("timelinePanel"));

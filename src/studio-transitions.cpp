@@ -101,8 +101,12 @@ void StudioWindow::setupTransitions(QVBoxLayout *controls) {
   transitionDuration_->setSingleStep(100);
   transitionDuration_->setRange(1, 5000);
   transitionDuration_->setValue(300);
-  transitionDuration_->setSuffix(QStringLiteral(" ms overlap"));
-  controls->addWidget(transitionDuration_);
+  auto *durationRow = new QHBoxLayout;
+  durationRow->addWidget(transitionDuration_, 1);
+  auto *durationUnit = new QLabel(QStringLiteral("ms overlap"), this);
+  durationUnit->setObjectName(QStringLiteral("muted"));
+  durationRow->addWidget(durationUnit);
+  controls->addLayout(durationRow);
   overlapHint_ =
       new QLabel(QStringLiteral("Maximum 300 ms · overlaps kept frames"), this);
   overlapHint_->setWordWrap(true);

@@ -28,6 +28,8 @@ struct StudioChrome {
   [[nodiscard]] QColor pressed() const;
   [[nodiscard]] QColor selected() const;
   [[nodiscard]] QColor border() const;
+  /** Quieter than border: hairline dividers between regions. */
+  [[nodiscard]] QColor divider() const;
   [[nodiscard]] QColor mutedText() const;
   [[nodiscard]] QColor onAccent() const;
   [[nodiscard]] QString styleSheet() const;
