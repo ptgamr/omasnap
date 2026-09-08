@@ -1700,6 +1700,9 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
               player_->pause();
               player_->setPosition(stop);
             }
+            // An effect preview stops at the effect end, not the timeline end.
+            if (previewEndMs_ >= 0 && position >= previewEndMs_)
+              player_->pause();
             refreshSplitAction();
             // Scene/transition inspectors depend on edits and selection, not
             // time. Rebuilding all their controls on every frame/timer tick
@@ -1709,7 +1712,15 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
                 studioTimecode(timeline_->duration()).mid(3)));
           });
   connect(player_, &StudioPlayback::playbackStateChanged, this,
-          [this](QMediaPlayer::PlaybackState) { refreshControls(); });
+          [this](QMediaPlayer::PlaybackState state) {
+            // Any pause ends an effect preview: the buttons fall back to
+            // Preview, and a later press restarts from before the effect.
+            if (state != QMediaPlayer::PlayingState) {
+              previewKind_ = PreviewKind::None;
+              previewEndMs_ = -1;
+            }
+            refreshControls();
+          });
   connect(player_, &StudioPlayback::errorOccurred, this,
           [this](const QString &message) {
             mediaFailed_ = true;
@@ -1990,6 +2001,10 @@ StudioEditState StudioWindow::editState() const {
 void StudioWindow::rememberEdit() {
   if (restoring_ || editGesture_ || !loaded_)
     return;
+  // Committing an edit ends any effect preview: the endpoint it armed may
+  // no longer exist. Playback itself continues as ordinary transport.
+  previewKind_ = PreviewKind::None;
+  previewEndMs_ = -1;
   project_.zoom = zoom_;
   project_.style = style_;
   project_.trimInMs = timeline_->trimIn();
@@ -2013,6 +2028,8 @@ void StudioWindow::redoEdit() {
 
 void StudioWindow::restoreEdit() {
   const auto state = history_.current();
+  previewKind_ = PreviewKind::None;
+  previewEndMs_ = -1;
   // The outgoing selection belongs to the old composition and must not
   // constrain restoration into a shorter or differently arranged project.
   timeline_->clearSelection();
@@ -2274,6 +2291,15 @@ void StudioWindow::refreshControls() {
   easeIn_->setEnabled(editable && cue != nullptr);
   easeOut_->setEnabled(editable && cue != nullptr);
   previewZoomButton_->setEnabled(editable && cue != nullptr);
+  const bool zoomPreviewing =
+      previewKind_ == PreviewKind::Zoom &&
+      player_->playbackState() == QMediaPlayer::PlayingState;
+  previewZoomButton_->setText(zoomPreviewing ? QStringLiteral("Stop")
+                                             : QStringLiteral("Preview"));
+  previewZoomButton_->setToolTip(
+      zoomPreviewing
+          ? QStringLiteral("Stop the zoom preview")
+          : QStringLiteral("Play from just before the selected zoom"));
   // One tweak card shows the selection: zoom cue, boundary, scene, or none.
   const bool boundarySelected = timeline_->selectedTransition() != 0;
   const bool clipSelected = timeline_->selectedClip() != 0;
@@ -2345,28 +2371,47 @@ void StudioWindow::togglePlayback() {
 void StudioWindow::previewTransition() {
   if (!previewTransitionButton_->isEnabled())
     return;
+  if (previewKind_ == PreviewKind::Transition) {
+    player_->pause();
+    return;
+  }
   const auto [outgoing, incoming] = transitionPair();
   if (!outgoing || !incoming)
     return;
-  for (const auto &span : studioComposition(project_))
-    if (span.clipId == incoming) {
-      // Start just before the overlap so the blend plays in context.
-      seekTo(span.startMs - 500);
-      if (player_->playbackState() != QMediaPlayer::PlayingState)
-        player_->play();
-      return;
-    }
+  qint64 overlapStart = -1, overlapEnd = -1;
+  for (const auto &span : studioComposition(project_)) {
+    if (span.clipId == incoming)
+      overlapStart = span.startMs;
+    if (span.clipId == outgoing)
+      overlapEnd = span.endMs;
+  }
+  if (overlapStart < 0 || overlapEnd < 0)
+    return;
+  // Start just before the overlap and stop at its end.
+  previewKind_ = PreviewKind::Transition;
+  previewEndMs_ = overlapEnd;
+  seekTo(overlapStart - 500);
+  if (player_->playbackState() != QMediaPlayer::PlayingState)
+    player_->play();
+  refreshControls();
 }
 
 void StudioWindow::previewZoom() {
   if (!previewZoomButton_->isEnabled())
     return;
+  if (previewKind_ == PreviewKind::Zoom) {
+    player_->pause();
+    return;
+  }
   const ZoomCue *cue = activeCue();
   if (!cue)
     return;
+  previewKind_ = PreviewKind::Zoom;
+  previewEndMs_ = cue->endMs;
   seekTo(cue->startMs - 500);
   if (player_->playbackState() != QMediaPlayer::PlayingState)
     player_->play();
+  refreshControls();
 }
 
 void StudioWindow::seekBy(qint64 milliseconds) {

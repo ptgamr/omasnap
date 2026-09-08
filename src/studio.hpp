@@ -327,6 +327,9 @@ private:
   class QSlider *radius_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;
   qint64 pendingSeek_ = -1;
+  enum class PreviewKind { None, Transition, Zoom };
+  PreviewKind previewKind_ = PreviewKind::None;
+  qint64 previewEndMs_ = -1;
   bool editGesture_ = false;
   bool restoring_ = false;
   bool loaded_ = false;

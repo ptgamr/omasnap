@@ -241,6 +241,21 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                     4000),
                "Preview did not play the transition"))
     return false;
+  if (!require(previewTransition->text() == QStringLiteral("Stop"),
+               "Preview button did not become Stop"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PausedState;
+                    },
+                    6000),
+               "Preview did not stop at the transition end"))
+    return false;
+  if (!require(player->position() >= 2800 && player->position() < 4000 &&
+                  previewTransition->text() == QStringLiteral("Preview"),
+               "Preview overran the transition"))
+    return false;
   player->pause();
   // Delete with a boundary selected removes the transition, not the scene,
   // and the boundary stays selected as a hard cut. Focus leaves the Type
@@ -304,7 +319,12 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                   timeline->selectedTransition() == 0,
                "T on the last scene abandoned its clip"))
     return false;
-  // A zoom cue previews from just before it starts.
+  // A zoom cue previews from just before it starts. Seed it mid-timeline
+  // so its end is far from the project end.
+  player->setPosition(1000);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 1000; }, 4000),
+               "playhead did not settle before zoom preview"))
+    return false;
   QTest::keyClick(&window, Qt::Key_Z);
   auto *previewZoom = window.findChild<QPushButton *>("previewZoom");
   if (!require(timeline->selectedCue() != 0 && previewZoom &&
@@ -323,6 +343,65 @@ bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
                     },
                     4000),
                "Preview did not play the zoom"))
+    return false;
+  if (!require(previewZoom->text() == QStringLiteral("Stop"),
+               "Zoom preview button did not become Stop"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PausedState;
+                    },
+                    8000),
+               "Preview did not stop at the zoom end"))
+    return false;
+  if (!require(player->position() > 2000 && player->position() < 5000 &&
+                  previewZoom->text() == QStringLiteral("Preview"),
+               "Zoom preview overran the cue"))
+    return false;
+  player->pause();
+  // Shortening the cue mid-preview disarms the old endpoint: playback
+  // continues past it as ordinary transport instead of stopping stale.
+  QTest::mouseClick(previewZoom, Qt::LeftButton);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Zoom preview did not restart"))
+    return false;
+  const auto cuePoint = [&](qint64 ms) {
+    return QPoint(64 + qRound((timeline->width() - 80) * ms / 5400.0), 107);
+  };
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, cuePoint(3475));
+  QTest::mouseMove(timeline, cuePoint(1800), 40);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, cuePoint(1800));
+  if (!require(previewZoom->text() == QStringLiteral("Preview") &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Cue edit did not disarm the preview"))
+    return false;
+  if (!require(QTest::qWaitFor([&] { return player->position() > 3500; }, 6000) &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Playback stopped at the stale preview end"))
+    return false;
+  player->pause();
+  // Undoing while previewing disarms the same way, whatever it restores.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(2700, 75));
+  QTest::mouseClick(previewTransition, Qt::LeftButton);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Transition preview did not restart"))
+    return false;
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(QTest::qWaitFor([&] { return player->position() > 3000; }, 8000) &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Undo left a stale preview end armed"))
     return false;
   player->pause();
   timeline->setSelectedClip(1);
