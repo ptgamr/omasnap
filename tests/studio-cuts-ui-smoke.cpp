@@ -8,6 +8,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSlider>
+#include <QStyleOption>
 #include <QWheelEvent>
 #include <QTemporaryDir>
 #include <QTest>
@@ -162,7 +164,7 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
   if (!require(!timeline->hasRange(), "Escape did not clear the range"))
     return false;
   // Keyboard range selection: Ctrl+Shift+arrows anchor at the playhead and
-  // extend or shrink the range one frame per press.
+  // extend or shrink the range one second per press.
   player->setPosition(2000);
   if (!require(QTest::qWaitFor([&] { return player->position() == 2000; }, 4000),
                "playhead did not settle before keyboard selection"))
@@ -216,6 +218,82 @@ bool runStudioCutsUiChecks(const QString &source, QString &error) {
     return false;
   player->setPosition(0);
   if (!require(player->position() == 0, "Escape did not release range seeking constraint")) return false;
+  // Seeking while playing pauses mid-drag and resumes on release.
+  player->setPosition(1000);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 1000; }, 4000),
+               "playhead did not settle before scrub resume"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Space did not start playback before scrub resume"))
+    return false;
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, point(3000));
+  QTest::mouseMove(timeline, point(4000));
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, point(4000));
+  if (!require(player->playbackState() == QMediaPlayer::PlayingState &&
+                  qAbs(player->position() - 4000) < 100,
+               "Scrub release did not resume playback at the drag end"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(player->playbackState() == QMediaPlayer::PausedState,
+               "Space did not pause after scrub resume"))
+    return false;
+  // Releasing a playing scrub at the review endpoint stays paused instead
+  // of restarting from zero like Space does.
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Space did not resume before endpoint scrub"))
+    return false;
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, point(5000));
+  QTest::mouseMove(timeline, point(6000));
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, point(6000));
+  if (!require(player->playbackState() == QMediaPlayer::PausedState &&
+                  player->position() >= 5990,
+               "Scrub release at the end restarted playback"))
+    return false;
+  // An explicit pause mid-gesture wins over the release resume.
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Space did not resume before pause test"))
+    return false;
+  auto *padding = window.findChild<QSlider *>("canvasPadding");
+  if (!require(padding, "canvas padding slider missing"))
+    return false;
+  QStyleOptionSlider paddingOpt;
+  paddingOpt.initFrom(padding);
+  paddingOpt.orientation = Qt::Horizontal;
+  paddingOpt.minimum = padding->minimum();
+  paddingOpt.maximum = padding->maximum();
+  paddingOpt.sliderPosition = padding->sliderPosition();
+  paddingOpt.sliderValue = padding->value();
+  const QPoint handle = padding->style()->subControlRect(
+      QStyle::CC_Slider, &paddingOpt, QStyle::SC_SliderHandle, padding).center();
+  QTest::mousePress(padding, Qt::LeftButton, Qt::NoModifier, handle);
+  if (!require(padding->isSliderDown(), "slider press did not start a drag"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Space);
+  if (!require(player->playbackState() == QMediaPlayer::PausedState,
+               "Space did not pause mid-gesture"))
+    return false;
+  QTest::mouseRelease(padding, Qt::LeftButton, Qt::NoModifier, handle);
+  if (!require(player->playbackState() == QMediaPlayer::PausedState,
+               "Release overrode an explicit mid-gesture pause"))
+    return false;
   player->setPosition(2000);
   QTest::keyClick(&window, Qt::Key_S);
   if (!require(player->duration() == 6000 && timeline->selectedClip() != 0,

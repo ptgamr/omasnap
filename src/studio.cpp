@@ -1629,8 +1629,10 @@ StudioWindow::StudioWindow(QString path, QWidget *parent, QString themePath)
           &StudioWindow::endEdit);
   qApp->installEventFilter(this);
 
-  connect(playButton_, &QPushButton::clicked, this,
-          &StudioWindow::togglePlayback);
+  connect(playButton_, &QPushButton::clicked, this, [this] {
+    resumePlayback_ = false;
+    togglePlayback();
+  });
   connect(exportButton_, &QPushButton::clicked, this,
           &StudioWindow::startExport);
   connect(zoomSlider_, &QSlider::valueChanged, this,
@@ -1959,6 +1961,7 @@ void StudioWindow::captureCursor() {
 }
 
 void StudioWindow::beginEdit() {
+  resumePlayback_ = player_->playbackState() == QMediaPlayer::PlayingState;
   captureCursor();
   gestureProject_ = project_;
   editGesture_ = true;
@@ -1984,6 +1987,22 @@ void StudioWindow::endEdit() {
   rememberEdit();
   refreshControls();
   thumbnailTimer_->start();
+  // Gestures pause while they run; release restores transport only if the
+  // gesture left it paused, so drags that never pause keep playing. A range
+  // selection pauses again right after this, so reviewing it stays explicit.
+  // The pending scrub flushes first, but releasing at the review endpoint
+  // stays paused instead of restarting from zero like Space does.
+  if (resumePlayback_ &&
+      player_->playbackState() != QMediaPlayer::PlayingState &&
+      playButton_->isEnabled()) {
+    if (pendingSeek_ >= 0)
+      seekTo(pendingSeek_);
+    const qint64 end = timeline_->hasRange() ? timeline_->rangeOut() - 1
+                                             : timeline_->trimOut();
+    if (player_->position() < end)
+      togglePlayback();
+  }
+  resumePlayback_ = false;
 }
 
 StudioEditState StudioWindow::editState() const {
@@ -2626,6 +2645,8 @@ bool StudioWindow::handleShortcut(QKeyEvent *event, bool activate) {
   bool repeat = false;
   if (key == Qt::Key_Space && plain)
     action = [this] {
+      // An explicit transport change wins over any gesture release resume.
+      resumePlayback_ = false;
       if (playButton_->isEnabled())
         togglePlayback();
     };

@@ -60,8 +60,10 @@ retimed boundary is refused instead of silently introducing timing drift.
 Cut results report effective endpoints and removed duration, which are also
 used to move the playhead. Ordinary 1x clips preserve requested millisecond cuts.
 
-Shift+drag selects a range; plain dragging scrubs. Ctrl+Shift+Left/Right starts
-a range at the playhead and extends or shrinks it one second per press, parking
+Shift+drag selects a range; plain dragging scrubs. Scrubbing pauses while the
+pointer is down and resumes on release when playback was running.
+Ctrl+Shift+Left/Right starts a range at the playhead and extends or shrinks
+it one second per press, parking
 the playhead on the moving edge; from inside a range it only grows outward. Selection gestures
 and their hover/range state are not video edits. Video deletion requires an
 explicit range or clip; a selected zoom consumes Delete without deleting video.

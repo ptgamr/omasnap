@@ -327,6 +327,8 @@ private:
   class QSlider *radius_ = nullptr;
   class QTimer *scrubTimer_ = nullptr;
   qint64 pendingSeek_ = -1;
+  /** True when a gesture started while playing: release resumes transport. */
+  bool resumePlayback_ = false;
   enum class PreviewKind { None, Transition, Zoom };
   PreviewKind previewKind_ = PreviewKind::None;
   qint64 previewEndMs_ = -1;
