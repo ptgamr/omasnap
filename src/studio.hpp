@@ -1,0 +1,519 @@
+/** @fileoverview Declares the Studio window: what a finished recording opens
+ *  into. Playback, a scrubbable timeline, a trim range, and an export. */
+#pragma once
+
+#include "studio-project.hpp"
+#include "studio-style.hpp"
+#include "studio-theme.hpp"
+#include "zoom-track.hpp"
+
+#include <QFutureWatcher>
+#include <QImage>
+#include <QMap>
+#include <QPair>
+#include <QPointer>
+#include <QPixmap>
+#include <QSet>
+#include <QSize>
+#include <QString>
+#include <QVector>
+#include <QWidget>
+
+#include <utility>
+
+class QAudioOutput;
+class QMediaPlayer;
+class QProcess;
+class QVideoSink;
+class StudioPreview;
+class StudioPlayback;
+
+struct StudioThumbnail {
+  QString path;
+  qint64 sourceMs = 0;
+  QImage image;
+};
+
+/** Waveform buckets for one audio asset, decoded on a worker. */
+struct StudioAudioPeakResult {
+  quint64 assetId = 0;
+  QString path;
+  QVector<QPair<qint16, qint16>> peaks;
+};
+
+/** A discovered wallpaper plus its uniform grid tile, center-cropped. */
+using StudioWallpaperThumb = QPair<QString, QImage>;
+/** Images under the shipped Quattro themes and the user background dir,
+ *  sorted. Empty where Omarchy themes are absent (CI, other systems). */
+[[nodiscard]] QStringList studioQuattroWallpaperPaths();
+/** Decodes and crops tiles for the grid. Skips unreadable files. Runs on a
+ *  worker, never inline in a GUI callback. */
+[[nodiscard]] QVector<StudioWallpaperThumb>
+studioWallpaperThumbs(const QStringList &paths);
+
+/** Composition timeline with source-keyed thumbnail tiles and modeless gestures. */
+class StudioTimeline final : public QWidget {
+  Q_OBJECT
+public:
+  explicit StudioTimeline(QWidget *parent = nullptr);
+
+  void setDuration(qint64 milliseconds);
+  void setPosition(qint64 milliseconds);
+  void setTrim(qint64 inPoint, qint64 outPoint);
+  /** Borrowed; the window owns the track and outlives this widget. */
+  void setTrack(const ZoomTrack *track);
+  void setSelectedCue(quint64 id);
+  /** Whether cues can be moved or resized; off while an export runs. */
+  void setCuesEditable(bool editable);
+  [[nodiscard]] bool cuesEditable() const { return cuesEditable_; }
+  void cacheThumbnail(StudioThumbnail thumbnail);
+  [[nodiscard]] QVector<StudioThumbnail> missingThumbnails() const;
+  void cacheAudioPeaks(quint64 assetId,
+                       QVector<QPair<qint16, qint16>> peaks);
+  /** Forgets one asset's peaks, cached or failed, so a relinked file
+   *  decodes fresh instead of inheriting the old path's result. */
+  void dropAudioPeaks(quint64 assetId);
+  /** Audio asset ids on the lane still waiting for a waveform. */
+  [[nodiscard]] QVector<quint64> missingAudioPeaks() const;
+  /** Cached buckets for an asset, or nullptr. */
+  [[nodiscard]] const QVector<QPair<qint16, qint16>> *audioPeaksFor(
+      quint64 assetId) const;
+  void setThumbnailViewport(const QRectF &viewport);
+  void setProject(const StudioProject *project) {
+    project_ = project;
+    update();
+  }
+  void setRange(qint64 start, qint64 end);
+  void setSelectedClip(quint64 id);
+  /** Selects an audio-lane clip, clearing every other selection. */
+  void setSelectedAudioClip(quint64 id);
+  [[nodiscard]] quint64 selectedAudioClip() const { return selectedAudioClip_; }
+  /** A scene boundary by outgoing clip id; distinct from clip selection. */
+  void setSelectedTransition(quint64 outgoingClipId);
+  void clearSelection();
+  [[nodiscard]] qint64 rangeIn() const { return rangeIn_; }
+  [[nodiscard]] qint64 rangeOut() const { return rangeOut_; }
+  [[nodiscard]] bool hasRange() const { return rangeIn_ >= 0 && rangeOut_ > rangeIn_; }
+  [[nodiscard]] quint64 selectedClip() const { return selectedClip_; }
+  [[nodiscard]] quint64 selectedTransition() const { return selectedTransition_; }
+  /** Whether the selected boundary currently carries a transition. */
+  [[nodiscard]] bool selectedTransitionDeletable() const;
+  /** Drop location in the ordered scene list; zero means append. */
+  [[nodiscard]] quint64 insertionBefore(qreal x) const;
+  /** Drop location in the ordered audio list; zero means append. */
+  [[nodiscard]] quint64 insertionAudioBefore(qreal x) const;
+  void showInsertion(quint64 before, bool visible);
+  void setChrome(const StudioChrome &chrome) {
+    chrome_ = chrome;
+    update();
+  }
+  [[nodiscard]] quint64 selectedCue() const { return selected_; }
+  [[nodiscard]] qint64 duration() const { return duration_; }
+  [[nodiscard]] qint64 trimIn() const { return trimIn_; }
+  [[nodiscard]] qint64 trimOut() const { return trimOut_; }
+  [[nodiscard]] QSize sizeHint() const override;
+
+signals:
+  void thumbnailViewChanged();
+  void editStarted();
+  void editFinished();
+  void scrubbed(qint64 milliseconds);
+  void trimChanged(qint64 inPoint, qint64 outPoint);
+  /** A cue was clicked, or 0 when the click landed on empty lane. */
+  void cueSelected(quint64 id);
+  /** A cue was dragged or resized to a new span. */
+  void cueMoved(quint64 id, qint64 startMs, qint64 endMs);
+  void selectionChanged();
+  void rangeSelected();
+  void rangeSelectionStarted();
+  void splitRequested();
+  void deleteRequested();
+  void duplicateRequested();
+  void sceneMoveRequested(quint64 id, quint64 before);
+  void sceneTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
+  /** An audio block is being moved (before == 0 appends) or edge-trimmed. */
+  void audioMoveRequested(quint64 id, quint64 before);
+  void audioTrimRequested(quint64 id, qint64 inMs, qint64 outMs);
+  void transitionRequested(quint64 outgoingClipId);
+
+protected:
+  void leaveEvent(QEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
+  void mouseReleaseEvent(QMouseEvent *event) override;
+  void paintEvent(QPaintEvent *event) override;
+  void contextMenuEvent(QContextMenuEvent *event) override;
+
+private:
+  enum class Grab {
+    None,
+    Playhead,
+    CueBody,
+    CueStart,
+    CueEnd,
+    AudioBody,
+    AudioStart,
+    AudioEnd,
+    RangeStart,
+    RangeEnd,
+    RangeNew,
+    SceneStart,
+    SceneEnd,
+    SceneMove
+  };
+
+  /** The trim bar's row. */
+  [[nodiscard]] QRectF trackRect() const;
+  /** The zoom cues' row, under it. */
+  [[nodiscard]] QRectF cueLaneRect() const;
+  /** The audio clips' row, under the zoom lane. */
+  [[nodiscard]] QRectF audioLaneRect() const;
+  /** The audio clip under `position` (caller checks the lane); `edge`
+   *  reports which end was hit, like cueAt. */
+  [[nodiscard]] quint64 audioClipAt(const QPointF &position,
+                                    Grab *edge = nullptr) const;
+  [[nodiscard]] QRectF cueRect(const ZoomCue &cue) const;
+  [[nodiscard]] qreal xForTime(qint64 milliseconds) const;
+  [[nodiscard]] qint64 timeForX(qreal x) const;
+  /** Snap window for cue edge drags: the grab slack in pixels as timeline
+   *  milliseconds, so docking feels the same at every magnification. */
+  [[nodiscard]] qint64 cueSnapWindowMs() const;
+  [[nodiscard]] Grab grabAt(const QPointF &position) const;
+  /** The cue under `position`, or 0. `edge` reports which end was hit. */
+  [[nodiscard]] quint64 cueAt(const QPointF &position, Grab *edge) const;
+  [[nodiscard]] QRectF transitionRect(const StudioSpan &outgoing,
+                                      const StudioSpan &incoming) const;
+
+  const ZoomTrack *track_ = nullptr;
+  const StudioProject *project_ = nullptr;
+  qint64 rangeIn_ = -1;
+  qint64 rangeOut_ = -1;
+  qint64 rangeAnchor_ = 0;
+  quint64 selectedClip_ = 0;
+  quint64 selectedAudioClip_ = 0;
+  quint64 selectedTransition_ = 0;
+  QPointF scenePress_;
+  QPointF sceneDragOffset_;
+  QRectF draggedSceneRect_;
+  QPixmap draggedScenePreview_;
+  bool reorderGesture_ = false;
+  StudioClip grabbedScene_;
+  qint64 sceneStartMs_ = 0;
+  qint64 sceneDurationMs_ = 0;
+  bool insertionVisible_ = false;
+  quint64 insertionBefore_ = 0;
+  qint64 duration_ = 0;
+  qint64 position_ = 0;
+  qint64 trimIn_ = 0;
+  qint64 trimOut_ = 0;
+  quint64 selected_ = 0;
+  quint64 grabbedCue_ = 0;
+  quint64 grabbedAudioClip_ = 0;
+  /** Source range and span of the audio clip under an edge drag. */
+  StudioAudioClip grabbedAudio_;
+  qint64 audioSpanStartMs_ = 0;
+  /// Where in the cue the drag started, so moving one does not snap its
+  /// start to the pointer.
+  qint64 grabOffsetMs_ = 0;
+  Grab grabbed_ = Grab::None;
+  Grab hovered_ = Grab::None;
+  bool cuesEditable_ = true;
+  struct ThumbnailTile {
+    QRectF rect;
+    QRectF clip;
+    QString path;
+    qint64 sourceMs;
+    qint64 inMs;
+    qint64 outMs;
+  };
+  [[nodiscard]] QVector<ThumbnailTile> thumbnailTiles(const QRectF &region) const;
+  [[nodiscard]] const QImage *thumbnailFor(const ThumbnailTile &tile) const;
+  void paintThumbnails(QPainter &painter, const QRectF &region) const;
+  QVector<StudioThumbnail> thumbnails_;
+  QRectF thumbnailViewport_;
+  QVector<StudioAudioPeakResult> audioPeaks_;
+  StudioChrome chrome_;
+};
+
+/**
+ * A recording, open. Deliberately a normal `xdg_toplevel` window in its own
+ * executable: the screenshot binary sets layer-shell process-wide and links
+ * no media libraries, and neither of those should change because video
+ * exists.
+ */
+class StudioWindow final : public QWidget {
+  Q_OBJECT
+public:
+  explicit StudioWindow(QString path, QWidget *parent = nullptr,
+                        QString themePath = {});
+  ~StudioWindow() override;
+
+  /** False when the file could not be opened at all. */
+  [[nodiscard]] bool hasMedia() const;
+
+protected:
+  bool eventFilter(QObject *object, QEvent *event) override;
+  void closeEvent(QCloseEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
+  void keyPressEvent(QKeyEvent *event) override;
+  void paintEvent(QPaintEvent *event) override;
+  void dragEnterEvent(QDragEnterEvent *event) override;
+  void dragMoveEvent(QDragMoveEvent *event) override;
+  void dragLeaveEvent(QDragLeaveEvent *event) override;
+  void dropEvent(QDropEvent *event) override;
+
+private:
+  void applyChrome();
+  StudioTheme *theme_ = nullptr;
+  bool handleShortcut(QKeyEvent *event, bool activate);
+  void toggleInspector();
+  void showShortcuts();
+  void seekTo(qint64 milliseconds);
+  void stepFrame(int direction);
+  void extendRangeSelection(int direction);
+  void beginEdit();
+  void endEdit();
+  void rememberEdit();
+  void undoEdit();
+  void redoEdit();
+  void restoreEdit();
+  void setSelectedZoomTiming(bool easeIn, int milliseconds);
+  void styleChanged();
+  void chooseWallpaper();
+  void commitStyle(const StudioStyle &style);
+  /** Combo index mapped to the model, preserving the stored preset while
+   *  the combo is hidden on the wallpaper tab. */
+  [[nodiscard]] int currentPresetIndex() const;
+  /** Applies a built-in preset from the presets combo. */
+  void applyPreset(int index);
+  /** Shows one background tab, committing a preset when leaving wallpaper. */
+  void switchBackgroundTab(int tab);
+  /** Shows recent or discovered wallpapers in the grid. */
+  void switchWallpaperGroup(int group);
+  /** Rebuilds the section from the style without creating an edit. */
+  void refreshBackgroundSection();
+  /** Starts async thumbnail loading on first wallpaper view. */
+  void ensureWallpapers();
+  /** Records a picked wallpaper in session recents and refreshes checks. */
+  void noteWallpaperPicked(const QString &path);
+  void togglePlayback();
+  [[nodiscard]] qint64 boundedSeek(qint64 milliseconds) const;
+  void refreshSplitAction();
+  void seekBy(qint64 milliseconds);
+  void keepSelection();
+  void startExport();
+  void setStatus(const QString &status, bool error = false);
+  void refreshControls();
+  /** Clicking the preview aims the cue under the playhead, or makes one. */
+  void aimZoom(const QPointF &target);
+  void addZoomAtPlayhead();
+  /** Status line when a fresh cue chained onto its neighbour's end. */
+  void announceChainedZoom(quint64 id);
+  void removeSelectedZoom();
+  void setSelectedZoomScale(qreal scale);
+  /** The selected cue the inspector controls act on. */
+  [[nodiscard]] const ZoomCue *activeCue() const;
+  void zoomChanged();
+  void saveProject();
+  void applyProject(bool resetHistory = false, qint64 position = -1);
+  void relinkAsset();
+  void refreshThumbnails();
+  void refreshAudioPeaks();
+  void captureCursor();
+  void splitAtPlayhead();
+  void deleteSelection();
+  void removeTransition(quint64 outgoingClipId);
+  void finishCompositionEdit(qint64 position);
+  void setupScenes(class QVBoxLayout *controls);
+  void chooseScenes();
+  void importScenes(const QStringList &paths, quint64 before = 0);
+  void moveScene(quint64 id, quint64 before);
+  void duplicateScene();
+  void trimScene(quint64 id, qint64 inMs, qint64 outMs);
+  void refreshSceneControls();
+  void setupTransitions(class QVBoxLayout *controls);
+  void refreshTransitionControls(bool force = false);
+  void changeTransition();
+  /** Boundary under edit: selected boundary first, else selected clip. */
+  [[nodiscard]] std::pair<quint64, quint64> transitionPair() const;
+  void showTransitionEditor(quint64 outgoingClipId);
+  void previewTransition();
+  void previewZoom();
+  [[nodiscard]] QString
+  transitionAdjustment(const QVector<StudioTransition> &before) const;
+  class StudioComboBox *transitionType_ = nullptr;
+  class StudioComboBox *transitionDirection_ = nullptr;
+  class QSpinBox *transitionDuration_ = nullptr;
+  class QLabel *transitionTitle_ = nullptr;
+  class QLabel *overlapHint_ = nullptr;
+  [[nodiscard]] bool scenesEditable() const;
+  bool importing_ = false;
+  quint64 nextAssetId_ = 1;
+  StudioProject gestureProject_;
+  QFutureWatcher<StudioProjectLoad> importWatcher_;
+  class QPushButton *importButton_ = nullptr;
+  class QPushButton *musicButton_ = nullptr;
+  class QLabel *sceneLabel_ = nullptr;
+  QPointer<class QDialog> musicDialog_;
+  QPointer<class QLabel> musicFileLabel_;
+  QPointer<class QSlider> musicVolume_;
+  QPointer<class QLabel> musicVolumeValue_;
+  QPointer<class QPushButton> musicChooseButton_;
+  QPointer<class QPushButton> musicRemoveButton_;
+  QFutureWatcher<qint64> musicProbeWatcher_;
+  QString musicPendingPath_;
+  quint64 nextClipId_ = 1;
+  void changeClipSpeed();
+  class StudioComboBox *clipSpeed_ = nullptr;
+  quint64 nextAudioClipId_ = 1;
+  class QWidget *sceneSection_ = nullptr;
+  class QWidget *audioSection_ = nullptr;
+  class QLabel *audioLabel_ = nullptr;
+  class QSlider *audioGain_ = nullptr;
+  class QLabel *audioGainValue_ = nullptr;
+  class StudioComboBox *audioSpeed_ = nullptr;
+  void moveAudioClip(quint64 id, quint64 before);
+  void duplicateAudioClip();
+  void trimAudioClip(quint64 id, qint64 inMs, qint64 outMs);
+  void deleteAudioClip();
+  void changeAudioGain();
+  void changeAudioSpeed();
+  void showMusicDialog();
+  void chooseMusicFile();
+  void removeMusic();
+  void changeMusicVolume();
+  void commitMusic(const StudioMusic &music);
+  class QPushButton *splitButton_ = nullptr;
+  class QPushButton *deleteButton_ = nullptr;
+  [[nodiscard]] StudioEditState editState() const;
+
+  QString path_;
+  StudioPlayback *player_ = nullptr;
+  QAudioOutput *audio_ = nullptr;
+  StudioPreview *preview_ = nullptr;
+  StudioTimeline *timeline_ = nullptr;
+  bool export_ = false;
+  ZoomTrack zoom_;
+  StudioStyle style_;
+  StudioSource media_;
+  StudioProject project_;
+  StudioHistory history_;
+  QString projectPath_;
+  QVector<quint64> missingAssets_;
+  QSet<QString> missingPaths_;
+  bool relinking_ = false;
+  quint64 relinkingAssetId_ = 0;
+  class QPushButton *relinkButton_ = nullptr;
+  QFutureWatcher<StudioProjectLoad> relinkWatcher_;
+  class QLabel *statusLabel_ = nullptr;
+  class QLabel *timeLabel_ = nullptr;
+  class QPushButton *playButton_ = nullptr;
+  class QPushButton *exportButton_ = nullptr;
+  class QPushButton *keepButton_ = nullptr;
+  class QPushButton *previewZoomButton_ = nullptr;
+  class QPushButton *previewTransitionButton_ = nullptr;
+  class QSlider *zoomSlider_ = nullptr;
+  class QLabel *zoomLabel_ = nullptr;
+  class QTimer *saveTimer_ = nullptr;
+  class QPushButton *undoButton_ = nullptr;
+  class QPushButton *redoButton_ = nullptr;
+  class QLabel *fileLabel_ = nullptr;
+  class QLabel *shortcutLegend_ = nullptr;
+  class QLabel *cueLabel_ = nullptr;
+  class QSpinBox *easeIn_ = nullptr;
+  class QSpinBox *easeOut_ = nullptr;
+  class QWidget *canvasPanel_ = nullptr;
+  class QWidget *tweakPanel_ = nullptr;
+  class QWidget *zoomCard_ = nullptr;
+  class QWidget *transitionCard_ = nullptr;
+  class QWidget *clipCard_ = nullptr;
+  class QWidget *emptyCard_ = nullptr;
+  bool inspectorWanted_ = true;
+  StudioComboBox *background_ = nullptr;
+  StudioComboBox *aspect_ = nullptr;
+  StudioComboBox *presets_ = nullptr;
+  class QPushButton *colorTab_ = nullptr;
+  class QPushButton *gradientTab_ = nullptr;
+  class QPushButton *wallpaperTab_ = nullptr;
+  class QWidget *presetPage_ = nullptr;
+  class QWidget *wallpaperPage_ = nullptr;
+  class QPushButton *recentTab_ = nullptr;
+  class QPushButton *quattroTab_ = nullptr;
+  class QWidget *wallpaperGrid_ = nullptr;
+  class QGridLayout *wallpaperGridLayout_ = nullptr;
+  class QLabel *wallpaperStatus_ = nullptr;
+  QVector<QPushButton *> wallpaperTiles_;
+  QStringList wallpaperTilePaths_;
+  QStringList gridShownPaths_;
+  bool gridBuilt_ = false;
+  QMap<QString, QImage> wallpaperThumbs_;
+  QStringList wallpaperPaths_;
+  QStringList recentWallpapers_;
+  QFutureWatcher<QVector<StudioWallpaperThumb>> wallpaperGridWatcher_;
+  bool wallpapersLoading_ = false;
+  bool wallpapersLoaded_ = false;
+  // 0 Color, 1 Gradient, 2 Wallpaper; 0 Recent, 1 Quattro. The background
+  // view starts invalid so the first refresh populates the combo. The
+  // wallpaper view is sticky (slider moves must not kick out browsing);
+  // every other view follows the model.
+  int backgroundTab_ = -1;
+  int comboTab_ = -1;
+  int wallpaperGroup_ = 1;
+  int lastPreset_ = 0;
+  class QSlider *padding_ = nullptr;
+  class QSlider *radius_ = nullptr;
+  class QSlider *shadow_ = nullptr;
+  class QTimer *scrubTimer_ = nullptr;
+  qint64 pendingSeek_ = -1;
+  /** True when a gesture started while playing: release resumes transport. */
+  bool resumePlayback_ = false;
+  enum class PreviewKind { None, Transition, Zoom };
+  PreviewKind previewKind_ = PreviewKind::None;
+  qint64 previewEndMs_ = -1;
+  bool editGesture_ = false;
+  bool restoring_ = false;
+  bool loaded_ = false;
+  bool closing_ = false;
+  struct LoadedSource {
+    StudioProject project;
+    QVector<quint64> missingAssets;
+    QString error;
+  };
+  QFutureWatcher<LoadedSource> loadWatcher_;
+  QFutureWatcher<QString> saveWatcher_;
+  QFutureWatcher<StudioThumbnail> thumbnailWatcher_;
+  QFutureWatcher<StudioAudioPeakResult> audioPeaksWatcher_;
+  bool thumbnailBusy_ = false;
+  bool audioPeaksBusy_ = false;
+  class QTimer *thumbnailTimer_ = nullptr;
+  bool saving_ = false;
+  bool savePending_ = false;
+  bool mediaFailed_ = false;
+};
+
+/** `hh:mm:ss.mmm` for ffmpeg, and `m:ss` for people. */
+[[nodiscard]] QString studioTimecode(qint64 milliseconds);
+[[nodiscard]] QString studioClock(qint64 milliseconds);
+/**
+ * The ffmpeg argument vector that writes `[inPoint, outPoint)` of `source`
+ * to `destination`, with `zoom` applied.
+ *
+ * The zoom comes from the same `ZoomTrack` the preview draws, turned into
+ * `zoompan` expressions -- there is no second description of where the
+ * camera is. Cue times are absolute in the source, so the offset of the trim
+ * is handed to the expressions rather than papered over with `setpts`:
+ * zoompan reads its own frame counter, not the timestamp.
+ *
+ * The zoom is skipped, rather than guessed at, when `media` does not carry a
+ * usable size and frame rate: a wrong frame rate slides every cue.
+ */
+[[nodiscard]] QStringList studioExportArguments(const QString &source,
+                                                const QString &destination,
+                                                qint64 inPoint, qint64 outPoint,
+                                                const ZoomTrack &zoom = {},
+                                                const StudioSource &media = {},
+                                                const StudioStyle &style = {});
+/** Reads the size and frame rate the export needs. Blocking; bounded. */
+[[nodiscard]] StudioSource probeStudioSource(const QString &path);
+/** `<stem>-trim.mp4` beside the source, under a name nothing has taken. */
+[[nodiscard]] QString studioExportPath(const QString &source);

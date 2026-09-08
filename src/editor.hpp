@@ -56,6 +56,11 @@ public:
 signals:
   /** Emitted (GUI thread) after a background monitor capture finishes. */
   void captureReady(bool ok, const QString &error);
+  /**
+   * Emitted (GUI thread) when a recording target has been picked, in place of
+   * entering the annotation editor. `selection` is in preview coordinates.
+   */
+  void recordTargetSelected(const QRectF &selection, CaptureKind kind);
 
 public:
   /**
@@ -122,6 +127,14 @@ public:
    * for it would render the full capture for nothing and stall process exit.
    */
   void setSuppressSnapshots(bool suppress) { suppressSnapshots_ = suppress; }
+
+  /**
+   * Turns the selector into a recording-target picker. Confirming a selection
+   * emits recordTargetSelected() and closes instead of entering the
+   * annotation editor, so nothing is rendered, saved, shelved, or logged --
+   * the rectangle is the whole answer.
+   */
+  void setRecordTargetMode(bool enabled);
 
 protected:
   bool eventFilter(QObject *watched, QEvent *event) override;
@@ -590,6 +603,7 @@ private:
   QSize pristineLogicalSize_;
   QVector<CutOp> cuts_;
   Phase phase_ = Phase::Select;
+  bool recordTargetMode_ = false;
   Tool tool_ = Tool::Select;
   /// Set by the first key event, which carries a fresh modifier snapshot.
   bool modifiersSeen_ = false;

@@ -1,0 +1,1138 @@
+/** @fileoverview Decode exported compositions to verify ordering and clocks. */
+#include "studio-composition-smoke.hpp"
+#include "studio-composition.hpp"
+#include "studio-preview.hpp"
+
+#include <QImage>
+#include <QDataStream>
+#include <QFile>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QtEndian>
+#include <cmath>
+
+namespace {
+bool run(const QString &tool, const QStringList &arguments, QByteArray &output,
+         QString &error) {
+  QProcess process;
+  process.start(tool, arguments);
+  if (!process.waitForFinished(30000)) {
+    process.kill();
+    process.waitForFinished(1000);
+    error =
+        QStringLiteral("Composition fixture process timed out: %1").arg(tool);
+    return false;
+  }
+  output = process.readAllStandardOutput();
+  if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+    error = QString::fromUtf8(process.readAllStandardError());
+    return false;
+  }
+  return true;
+}
+
+bool exportProject(const QString &ffmpeg, const StudioProject &project,
+                   const QString &path, QString &error) {
+  const auto args = studioCompositionArguments(project, path, error);
+  QByteArray ignored;
+  return !args.isEmpty() && run(ffmpeg, args, ignored, error);
+}
+
+QImage sample(const QString &ffmpeg, const QString &path, double at,
+              QString &error) {
+  QByteArray bytes;
+  if (!run(ffmpeg,
+           {"-v", "error", "-ss", QString::number(at, 'f', 4), "-i", path,
+            "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"},
+           bytes, error))
+    return {};
+  return QImage::fromData(bytes, "PNG");
+}
+
+double audioEnergy(const QByteArray &pcm, double at) {
+  const qsizetype begin = qRound64(at * 48000) * 2;
+  const qsizetype end = qMin(pcm.size(), begin + 4800 * 2);
+  if (end <= begin)
+    return -1;
+  double squares = 0;
+  for (qsizetype i = begin; i < end; i += 2) {
+    const double value =
+        qFromLittleEndian<qint16>(pcm.constData() + i) / 32768.0;
+    squares += value * value;
+  }
+  return std::sqrt(squares / static_cast<double>((end - begin) / 2));
+}
+
+// Inspect every output frame and audio sample, not just two representative
+// timestamps: a removed frame or brief audio burst at a cut is still a leak.
+bool removedPassageIsAbsent(const QString &ffmpeg, const QString &path,
+                            int expectedFrames, QString &error,
+                            bool blends = false) {
+  QByteArray bytes;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-an", "-vf", "scale=1:1", "-pix_fmt",
+            "rgb24", "-f", "rawvideo", "-"},
+           bytes, error))
+    return false;
+  if (bytes.size() != expectedFrames * 3) {
+    error = QStringLiteral("Ripple export contains %1 frames, expected %2.")
+                .arg(bytes.size() / 3)
+                .arg(expectedFrames);
+    return false;
+  }
+  for (int frame = 0; frame < expectedFrames; ++frame) {
+    const auto r = static_cast<unsigned char>(bytes[frame * 3]);
+    const auto g = static_cast<unsigned char>(bytes[frame * 3 + 1]);
+    const auto b = static_cast<unsigned char>(bytes[frame * 3 + 2]);
+    if (g > 20 ||
+        (!blends && (frame < expectedFrames / 2 ? r < 200 : b < 200))) {
+      error =
+          QStringLiteral("Deleted picture or wrong scene at output frame %1.")
+              .arg(frame);
+      return false;
+    }
+  }
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           bytes, error))
+    return false;
+  for (qsizetype i = 0; i + 1 < bytes.size(); i += 2) {
+    if (std::abs(static_cast<int>(
+            qFromLittleEndian<qint16>(bytes.constData() + i))) > 2) {
+      error = QStringLiteral("Deleted audio survives at output sample %1.")
+                  .arg(i / 2);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool runCutExportChecks(const QString &ffmpeg, const QTemporaryDir &scratch,
+                        QString &error) {
+  const QString sourcePath = scratch.filePath("cut-source.mkv");
+  const QString outputPath = scratch.filePath("cut-output.mp4");
+  QByteArray bytes;
+  if (!run(ffmpeg,
+           {"-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=320x180:r=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "aevalsrc='if(between(t,1,1.99999),0.4*sin(2*PI*880*t),0)':s=48000:"
+            "d=3",
+            "-vf",
+            "drawbox=c=green:t=fill:enable='gte(t,1)*lt(t,2)',"
+            "drawbox=c=blue:t=fill:enable='gte(t,2)'",
+            "-t",
+            "3",
+            "-c:v",
+            "libx264",
+            "-g",
+            "1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "pcm_s16le",
+            sourcePath},
+           bytes, error))
+    return false;
+  StudioProject project;
+  project.canvas = {320, 180};
+  StudioSource source;
+  source.size = project.canvas;
+  source.fpsNumerator = 30;
+  source.durationMs = 3000;
+  source.audioStreams = 1;
+  project.assets = {{1, sourcePath, source}};
+  project.clips = {{1, 1, 0, 3000, 1}};
+  StudioHistory history;
+  StudioEditState before;
+  before.project = project;
+  before.positionMs = 1500;
+  before.rangeIn = 1000;
+  before.rangeOut = 2000;
+  history.reset(before);
+  if (!studioDeleteRange(project, 1000, 2000, 99).changed) {
+    error = QStringLiteral("Interior ripple delete was rejected.");
+    return false;
+  }
+  StudioEditState after = before;
+  after.project = project;
+  history.push(after);
+  if (!exportProject(ffmpeg, project, outputPath, error) ||
+      !removedPassageIsAbsent(ffmpeg, outputPath, 60, error))
+    return false;
+  // Transition handles are strictly inside surviving trimmed ranges. Even
+  // their overlap must never bring back the excluded green picture/tone.
+  StudioProject blendedCut = project;
+  for (const auto kind :
+       {StudioTransitionKind::Crossfade, StudioTransitionKind::FadeBlack}) {
+    if (!studioSetTransition(blendedCut, 1, 99, kind, 300, error) ||
+        !exportProject(ffmpeg, blendedCut, outputPath, error) ||
+        !removedPassageIsAbsent(ffmpeg, outputPath, 51, error, true))
+      return false;
+  }
+  if (!history.undo() || history.current() != before ||
+      !exportProject(ffmpeg, history.current().project, outputPath, error)) {
+    if (error.isEmpty())
+      error = QStringLiteral("Undo did not restore the exact pre-cut project.");
+    return false;
+  }
+  const auto restored = sample(ffmpeg, outputPath, 1.5, error);
+  if (restored.isNull() || restored.pixelColor(160, 90).green() < 90 ||
+      !run(ffmpeg,
+           {"-v", "error", "-i", outputPath, "-vn", "-ac", "1", "-ar", "48000",
+            "-f", "s16le", "-"},
+           bytes, error) ||
+      audioEnergy(bytes, 1.5) < 0.1) {
+    if (error.isEmpty())
+      error = QStringLiteral(
+          "Undo export did not restore deleted picture and audio.");
+    return false;
+  }
+  if (!history.redo() || history.current() != after) {
+    error = QStringLiteral("Redo did not restore the ripple deletion.");
+    return false;
+  }
+  // One cut across two occurrences of the same source removes both middle
+  // tones and the scene boundary; surviving endpoints remain independent.
+  project = before.project;
+  project.clips.push_back({2, 1, 0, 3000, 1});
+  if (!studioDeleteRange(project, 500, 5500, 99).changed ||
+      !exportProject(ffmpeg, project, outputPath, error) ||
+      !removedPassageIsAbsent(ffmpeg, outputPath, 30, error)) {
+    if (error.isEmpty())
+      error = QStringLiteral("Cross-scene ripple deletion failed.");
+    return false;
+  }
+  if (!studioDeleteRange(project, 0, studioDuration(project), 100).changed ||
+      !project.clips.isEmpty() ||
+      !studioCompositionArguments(project, outputPath, error).isEmpty()) {
+    error = QStringLiteral(
+        "Deleting all remaining scenes did not produce an empty project.");
+    return false;
+  }
+  error.clear();
+  return true;
+}
+
+bool runSceneExportChecks(const QString &ffmpeg,
+                          const QVector<StudioAsset> &assets,
+                          const QTemporaryDir &scratch, QString &error) {
+  StudioProject project;
+  // The import controller picks the initial canvas once. Structural edits
+  // must retain it, including when later clips use a different shape/FPS.
+  project.canvas = assets.first().source.size;
+  project.fpsNumerator = assets.first().source.fpsNumerator;
+  project.fpsDenominator = assets.first().source.fpsDenominator;
+  const auto checked = [&error](bool result, const char *message) {
+    if (!result && error.isEmpty())
+      error = QString::fromLatin1(message);
+    return result;
+  };
+  if (!checked(studioInsertScenes(
+                   project, assets,
+                   {{1, 1, 0, 1000, 1}, {2, 2, 0, 1000, 1}, {3, 3, 0, 1000, 1}},
+                   0, error),
+               "three-scene import was rejected") ||
+      !checked(studioMoveClip(project, 3, 1, error),
+               "scene reorder was rejected") ||
+      !checked(studioDuplicateClip(project, 3, 4, error),
+               "scene duplicate was rejected") ||
+      !checked(studioTrimClip(project, 4, 250, 750, error),
+               "independent scene trim was rejected"))
+    return false;
+  StudioHistory history;
+  StudioEditState before;
+  before.project = project;
+  before.selectedClip = 4;
+  before.positionMs = 1200;
+  history.reset(before);
+  if (!checked(studioMoveClip(project, 4, 0, error),
+               "scene append reorder was rejected"))
+    return false;
+  StudioEditState after = before;
+  after.project = project;
+  after.positionMs = 3200;
+  history.push(after);
+  if (!checked(history.undo() && history.current() == before &&
+                   history.redo() && history.current() == after,
+               "scene reorder undo/redo lost composition or selection"))
+    return false;
+  const QString projectPath = scratch.filePath("combined.omasnap-project.json");
+  error = saveStudioProject(projectPath, project);
+  if (!error.isEmpty())
+    return false;
+  const auto reopened = loadStudioProject(projectPath);
+  if (!checked(reopened.error.isEmpty() && reopened.missingAssets.isEmpty() &&
+                   reopened.project == project &&
+                   studioDuration(reopened.project) == 3500 &&
+                   project.canvas == assets.first().source.size &&
+                   project.fpsNumerator == 24,
+               "combined scene save/reopen or locked canvas/FPS changed"))
+    return false;
+  const QString outputPath = scratch.filePath("combined.mp4");
+  if (!exportProject(ffmpeg, reopened.project, outputPath, error))
+    return false;
+  const QPoint centre(project.canvas.width() / 2, project.canvas.height() / 2);
+  const auto green = sample(ffmpeg, outputPath, 0.5, error);
+  const auto red = sample(ffmpeg, outputPath, 1.5, error);
+  const auto blue = sample(ffmpeg, outputPath, 2.5, error);
+  const auto duplicate = sample(ffmpeg, outputPath, 3.25, error);
+  if (!checked(!green.isNull() && !red.isNull() && !blue.isNull() &&
+                   !duplicate.isNull() && green.size() == project.canvas &&
+                   green.pixelColor(centre).green() > 90 &&
+                   red.pixelColor(centre).red() > 200 &&
+                   blue.pixelColor(centre).blue() > 200 &&
+                   duplicate.pixelColor(centre).green() > 90,
+               "import/reorder/duplicate/trim output scene sequence differed"))
+    return false;
+  QByteArray audio;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", outputPath, "-vn", "-ac", "1", "-ar", "48000",
+            "-f", "s16le", "-"},
+           audio, error))
+    return false;
+  return checked(
+      std::abs(audio.size() / 96000.0 - 3.5) < 0.04 &&
+          audioEnergy(audio, 0.5) > 0.01 && audioEnergy(audio, 1.5) > 0.01 &&
+          audioEnergy(audio, 2.5) < 0.0001 && audioEnergy(audio, 3.25) > 0.01,
+      "reopened scene audio order or duration differed");
+}
+
+bool runTransitionExportChecks(const QString &ffmpeg,
+                               const QVector<StudioAsset> &assets,
+                               const QTemporaryDir &scratch, QString &error) {
+  const auto checked = [&error](bool ok, const char *message) {
+    if (!ok && error.isEmpty())
+      error = QString::fromLatin1(message);
+    return ok;
+  };
+  StudioProject project;
+  project.canvas = {320, 180};
+  project.assets = assets;
+  project.clips = {{1, 1, 0, 2000, 1}, {2, 2, 0, 2000, 1}};
+  const QString path = scratch.filePath("transition.mp4");
+  for (const auto kind :
+       {StudioTransitionKind::Crossfade, StudioTransitionKind::FadeBlack}) {
+    if (!checked(studioSetTransition(project, 1, 2, kind, 800, error),
+                 "transition setup failed") ||
+        !exportProject(ffmpeg, project, path, error))
+      return false;
+    const auto spans = studioComposition(project);
+    const auto *transition = studioTransition(project, 1, 2);
+    for (int quarter = 0; quarter <= 4; ++quarter) {
+      const qint64 at = spans[1].startMs + transition->durationMs * quarter / 4;
+      const auto blend = studioBlendAt(project, at);
+      const double outgoing = blend ? blend->outgoingOpacity : 0;
+      const double incoming = blend ? blend->incomingOpacity : 1;
+      const auto frame = sample(ffmpeg, path, at / 1000.0, error);
+      if (!checked(!frame.isNull(), "transition frame was not decoded"))
+        return false;
+      const auto seen = frame.pixelColor(160, 90);
+      if (std::abs(seen.red() - qRound(254 * outgoing)) > 10 ||
+          std::abs(seen.blue() - qRound(254 * incoming)) > 10 ||
+          seen.green() > 10) {
+        error = QStringLiteral("Transition %1 quarter %2 differs from model: "
+                               "RGB %3,%4,%5 vs weights %6,%7")
+                    .arg(static_cast<int>(kind))
+                    .arg(quarter)
+                    .arg(seen.red())
+                    .arg(seen.green())
+                    .arg(seen.blue())
+                    .arg(outgoing)
+                    .arg(incoming);
+        return false;
+      }
+    }
+    QByteArray audio;
+    if (!run(ffmpeg,
+             {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000",
+              "-f", "s16le", "-"},
+             audio, error))
+      return false;
+    const double baseline = audioEnergy(audio, 0.3);
+    for (int quarter = 1; quarter <= 3; ++quarter) {
+      const double at =
+          (spans[1].startMs + transition->durationMs * quarter / 4) / 1000.0;
+      const double ratio = audioEnergy(audio, at - 0.05) / baseline;
+      if (!checked(std::abs(ratio - (1 - quarter / 4.0)) < 0.05,
+                   "transition audio gain does not match linear model"))
+        return false;
+    }
+    if (!checked(std::abs(audio.size() / 96000.0 -
+                          studioDuration(project) / 1000.0) < 0.04 &&
+                     audioEnergy(audio, 2.5) < 0.0001,
+                 "transition audio length or silent incoming clip differed"))
+      return false;
+  }
+  // Alternate transitions and hard cuts, with deliberately non-frame-aligned
+  // source durations and rational output FPS. Absolute endpoints own joins.
+  project.transitions.clear();
+  project.fpsNumerator = 30000;
+  project.fpsDenominator = 1001;
+  project.clips = {{1, 1, 0, 1333, 1},
+                   {2, 2, 0, 1777, 1},
+                   {3, 3, 0, 1555, 1},
+                   {4, 1, 0, 1111, 1}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::Crossfade, 400,
+                           error) ||
+      !studioSetTransition(project, 3, 4, StudioTransitionKind::FadeBlack, 400,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto spans = studioComposition(project);
+  // The hard cut between blue and green must not inherit the previous
+  // overlap's frame-rounding error, or the third color arrives late.
+  const auto before =
+      sample(ffmpeg, path, (spans[2].startMs - 80) / 1000.0, error);
+  const auto after =
+      sample(ffmpeg, path, (spans[2].startMs + 80) / 1000.0, error);
+  if (!checked(!before.isNull() && !after.isNull() &&
+                   before.pixelColor(160, 90).blue() > 200 &&
+                   after.pixelColor(160, 90).green() > 90,
+               "hard cut amid transitions shifted to the wrong time"))
+    return false;
+  QByteArray audio;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           audio, error) ||
+      !checked(std::abs(audio.size() / 96000.0 -
+                        studioDuration(project) / 1000.0) < 0.04,
+               "mixed transition/cut composition duration drifted"))
+    return false;
+  QByteArray frames;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-an", "-vf", "scale=1:1", "-pix_fmt",
+            "rgb24", "-f", "rawvideo", "-"},
+           frames, error))
+    return false;
+  const qint64 expected = qCeil(studioDuration(project) / 1000.0 *
+                                project.fpsNumerator / project.fpsDenominator);
+  if (!checked(std::abs(frames.size() / 3 - expected) <= 1 &&
+                   frames.size() >= 3 &&
+                   static_cast<unsigned char>(frames[frames.size() - 3]) > 200,
+               "mixed transition video frame count or ending picture differed"))
+    return false;
+  return true;
+}
+
+bool runDirectionalExportChecks(const QString &ffmpeg,
+                                const QTemporaryDir &scratch, QString &error) {
+  StudioProject project;
+  project.canvas = {320, 192};
+  QVector<QImage> originals;
+  const QStringList backgrounds{"red", "cyan"};
+  const QStringList topRight{"green", "magenta"};
+  const QStringList bottomLeft{"blue", "white"};
+  const QStringList bottomRight{"yellow", "gray"};
+  QByteArray bytes;
+  for (int i = 0; i < 2; ++i) {
+    const QString path =
+        scratch.filePath(QStringLiteral("direction-source-%1.mp4").arg(i));
+    if (!run(ffmpeg,
+             {"-v",
+              "error",
+              "-y",
+              "-f",
+              "lavfi",
+              "-i",
+              QStringLiteral("color=%1:s=320x192:r=30:d=2").arg(backgrounds[i]),
+              "-f",
+              "lavfi",
+              "-i",
+              QStringLiteral("sine=frequency=%1:sample_rate=48000:duration=2")
+                  .arg(i ? 660 : 880),
+              "-vf",
+              QStringLiteral("drawbox=x=160:y=0:w=160:h=96:c=%1:t=fill,"
+                             "drawbox=x=0:y=96:w=160:h=96:c=%2:t=fill,"
+                             "drawbox=x=160:y=96:w=160:h=96:c=%3:t=fill")
+                  .arg(topRight[i], bottomLeft[i], bottomRight[i]),
+              "-c:v",
+              "libx264",
+              "-g",
+              "1",
+              "-c:a",
+              "aac",
+              path},
+             bytes, error))
+      return false;
+    StudioSource media;
+    media.size = project.canvas;
+    media.fpsNumerator = 30;
+    media.durationMs = 2000;
+    media.audioStreams = 1;
+    project.assets.push_back({static_cast<quint64>(i + 1), path, media});
+    project.clips.push_back(
+        {static_cast<quint64>(i + 1), static_cast<quint64>(i + 1), 0, 2000, 1});
+    originals.push_back(sample(ffmpeg, path, 0.5, error));
+    if (originals.last().isNull())
+      return false;
+  }
+  const QList<StudioTransitionKind> kinds{
+      StudioTransitionKind::WipeLeft,  StudioTransitionKind::WipeRight,
+      StudioTransitionKind::WipeUp,    StudioTransitionKind::WipeDown,
+      StudioTransitionKind::SlideLeft, StudioTransitionKind::SlideRight,
+      StudioTransitionKind::SlideUp,   StudioTransitionKind::SlideDown};
+  const QString path = scratch.filePath("direction-output.mp4");
+  for (const auto kind : kinds) {
+    if (!studioSetTransition(project, 1, 2, kind, 800, error) ||
+        !exportProject(ffmpeg, project, path, error))
+      return false;
+    const auto spans = studioComposition(project);
+    const auto *transition = studioTransition(project, 1, 2);
+    for (int quarter = 0; quarter <= 4; ++quarter) {
+      const double u = quarter / 4.0;
+      const qint64 at = spans[1].startMs + transition->durationMs * quarter / 4;
+      const auto frame = sample(ffmpeg, path, at / 1000.0, error);
+      if (frame.isNull())
+        return false;
+      const auto outgoing = studioTransitionLayer(kind, u, false);
+      const auto incoming = studioTransitionLayer(kind, u, true);
+      // Distinct quadrants in BOTH inputs catch a slide accidentally rendered
+      // as a wipe, reversed travel, or sampling stationary source positions.
+      // These points avoid source pattern boundaries; native FFmpeg slides
+      // round offsets to pixels, unlike the GPU's subpixel sampling (<1 px).
+      for (int y = 12; y < 192; y += 24) {
+        for (int x = 10; x < 320; x += 40) {
+          const QPointF p((x + 0.5) / 320.0, (y + 0.5) / 192.0);
+          const auto visible = [p](const StudioTransitionLayer &layer) {
+            const QPointF source = p - layer.offset;
+            return p.x() >= layer.clip.left() && p.x() < layer.clip.right() &&
+                   p.y() >= layer.clip.top() && p.y() < layer.clip.bottom() &&
+                   source.x() >= 0 && source.x() < 1 && source.y() >= 0 &&
+                   source.y() < 1;
+          };
+          const bool fromIncoming = visible(incoming);
+          if (!fromIncoming && !visible(outgoing)) {
+            error =
+                QStringLiteral("Directional model left a gap in the canvas.");
+            return false;
+          }
+          const auto &layer = fromIncoming ? incoming : outgoing;
+          const auto &original = originals[fromIncoming ? 1 : 0];
+          const QPointF source = p - layer.offset;
+          const QColor expected = original.pixelColor(
+              qBound(0, qRound(source.x() * 320 - 0.5), 319),
+              qBound(0, qRound(source.y() * 192 - 0.5), 191));
+          const QColor actual = frame.pixelColor(x, y);
+          if (std::abs(expected.red() - actual.red()) > 12 ||
+              std::abs(expected.green() - actual.green()) > 12 ||
+              std::abs(expected.blue() - actual.blue()) > 12) {
+            error = QStringLiteral("%1 quarter %2 at %3,%4 did not "
+                                   "translate/mask source pixels correctly.")
+                        .arg(studioTransitionName(kind))
+                        .arg(quarter)
+                        .arg(x)
+                        .arg(y);
+            return false;
+          }
+        }
+      }
+    }
+    if (!run(ffmpeg,
+             {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000",
+              "-f", "s16le", "-"},
+             bytes, error))
+      return false;
+    if (std::abs(bytes.size() / 96000.0 - 3.2) > 0.04 ||
+        audioEnergy(bytes, 0.3) < 0.01 || audioEnergy(bytes, 1.55) < 0.01 ||
+        audioEnergy(bytes, 2.5) < 0.01) {
+      error = QStringLiteral(
+          "Directional transition changed audio timing or dropped its blend.");
+      return false;
+    }
+  }
+  // Camera and canvas styling apply AFTER directional composition. A zoom
+  // must therefore magnify translated content, not change the travel distance.
+  project.style = {2, 10, 24};
+  project.zoom.cues = {{1, 0, 3200, 60, 60, {0.5, 0.5}, 2}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::SlideLeft, 800,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto styled = sample(ffmpeg, path, 1.6, error);
+  if (styled.isNull())
+    return false;
+  const auto corner = styled.pixelColor(4, 4);
+  if (std::abs(corner.red() - project.style.color().red()) > 8 ||
+      std::abs(corner.green() - project.style.color().green()) > 8 ||
+      std::abs(corner.blue() - project.style.color().blue()) > 8) {
+    error = QStringLiteral(
+        "Directional transition replaced the styled outer canvas.");
+    return false;
+  }
+  const auto camera = zoomSourceRect(project.zoom, 1600);
+  for (const int y : {64, 128}) {
+    for (const int x : {64, 112, 208, 256}) {
+      const QPointF canonical(
+          camera.x() + ((x + 0.5 - 32) / 256.0) * camera.width(),
+          camera.y() + ((y + 0.5 - 19) / 154.0) * camera.height());
+      const bool incoming = canonical.x() >= 0.5;
+      const auto layer =
+          studioTransitionLayer(StudioTransitionKind::SlideLeft, 0.5, incoming);
+      const QPointF source = canonical - layer.offset;
+      const auto expected = originals[incoming ? 1 : 0].pixelColor(
+          qBound(0, qRound(source.x() * 320 - 0.5), 319),
+          qBound(0, qRound(source.y() * 192 - 0.5), 191));
+      const auto actual = styled.pixelColor(x, y);
+      if (std::abs(actual.red() - expected.red()) > 12 ||
+          std::abs(actual.green() - expected.green()) > 12 ||
+          std::abs(actual.blue() - expected.blue()) > 12) {
+        error = QStringLiteral(
+            "Slide camera/style ordering disagrees with canonical model.");
+        return false;
+      }
+    }
+  }
+  return true;
+}
+} // namespace
+
+bool runStudioCompositionChecks(QString &error) {
+  const auto require = [&error](bool ok, const char *message) {
+    if (!ok && error.isEmpty())
+      error = QString::fromLatin1(message);
+    return ok;
+  };
+  StudioProject empty;
+  if (!require(studioCompositionArguments(empty, "out.mp4", error).isEmpty(),
+               "empty composition was exportable"))
+    return false;
+  error.clear();
+  // Music graph shape is pure: no decoder runs to spell it.
+  {
+    QTemporaryDir shapeScratch;
+    if (!require(shapeScratch.isValid(), "could not create music scratch"))
+      return false;
+    const QString song = shapeScratch.filePath(QStringLiteral("song.mp3"));
+    QFile staged(song);
+    if (!require(staged.open(QIODevice::WriteOnly),
+                 "could not stage music fixture"))
+      return false;
+    staged.close();
+    StudioProject scored;
+    scored.canvas = {320, 180};
+    StudioSource shapeSource;
+    shapeSource.size = {320, 180};
+    shapeSource.fpsNumerator = 30;
+    shapeSource.durationMs = 2000;
+    scored.assets.push_back(
+        {1, QStringLiteral("scene.mp4"), shapeSource});
+    scored.clips.push_back({1, 1, 0, 2000, 1});
+    scored.music = {song, 20, 2000};
+    QString shapeError;
+    const QStringList scoredArgs =
+        studioCompositionArguments(scored, "scored.mp4", shapeError);
+    const QString spelled = scoredArgs.join(QLatin1Char(' '));
+    if (!require(!scoredArgs.isEmpty() && shapeError.isEmpty() &&
+                     spelled.contains(QStringLiteral("amix")) &&
+                     spelled.contains(QStringLiteral("volume=0.2")) &&
+                     scoredArgs.contains(song),
+                 "music mix graph is wrong"))
+      return false;
+    scored.music = {shapeScratch.filePath(QStringLiteral("missing.mp3")), 20,
+                    2000};
+    if (!require(studioCompositionArguments(scored, "scored.mp4", shapeError)
+                         .isEmpty() &&
+                     shapeError.contains(QStringLiteral("missing")),
+                 "missing music did not fail loudly"))
+      return false;
+    scored.music = {};
+    const QStringList silentArgs =
+        studioCompositionArguments(scored, "scored.mp4", shapeError);
+    if (!require(!silentArgs.isEmpty() && shapeError.isEmpty() &&
+                     !silentArgs.join(QLatin1Char(' ')).contains("amix"),
+                 "silent project grew a mix"))
+      return false;
+  }
+  const QString ffmpeg =
+      QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+  const QString ffprobe =
+      QStandardPaths::findExecutable(QStringLiteral("ffprobe"));
+  if (ffmpeg.isEmpty() || ffprobe.isEmpty()) {
+    qInfo("studio composition smoke: ffmpeg/ffprobe absent; skipping decoded "
+          "export checks");
+    return true;
+  }
+  QTemporaryDir scratch;
+  if (!require(scratch.isValid(),
+               "could not create composition scratch directory"))
+    return false;
+  StudioProject project;
+  project.canvas = {320, 180};
+  const QList<QSize> sizes{{160, 90}, {90, 160}, {320, 180}};
+  const QList<int> rates{24, 30, 60};
+  const QStringList colors{"red", "blue", "green"};
+  QByteArray output;
+  for (int i = 0; i < 3; ++i) {
+    const QString path =
+        scratch.filePath(QStringLiteral("source-%1.mp4").arg(i));
+    QStringList args{"-v",
+                     "error",
+                     "-y",
+                     "-f",
+                     "lavfi",
+                     "-i",
+                     QStringLiteral("color=%1:s=%2x%3:r=%4")
+                         .arg(colors[i])
+                         .arg(sizes[i].width())
+                         .arg(sizes[i].height())
+                         .arg(rates[i])};
+    if (i != 1)
+      args << "-f" << "lavfi" << "-i" << "sine=frequency=880:sample_rate=48000";
+    if (i == 2)
+      args << "-f" << "lavfi" << "-i" << "sine=frequency=440:sample_rate=48000";
+    args << "-map" << "0:v";
+    if (i != 1)
+      args << "-map" << "1:a";
+    if (i == 2)
+      args << "-map" << "2:a";
+    args << "-t" << "2" << "-c:v" << "libx264" << "-g" << "1"
+         << "-pix_fmt" << "yuv420p" << "-c:a" << "aac" << path;
+    if (!run(ffmpeg, args, output, error))
+      return false;
+    StudioSource source;
+    source.size = sizes[i];
+    source.fpsNumerator = rates[i];
+    source.durationMs = 2000;
+    source.audioStreams = i == 1 ? 0 : i == 2 ? 2 : 1;
+    project.assets.push_back({static_cast<quint64>(i + 1), path, source});
+  }
+  if (!runSceneExportChecks(ffmpeg, project.assets, scratch, error))
+    return false;
+  if (!runTransitionExportChecks(ffmpeg, project.assets, scratch, error))
+    return false;
+  if (!runDirectionalExportChecks(ffmpeg, scratch, error))
+    return false;
+  project.clips = {{1, 1, 500, 1500, 2},
+                   {2, 2, 500, 1500, 1},
+                   {3, 1, 0, 500, 1},
+                   {4, 3, 0, 1000, 0.5}};
+  const QString path = scratch.filePath("composition.mp4");
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto red = sample(ffmpeg, path, 0.2, error);
+  const auto blue = sample(ffmpeg, path, 0.8, error);
+  const auto repeated = sample(ffmpeg, path, 1.7, error);
+  const auto green = sample(ffmpeg, path, 3.0, error);
+  if (!require(!red.isNull() && !blue.isNull() && !repeated.isNull() &&
+                   !green.isNull(),
+               "composition output frame was missing"))
+    return false;
+  if (!require(
+          red.size() == project.canvas && red.pixelColor(160, 90).red() > 200 &&
+              blue.pixelColor(160, 90).blue() > 200 &&
+              blue.pixelColor(10, 90).red() < 10 &&
+              blue.pixelColor(10, 90).blue() < 10 &&
+              repeated.pixelColor(160, 90).red() > 200 &&
+              green.pixelColor(160, 90).green() > 90,
+          "scene order, speed, repeated source, or fit-to-canvas differed"))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(std::abs(output.size() / 96000.0 - 4.0) < 0.04 &&
+                   audioEnergy(output, 0.15) > 0.01 &&
+                   audioEnergy(output, 0.8) < 0.0001 &&
+                   audioEnergy(output, 1.7) > 0.01 &&
+                   audioEnergy(output, 3.0) > 0.01,
+               "retimed audio, silent clip, or project duration differed"))
+    return false;
+  // Background music mixes under the scenes: the silent second scene
+  // (0.5–1.5 s) gains energy while duration and timing hold.
+  const QString songPath = scratch.filePath(QStringLiteral("song.m4a"));
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "sine=frequency=440:sample_rate=48000", "-t", "5", "-c:a", "aac",
+            songPath},
+           output, error))
+    return false;
+  project.music = {songPath, 100, 5000};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(std::abs(output.size() / 96000.0 - 4.0) < 0.04 &&
+                   audioEnergy(output, 1.0) > 0.05,
+               "background music did not reach the silent scene"))
+    return false;
+  project.music = {};
+  // The audio lane mixes under the scenes with per-clip gain: the silent
+  // second scene carries the song, then nothing at gain zero.
+  StudioSource songSource;
+  songSource.durationMs = 5000;
+  songSource.audioStreams = 1;
+  project.assets.push_back({4, songPath, songSource});
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 100}};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(std::abs(output.size() / 96000.0 - 4.0) < 0.04 &&
+                   audioEnergy(output, 1.0) > 0.05,
+               "audio lane did not reach the silent scene"))
+    return false;
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 0}};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  if (!run(ffmpeg,
+           {"-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "48000", "-f",
+            "s16le", "-"},
+           output, error))
+    return false;
+  if (!require(audioEnergy(output, 1.0) < 0.0001,
+               "muted lane sound leaked into the mix"))
+    return false;
+  project.assets[3].path = scratch.filePath(QStringLiteral("missing.mp3"));
+  project.audioClips = {{11, 4, 0, 2000, 1.0, 100}};
+  if (!require(studioCompositionArguments(project, path, error).isEmpty() &&
+                   error.contains(QStringLiteral("missing")),
+               "missing lane file did not fail loudly"))
+    return false;
+  project.assets.pop_back();
+  project.audioClips.clear();
+  // Waveform decode buckets exact peaks through the real decoder: a crafted
+  // full-scale WAV keeps the assertion deterministic across codecs.
+  const QString exactPath = scratch.filePath(QStringLiteral("exact.wav"));
+  {
+    QFile exact(exactPath);
+    if (!require(exact.open(QIODevice::WriteOnly),
+                 "could not stage waveform fixture"))
+      return false;
+    const int rate = 8000, samples = 8000;
+    QByteArray header;
+    QDataStream head(&header, QIODevice::WriteOnly);
+    head.setByteOrder(QDataStream::LittleEndian);
+    head.writeRawData("RIFF", 4);
+    head << quint32(36 + samples * 2);
+    head.writeRawData("WAVEfmt ", 8);
+    head << quint32(16) << quint16(1) << quint16(1) << quint32(rate)
+         << quint32(rate * 2) << quint16(2) << quint16(16);
+    head.writeRawData("data", 4);
+    head << quint32(samples * 2);
+    exact.write(header);
+    QByteArray pcm;
+    QDataStream body(&pcm, QIODevice::WriteOnly);
+    body.setByteOrder(QDataStream::LittleEndian);
+    for (int i = 0; i < samples; ++i)
+      body << static_cast<qint16>((i / 10) % 2 ? 32767 : -32767);
+    exact.write(pcm);
+  }
+  const auto decoded = studioDecodeAudioPeaks(exactPath);
+  int peak = 0;
+  for (const auto &bucket : decoded) {
+    const int lo = bucket.first, hi = bucket.second;
+    peak = qMax(peak, lo < 0 ? -lo : lo);
+    peak = qMax(peak, hi < 0 ? -hi : hi);
+  }
+  if (!require(decoded.size() == 1024 && peak > 32000 &&
+                   studioDecodeAudioPeaks(
+                       scratch.filePath(QStringLiteral("missing.mp3")))
+                       .isEmpty(),
+               "waveform decode is wrong or loud on failure"))
+    return false;
+  // Fractional frame clip lengths must not accumulate a per-scene rounding
+  // error. Audio anchors exact scene milliseconds before one final CFR pass.
+  project.clips.clear();
+  for (quint64 i = 0; i < 10; ++i)
+    project.clips.push_back({i + 1, 1, 0, 333, 1});
+  if (!exportProject(ffmpeg, project, path, error) ||
+      !run(ffprobe,
+           {"-v", "error", "-show_entries", "format=duration", "-of",
+            "default=noprint_wrappers=1:nokey=1", path},
+           output, error))
+    return false;
+  if (!require(std::abs(output.trimmed().toDouble() - 3.33) < 0.04,
+               "fractional scene durations accumulated frame rounding drift"))
+    return false;
+  // Camera coordinates address the canonical frame, including its fit bars.
+  // Export trimming must not restart the camera clock at zero.
+  project.clips = {{1, 2, 0, 1000, 1}};
+  project.style = {2, 10, 32};
+  project.trimInMs = 200;
+  project.trimOutMs = 800;
+  project.zoom.cues = {{1, 0, 1000, 60, 60, {0.5, 0.5}, 2}};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto styled = sample(ffmpeg, path, 0.3, error);
+  if (!require(!styled.isNull() && styled.pixelColor(90, 90).blue() > 200 &&
+                   std::abs(styled.pixelColor(4, 4).red() -
+                            project.style.color().red()) < 8,
+               "canonical zoom, project-time trim, or styled canvas differed"))
+    return false;
+  StudioPreview preview;
+  preview.resize(320, 180);
+  preview.setCanvasSize(project.canvas);
+  preview.setStyle(project.style);
+  preview.setTrack(&project.zoom);
+  preview.setPosition(500);
+  preview.setPickable(false);
+  preview.setFrame(sample(ffmpeg, project.assets[1].path, 0.5, error));
+  const QImage shown = preview.grab().toImage().scaled(project.canvas);
+  double difference = 0;
+  for (int y = 0; y < 180; y += 3)
+    for (int x = 0; x < 320; x += 3) {
+      const auto a = shown.pixelColor(x, y), b = styled.pixelColor(x, y);
+      difference += std::abs(a.red() - b.red()) +
+                    std::abs(a.green() - b.green()) +
+                    std::abs(a.blue() - b.blue());
+    }
+  difference /= 60 * 107 * 3;
+  if (!require(difference < 10,
+               "mixed-aspect canvas camera/style preview and export disagree"))
+    return false;
+  // Dawn Fire runs top-left to bottom-right: the export corners must carry
+  // the first and last stops, and the QPainter preview must agree with the
+  // ffmpeg gradients source.
+  project.style = {StudioStyle::solidCount, 10, 0};
+  project.zoom.cues.clear();
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto gradientExport = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  if (!require(!gradientExport.isNull(),
+               "gradient background export frame was missing"))
+    return false;
+  const QColor first =
+      studioStopColor(StudioStyle::gradient(project.style.background).stops[0]);
+  const QColor last =
+      studioStopColor(StudioStyle::gradient(project.style.background).stops[2]);
+  const auto topLeft = gradientExport.pixelColor(4, 4);
+  const auto bottomRight = gradientExport.pixelColor(315, 175);
+  if (!require(std::abs(topLeft.red() - first.red()) < 16 &&
+                   std::abs(topLeft.green() - first.green()) < 16 &&
+                   std::abs(topLeft.blue() - first.blue()) < 16 &&
+                   std::abs(bottomRight.red() - last.red()) < 16 &&
+                   std::abs(bottomRight.green() - last.green()) < 16 &&
+                   std::abs(bottomRight.blue() - last.blue()) < 16,
+               "gradient background export corners carry the wrong stops"))
+    return false;
+  const QImage gradientShown =
+      preview.grab().toImage().scaled(project.canvas);
+  double gradientDifference = 0;
+  for (int y = 0; y < 180; y += 3)
+    for (int x = 0; x < 320; x += 3) {
+      const auto a = gradientShown.pixelColor(x, y),
+                 b = gradientExport.pixelColor(x, y);
+      gradientDifference += std::abs(a.red() - b.red()) +
+                            std::abs(a.green() - b.green()) +
+                            std::abs(a.blue() - b.blue());
+    }
+  gradientDifference /= 60 * 107 * 3;
+  if (!require(gradientDifference < 12,
+               "gradient background preview and export disagree"))
+    return false;
+  // Wallpaper images stretch to fill, like Bettershot, in both preview and
+  // export. The preview decodes off the GUI thread, so poll for arrival.
+  const QString wallpaperPath = scratch.filePath("wallpaper.png");
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "color=0x2bd96a:s=64x48", "-frames:v", "1", wallpaperPath},
+           output, error))
+    return false;
+  project.style = {0, 10, 0, 0, wallpaperPath};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto wallpaperExport = sample(ffmpeg, path, 0.3, error);
+  if (!require(!wallpaperExport.isNull(),
+               "wallpaper background export frame was missing"))
+    return false;
+  const auto wallpaperCorner = wallpaperExport.pixelColor(4, 4);
+  if (!require(std::abs(wallpaperCorner.red() - 0x2b) < 16 &&
+                   std::abs(wallpaperCorner.green() - 0xd9) < 16 &&
+                   std::abs(wallpaperCorner.blue() - 0x6a) < 16,
+               "wallpaper background export corner has the wrong color"))
+    return false;
+  preview.setStyle(project.style);
+  if (!require(QTest::qWaitFor(
+                   [&] {
+                     const auto corner = preview.grab()
+                                             .toImage()
+                                             .scaled(project.canvas)
+                                             .pixelColor(4, 4);
+                     return std::abs(corner.red() - 0x2b) < 24 &&
+                            std::abs(corner.green() - 0xd9) < 24 &&
+                            std::abs(corner.blue() - 0x6a) < 24;
+                   },
+                   5000),
+               "wallpaper background never reached the preview"))
+    return false;
+  // Transparency flattens onto black identically in preview and export,
+  // never onto the theme chrome surrounding the preview.
+  const QString alphaPath = scratch.filePath("alpha.png");
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "color=c=red@0.0:s=32x24:d=1,format=rgba", "-frames:v", "1",
+            alphaPath},
+           output, error))
+    return false;
+  // Bright fallback: the arrival poll below must not pass on the preset
+  // showing while the wallpaper still decodes.
+  project.style = {1, 10, 0, 0, alphaPath};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto alphaExport = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  if (!require(!alphaExport.isNull() &&
+                   QTest::qWaitFor(
+                       [&] {
+                         const auto corner = preview.grab()
+                                                 .toImage()
+                                                 .scaled(project.canvas)
+                                                 .pixelColor(4, 4);
+                         return corner.red() < 24 && corner.green() < 24 &&
+                                corner.blue() < 24;
+                       },
+                       5000),
+               "transparent wallpaper did not flatten onto black in preview"))
+    return false;
+  const auto alphaCorner = alphaExport.pixelColor(4, 4);
+  if (!require(alphaCorner.red() < 24 && alphaCorner.green() < 24 &&
+                   alphaCorner.blue() < 24,
+               "transparent wallpaper did not flatten onto black in export"))
+    return false;
+  // Aspect grows the canvas onto background: a 9:16 export of this
+  // landscape project is portrait with the scene centred.
+  project.style = {0, 10, 0, 2};
+  project.trimInMs = 0;
+  project.trimOutMs = -1;
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto portrait = sample(ffmpeg, path, 0.3, error);
+  if (!require(!portrait.isNull() && portrait.size() == QSize(320, 570),
+               "9:16 export did not grow the canvas"))
+    return false;
+  const auto portraitCorner = portrait.pixelColor(4, 4);
+  // (160,100) sits inside the card but outside the landscape scene: the
+  // aspect band must carry the styled background, not scene-padding black.
+  const auto portraitBand = portrait.pixelColor(160, 100);
+  if (!require(std::abs(portraitCorner.red() - 5) < 12 &&
+                   std::abs(portraitCorner.green() - 5) < 12 &&
+                   std::abs(portraitCorner.blue() - 8) < 12 &&
+                   std::abs(portraitBand.red() - 5) < 12 &&
+                   std::abs(portraitBand.green() - 5) < 12 &&
+                   std::abs(portraitBand.blue() - 8) < 12 &&
+                   portrait.pixelColor(160, 285).blue() > 200,
+               "9:16 export misplaced the scene or background"))
+    return false;
+  // Shadow darkens the canvas just below the card in export and preview
+  // alike, while untouched corners stay bright. 70% reads robustly through
+  // the encode; the halo math is strength-linear.
+  project.style = {1, 10, 0, 0, {}, 70};
+  project.trimInMs = 0;
+  project.trimOutMs = -1;
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto shadowed = sample(ffmpeg, path, 0.3, error);
+  preview.setStyle(project.style);
+  // Symmetric halo points: a miscentred mask darkens one side only.
+  const auto haloLeft = shadowed.pixelColor(28, 100);
+  const auto haloRight = shadowed.pixelColor(292, 100);
+  if (!require(!shadowed.isNull() &&
+                   std::abs(haloLeft.red() - haloRight.red()) < 12 &&
+                   haloLeft.red() < 235 && haloRight.red() < 235 &&
+                   shadowed.pixelColor(4, 4).red() > 230 &&
+                   shadowed.pixelColor(160, 164).red() < 235 &&
+                   QTest::qWaitFor(
+                       [&] {
+                         const QImage shot = preview.grab()
+                                                 .toImage()
+                                                 .scaled(project.canvas);
+                         return shot.pixelColor(4, 4).red() > 230 &&
+                                shot.pixelColor(160, 164).red() < 238;
+                       },
+                       5000),
+               "shadow did not darken below the card"))
+    return false;
+  // Thin margin plus full strength: the offset silhouette must survive, not
+  // clip against the canvas edge. Export-only; the preview scissor path is
+  // covered above.
+  project.style = {1, 1, 0, 0, {}, 100};
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto thinShadow = sample(ffmpeg, path, 0.3, error);
+  if (!require(!thinShadow.isNull() &&
+                   thinShadow.pixelColor(160, 179).red() < 215,
+               "thin-margin shadow lost its offset"))
+    return false;
+  // A changing cadence retains timestamps; frame-index-based concatenation
+  // would move the blue/green changes and shorten this two-second source.
+  const QString vfrPath = scratch.filePath("vfr.mp4");
+  if (!run(ffmpeg,
+           {"-v", "error", "-y", "-f", "lavfi", "-i",
+            "color=red:s=320x180:r=60", "-vf",
+            "drawbox=c=blue:t=fill:enable='gte(t,0.5)*lt(t,1)',"
+            "drawbox=c=green:t=fill:enable='gte(t,1)',"
+            "select='not(mod(n,if(lt(t,1),3,2)))'",
+            "-t", "2", "-fps_mode", "vfr", "-c:v", "libx264", "-g", "1",
+            vfrPath},
+           output, error))
+    return false;
+  StudioSource vfr;
+  vfr.size = {320, 180};
+  vfr.fpsNumerator = 60;
+  vfr.durationMs = 2000;
+  project.assets = {{1, vfrPath, vfr}};
+  project.clips = {{1, 1, 0, 2000, 2}};
+  project.zoom = {};
+  project.style = {};
+  project.trimInMs = 0;
+  project.trimOutMs = -1;
+  if (!exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto vfrRed = sample(ffmpeg, path, 0.1, error);
+  const auto vfrBlue = sample(ffmpeg, path, 0.35, error);
+  const auto vfrGreen = sample(ffmpeg, path, 0.75, error);
+  if (!require(!vfrRed.isNull() && !vfrBlue.isNull() && !vfrGreen.isNull() &&
+                   vfrRed.pixelColor(160, 90).red() > 200 &&
+                   vfrBlue.pixelColor(160, 90).blue() > 200 &&
+                   vfrGreen.pixelColor(160, 90).green() > 90,
+               "VFR timestamp normalization or speed mapping differed"))
+    return false;
+  project.clips = {{1, 1, 0, 2000, 1}, {2, 1, 0, 2000, 2}};
+  if (!studioSetTransition(project, 1, 2, StudioTransitionKind::Crossfade, 333,
+                           error) ||
+      !exportProject(ffmpeg, project, path, error))
+    return false;
+  const auto spans = studioComposition(project);
+  const auto *transition = studioTransition(project, 1, 2);
+  const qint64 midpoint = spans[1].startMs + transition->durationMs / 2;
+  const auto weights = studioBlendAt(project, midpoint);
+  const auto blended = sample(ffmpeg, path, midpoint / 1000.0, error);
+  if (!require(
+          weights && !blended.isNull() &&
+              std::abs(blended.pixelColor(160, 90).red() -
+                       qRound(254 * weights->incomingOpacity)) < 12 &&
+              std::abs(blended.pixelColor(160, 90).green() -
+                       qRound(128 * weights->outgoingOpacity)) < 12,
+          "retimed VFR transition did not sample both sources at project time"))
+    return false;
+  project.transitions.clear();
+  project.clips = {{1, 1, 0, 2000, 2}};
+  for (quint64 id = 2; id <= 65; ++id)
+    project.clips.push_back({id, 1, 0, 2000, 1});
+  if (!require(studioCompositionArguments(project, path, error).isEmpty() &&
+                   error.contains(QStringLiteral("64 scenes")),
+               "large export graph was not bounded"))
+    return false;
+  error.clear();
+  return runCutExportChecks(ffmpeg, scratch, error);
+}

@@ -1,0 +1,483 @@
+#include "studio-transitions-ui-smoke.hpp"
+#include "studio-playback.hpp"
+#include "studio.hpp"
+#include <QAbstractItemView>
+#include <QAudioOutput>
+#include <QLabel>
+#include <QMenu>
+#include <QFile>
+#include <QPushButton>
+#include <QSpinBox>
+#include <QTemporaryDir>
+#include <QTest>
+
+bool runStudioTransitionsUiChecks(const QString &source, QString &error) {
+  QTemporaryDir scratch;
+  const auto path = scratch.filePath("transitions.mp4");
+  const auto require = [&error](bool ok, const char *message) {
+    if (!ok)
+      error = QString::fromLatin1(message);
+    return ok;
+  };
+  if (!require(QFile::copy(source, path), "Could not copy transition fixture"))
+    return false;
+  StudioWindow window(path, nullptr, scratch.filePath("palette.toml"));
+  window.show();
+  auto *timeline = window.findChild<StudioTimeline *>();
+  auto *player = window.findChild<StudioPlayback *>();
+  auto *type = window.findChild<QComboBox *>("transitionType");
+  auto *duration = window.findChild<QSpinBox *>("transitionDuration");
+  if (!require(
+          timeline && player && type && duration &&
+              QTest::qWaitFor([&] { return player->duration() == 6000; }, 6000),
+          "Transition controls or media unavailable"))
+    return false;
+  player->setPosition(3000);
+  QTest::keyClick(&window, Qt::Key_S);
+  timeline->setSelectedClip(1);
+  QTest::keyClick(&window, Qt::Key_T);
+  // QTest sends to this window explicitly. A live compositor may keep another
+  // application active; check the intended focus route without requiring the
+  // test to steal desktop focus.
+  if (!require(
+          QTest::qWaitFor(
+              [&] { return type->isEnabled() && window.focusWidget() == type; },
+              2000),
+          "T did not focus the scene boundary editor"))
+    return false;
+  timeline->scrubbed(500);
+  type->setCurrentIndex(1);
+  if (!require(player->duration() == 5700 && duration->value() == 300,
+               "Crossfade did not consume a 300ms overlap"))
+    return false;
+  auto *direction = window.findChild<QComboBox *>("transitionDirection");
+  auto *title = window.findChild<QLabel *>("transitionTitle");
+  if (!require(direction && title, "Transition direction or title missing"))
+    return false;
+  if (!require(title->text().contains(QStringLiteral("Crossfade")),
+               "Crossfade mapped to the wrong effect"))
+    return false;
+  duration->setValue(600);
+  if (!require(player->duration() == 5400,
+               "Transition duration was not applied"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5700 && duration->value() == 300,
+               "Undo did not restore previous transition duration"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+  type->setCurrentIndex(2);
+  if (!require(player->duration() == 5400 && duration->value() == 600,
+               "Fade through black changed overlap duration"))
+    return false;
+  if (!require(title->text().contains(QStringLiteral("Fade through black")),
+               "Fade through black mapped to the wrong effect"))
+    return false;
+  const struct {
+    int type;
+    int direction;
+    const char *label;
+  } directional[] = {{3, 0, "Wipe Left"},   {3, 1, "Wipe Right"},
+                     {3, 2, "Wipe Up"},     {3, 3, "Wipe Down"},
+                     {4, 0, "Slide Left"},  {4, 1, "Slide Right"},
+                     {4, 2, "Slide Up"},    {4, 3, "Slide Down"}};
+  for (const auto &c : directional) {
+    const int previousType = type->currentIndex();
+    const int previousDirection = direction->currentIndex();
+    type->setCurrentIndex(c.type);
+    direction->setCurrentIndex(c.direction);
+    if (!require(player->duration() == 5400 && duration->value() == 600 &&
+                    title->text().contains(QLatin1String(c.label)),
+                 "Directional transition changed timing or title"))
+      return false;
+    // Type and direction commit separately: step back until both match.
+    for (int i = 0;
+         i < 2 && (type->currentIndex() != previousType ||
+                   direction->currentIndex() != previousDirection);
+         ++i)
+      QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+    if (!require(type->currentIndex() == previousType &&
+                    direction->currentIndex() == previousDirection &&
+                    player->duration() == 5400,
+                 "Undo did not restore directional transition kind"))
+      return false;
+    for (int i = 0;
+         i < 2 && (type->currentIndex() != c.type ||
+                   direction->currentIndex() != c.direction);
+         ++i)
+      QTest::keyClick(&window, Qt::Key_Z,
+                      Qt::ControlModifier | Qt::ShiftModifier);
+    if (!require(type->currentIndex() == c.type &&
+                    direction->currentIndex() == c.direction &&
+                    title->text().contains(QLatin1String(c.label)),
+                 "Redo did not restore directional transition kind"))
+      return false;
+  }
+  // Direction popup inherits the same Quattro chrome while enabled: the
+  // loop ends on Slide Down, so the control is live here.
+  direction->showPopup();
+  QTest::qWait(100);
+  const auto dirPopup = direction->view()->window()->grab().toImage();
+  const auto dirPopupBackground = dirPopup.pixelColor(dirPopup.width() / 2, 3);
+  direction->hidePopup();
+  if (!require(dirPopupBackground == StudioChrome{}.background,
+               "Direction popup leaked platform-theme chrome"))
+    return false;
+  type->setCurrentIndex(2);
+  type->showPopup();
+  QTest::qWait(100);
+  const auto popup = type->view()->window()->grab().toImage();
+  const auto popupBackground = popup.pixelColor(popup.width() / 2, 3);
+  type->hidePopup();
+  if (!require(popupBackground == StudioChrome{}.background,
+               "Transition popup leaked platform-theme chrome"))
+    return false;
+  QTest::keyClick(duration, Qt::Key_Space);
+  if (!require(player->playbackState() == QMediaPlayer::PlayingState,
+               "Space from transition duration did not transport"))
+    return false;
+  player->pause();
+  // Inspector fields keep native editing: hotkeys must not fire from them.
+  player->setPosition(1000);
+  timeline->setSelectedClip(1);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 1000; }, 4000),
+               "playhead did not settle before input checks"))
+    return false;
+  duration->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == duration; }, 2000),
+               "duration field did not take focus"))
+    return false;
+  QTest::keyClick(duration, Qt::Key_Backspace);
+  QTest::keyClick(duration, Qt::Key_S);
+  QTest::keyClick(duration, Qt::Key_Z);
+  QTest::keyClick(duration, Qt::Key_M);
+  QTest::keyClick(duration, Qt::Key_Left);
+  if (!require(player->duration() == 5400 && duration->value() == 600 &&
+                  timeline->selectedClip() == 1 &&
+                  timeline->selectedCue() == 0 &&
+                  player->position() == 1000 &&
+                  !player->audioOutput()->isMuted(),
+               "Inspector keypress leaked into transport or edits"))
+    return false;
+  type->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == type; }, 2000),
+               "transition type did not take focus"))
+    return false;
+  QTest::keyClick(type, Qt::Key_Backspace);
+  if (!require(player->duration() == 5400,
+               "Combo keypress changed project duration"))
+    return false;
+  if (!require(timeline->selectedClip() == 1,
+               "Combo keypress changed scene selection"))
+    return false;
+  // Typing a duration and pressing Enter applies it as one undo step.
+  duration->setFocus();
+  QTest::keyClick(duration, Qt::Key_A, Qt::ControlModifier);
+  QTest::keyClicks(duration, QStringLiteral("700"));
+  QTest::keyClick(duration, Qt::Key_Enter);
+  if (!require(duration->value() == 700 && player->duration() == 5300,
+               "Typed transition duration did not apply"))
+    return false;
+  // Hotkeys need window focus: focus is still in the duration field.
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Space);
+  player->pause();
+  if (!require(player->duration() == 5400 && duration->value() == 600,
+               "Typed duration was not one undo step"))
+    return false;
+  // A typed duration the export grid normalizes snaps back in the field,
+  // even though the spinbox still has focus.
+  duration->setFocus();
+  if (!require(QTest::qWaitFor([&] { return window.focusWidget() == duration; }, 2000),
+               "duration field did not take focus"))
+    return false;
+  QTest::keyClick(duration, Qt::Key_A, Qt::ControlModifier);
+  QTest::keyClicks(duration, QStringLiteral("601"));
+  QTest::keyClick(duration, Qt::Key_Enter);
+  if (!require(duration->value() == 600 && player->duration() == 5400,
+               "Normalized duration did not reconcile in the field"))
+    return false;
+  player->setPosition(2700);
+  QTest::keyClick(&window, Qt::Key_S);
+  if (!require(player->duration() == 5400 && timeline->selectedClip() == 1,
+               "Split inside a blend unexpectedly changed the project"))
+    return false;
+  timeline->setRange(2600, 2800);
+  QTest::keyClick(&window, Qt::Key_Delete);
+  if (!require(player->duration() == 5400 && timeline->rangeIn() == 2600,
+               "Cut through a blend silently removed the transition"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Escape);
+  const auto point = [&](qint64 ms, int y) {
+    return QPoint(64 + qRound((timeline->width() - 80) * ms / 5400.0), y);
+  };
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(2700, 75));
+  if (!require(timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0 &&
+                  window.focusWidget() == type,
+               "Transition badge did not select the boundary"))
+    return false;
+  // The 600 ms overlap consumes the kept tail/head: incoming scene 2
+  // starts at 2400 of the 5400 ms composition.
+  if (!require(QTest::qWaitFor([&] { return player->position() == 2400; }, 4000),
+               "Boundary selection did not park at the overlap start"))
+    return false;
+  // Preview plays from just before the effect, not from the parked edge.
+  auto *previewTransition = window.findChild<QPushButton *>("previewTransition");
+  if (!require(previewTransition && previewTransition->isEnabled(),
+               "Preview transition unavailable"))
+    return false;
+  QTest::mouseClick(previewTransition, Qt::LeftButton);
+  if (!require(player->position() == 1900,
+               "Preview did not seek before the transition"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Preview did not play the transition"))
+    return false;
+  if (!require(previewTransition->text() == QStringLiteral("Stop"),
+               "Preview button did not become Stop"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PausedState;
+                    },
+                    6000),
+               "Preview did not stop at the transition end"))
+    return false;
+  if (!require(player->position() >= 2800 && player->position() < 4000 &&
+                  previewTransition->text() == QStringLiteral("Preview"),
+               "Preview overran the transition"))
+    return false;
+  player->pause();
+  // Delete with a boundary selected removes the transition, not the scene,
+  // and the boundary stays selected as a hard cut. Focus leaves the Type
+  // field first: hotkeys stay suspended while typing.
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Delete);
+  if (!require(player->duration() == 6000 &&
+                  timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0,
+               "Delete did not remove only the transition"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 &&
+                  timeline->selectedTransition() == 1 &&
+                  timeline->selectedClip() == 0,
+               "Undo did not restore the transition and its selection"))
+    return false;
+  // The timeline context menu offers the same removal.
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, point(1000, 75));
+  auto *menu = timeline->findChild<QMenu *>();
+  QAction *remove = nullptr;
+  if (menu)
+    for (auto *action : menu->actions())
+      if (action->text().startsWith(QStringLiteral("Delete selection")))
+        remove = action;
+  if (!require(menu && menu->isVisible() && remove && remove->isEnabled(),
+               "Context menu did not offer boundary deletion"))
+    return false;
+  remove->trigger();
+  if (!require(player->duration() == 6000 && timeline->selectedTransition() == 1,
+               "Menu deletion did not remove only the transition"))
+    return false;
+  menu->close();
+  if (!require(QTest::qWaitFor(
+                    [&] { return timeline->findChild<QMenu *>() == nullptr; },
+                    2000),
+               "Closed menu lingered"))
+    return false;
+  // A hard-cut boundary has nothing to delete: the menu offers nothing.
+  QTest::mouseClick(timeline, Qt::RightButton, Qt::NoModifier, point(1000, 75));
+  auto *plainMenu = timeline->findChild<QMenu *>();
+  QAction *plainRemove = nullptr;
+  if (plainMenu)
+    for (auto *action : plainMenu->actions())
+      if (action->text().startsWith(QStringLiteral("Delete selection")))
+        plainRemove = action;
+  if (!require(plainMenu && plainMenu->isVisible() && plainRemove &&
+                  !plainRemove->isEnabled(),
+               "Context menu offered deletion with no transition"))
+    return false;
+  plainMenu->close();
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 && timeline->selectedTransition() == 1,
+               "Undo did not restore the menu-removed transition"))
+    return false;
+  // T on the last scene keeps its clip: there is no outgoing boundary.
+  timeline->setSelectedClip(2);
+  QTest::keyClick(&window, Qt::Key_T);
+  if (!require(timeline->selectedClip() == 2 &&
+                  timeline->selectedTransition() == 0,
+               "T on the last scene abandoned its clip"))
+    return false;
+  // A zoom cue previews from just before it starts. Seed it mid-timeline
+  // so its end is far from the project end.
+  player->setPosition(1000);
+  if (!require(QTest::qWaitFor([&] { return player->position() == 1000; }, 4000),
+               "playhead did not settle before zoom preview"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z);
+  auto *previewZoom = window.findChild<QPushButton *>("previewZoom");
+  if (!require(timeline->selectedCue() != 0 && previewZoom &&
+                  previewZoom->isEnabled(),
+               "Zoom cue or its preview unavailable"))
+    return false;
+  const qint64 zoomFrom = player->position();
+  QTest::mouseClick(previewZoom, Qt::LeftButton);
+  if (!require(player->position() < zoomFrom,
+               "Preview did not seek before the zoom"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Preview did not play the zoom"))
+    return false;
+  if (!require(previewZoom->text() == QStringLiteral("Stop"),
+               "Zoom preview button did not become Stop"))
+    return false;
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PausedState;
+                    },
+                    8000),
+               "Preview did not stop at the zoom end"))
+    return false;
+  if (!require(player->position() > 2000 && player->position() < 5000 &&
+                  previewZoom->text() == QStringLiteral("Preview"),
+               "Zoom preview overran the cue"))
+    return false;
+  player->pause();
+  // Shortening the cue mid-preview disarms the old endpoint: playback
+  // continues past it as ordinary transport instead of stopping stale.
+  QTest::mouseClick(previewZoom, Qt::LeftButton);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Zoom preview did not restart"))
+    return false;
+  const auto cuePoint = [&](qint64 ms) {
+    return QPoint(64 + qRound((timeline->width() - 80) * ms / 5400.0), 107);
+  };
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::NoModifier, cuePoint(3475));
+  QTest::mouseMove(timeline, cuePoint(1800), 40);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::NoModifier, cuePoint(1800));
+  if (!require(previewZoom->text() == QStringLiteral("Preview") &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Cue edit did not disarm the preview"))
+    return false;
+  if (!require(QTest::qWaitFor([&] { return player->position() > 3500; }, 6000) &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Playback stopped at the stale preview end"))
+    return false;
+  player->pause();
+  // Undoing while previewing disarms the same way, whatever it restores.
+  QTest::mouseClick(timeline, Qt::LeftButton, Qt::NoModifier, point(2700, 75));
+  QTest::mouseClick(previewTransition, Qt::LeftButton);
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      return player->playbackState() ==
+                             QMediaPlayer::PlayingState;
+                    },
+                    4000),
+               "Transition preview did not restart"))
+    return false;
+  window.setFocus();
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(QTest::qWaitFor([&] { return player->position() > 3000; }, 8000) &&
+                  player->playbackState() == QMediaPlayer::PlayingState,
+               "Undo left a stale preview end armed"))
+    return false;
+  player->pause();
+  timeline->setSelectedClip(1);
+  // Reorder by dragging: the order buttons are gone, Ctrl+drag arranges.
+  QTest::mousePress(timeline, Qt::LeftButton, Qt::ControlModifier,
+                    point(1000, 60));
+  QTest::mouseMove(timeline, point(5000, 60), 40);
+  QTest::mouseRelease(timeline, Qt::LeftButton, Qt::ControlModifier,
+                      point(5000, 60));
+  if (!require(player->duration() == 6000,
+               "Reorder attached transition to the wrong pair"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 && type->currentIndex() == 2,
+               "Undo reorder did not restore transition pair"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Delete);
+  if (!require(player->duration() == 3000,
+               "Deleting a scene left its transition behind"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  if (!require(player->duration() == 5400 && type->currentIndex() == 2,
+               "Undo scene deletion did not restore the blend"))
+    return false;
+  type->setCurrentIndex(0);
+  if (!require(player->duration() == 6000,
+               "Hard cut did not restore full scene duration"))
+    return false;
+  QTest::keyClick(&window, Qt::Key_Z, Qt::ControlModifier);
+  window.close();
+  if (!require(QTest::qWaitFor([&] { return !window.isVisible(); }, 7000),
+               "Transition project did not save on close"))
+    return false;
+  const auto saved = loadStudioProject(path + ".omasnap.json");
+  const auto *transition = studioTransition(saved.project, 1, 2);
+  if (!require(saved.error.isEmpty() && transition &&
+                   transition->kind == StudioTransitionKind::FadeBlack &&
+                   transition->durationMs == 600 &&
+                   studioDuration(saved.project) == 5400,
+               "Transition pair, kind, or duration did not persist"))
+    return false;
+  // Missing media disables Preview like the main transport.
+  StudioProject gone = saved.project;
+  for (auto &asset : gone.assets)
+    asset.path = scratch.filePath(QStringLiteral("missing.mp4"));
+  const QString gonePath = scratch.filePath(QStringLiteral("gone.omasnap.json"));
+  if (!require(saveStudioProject(gonePath, gone).isEmpty(),
+               "could not write missing-media project"))
+    return false;
+  StudioWindow goneWindow(gonePath, nullptr, scratch.filePath("palette.toml"));
+  goneWindow.show();
+  if (!require(QTest::qWaitFor(
+                    [&] {
+                      for (auto *button :
+                           goneWindow.findChildren<QPushButton *>())
+                        if (button->text() == QStringLiteral("Relink media") &&
+                            button->isVisible())
+                          return true;
+                      return false;
+                    },
+                    5000),
+               "Missing media did not expose relink"))
+    return false;
+  auto *goneTimeline = goneWindow.findChild<StudioTimeline *>();
+  goneTimeline->setSelectedClip(1);
+  QTest::keyClick(&goneWindow, Qt::Key_T);
+  if (!require(goneTimeline->selectedTransition() == 1,
+               "Boundary selection needs no media"))
+    return false;
+  auto *gonePreview = goneWindow.findChild<QPushButton *>("previewTransition");
+  auto *gonePlay = goneWindow.findChild<QPushButton *>("play");
+  if (!require(gonePreview && gonePlay && !gonePreview->isEnabled() &&
+                  !gonePlay->isEnabled(),
+               "Preview stayed enabled after media failure"))
+    return false;
+  goneWindow.close();
+  return require(QTest::qWaitFor([&] { return !goneWindow.isVisible(); }, 5000),
+                 "Missing-media window did not close");
+}

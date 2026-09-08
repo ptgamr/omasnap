@@ -906,7 +906,11 @@ CaptureEditor::CaptureEditor(CaptureData capture, CaptureMode mode,
   connect(&recentsWatcher_, &QFutureWatcher<QVector<RecentSnap>>::finished,
           this, [this] {
             recentsLoading_ = false;
-            recents_ = recentsWatcher_.result();
+            // The shelf reopens a screenshot, which is not a thing a
+            // recording target can be. The load is already in flight by the
+            // time the caller can say so, hence the check here too.
+            recents_ = recordTargetMode_ ? QVector<RecentSnap>()
+                                         : recentsWatcher_.result();
             if (phase_ == Phase::Select)
               update();
           });
@@ -2958,7 +2962,33 @@ void CaptureEditor::enterEdit(QString status) {
     scheduleSnapshot();
 }
 
+void CaptureEditor::setRecordTargetMode(bool enabled) {
+  recordTargetMode_ = enabled;
+  if (!enabled)
+    return;
+  setSuppressSnapshots(true);
+  // Every screenshot-only route out of the selector is closed here rather
+  // than guarded at each use: taking one would leave the overlay without
+  // ever answering with a target.
+  setRecentsOpen(false);
+  recents_.clear();
+  setStatus(captureMode_ == CaptureMode::Window
+                ? QStringLiteral("Window mode · click or Super+Arrows then "
+                                 "Enter to record it")
+                : QStringLiteral("Drag the area to record · recording starts "
+                                 "when you let go · Esc cancels"));
+}
+
 void CaptureEditor::enterSelectedCapture(QString editStatus) {
+  if (recordTargetMode_) {
+    // Recording never enters the annotation editor: there is no image to
+    // annotate yet, and no PNG, recents entry, or operation log is written.
+    if (!selection_.isEmpty()) {
+      emit recordTargetSelected(selection_, editedKind_);
+      close();
+    }
+    return;
+  }
   if (quickOutputMode_ != QuickOutputMode::None) {
     if (configuredCustomDefaultPending_) {
       pendingSelectedCapture_ = std::move(editStatus);
@@ -3708,7 +3738,10 @@ void CaptureEditor::keyPressEvent(QKeyEvent *event) {
       return;
     }
     if (event->key() == Qt::Key_S && !event->modifiers()) {
-      setScrollMode(!scrollMode_);
+      // Stitching a scrolling page is a screenshot idea, the same reason the
+      // Scroll tab is inert while picking a recording target.
+      if (!recordTargetMode_)
+        setScrollMode(!scrollMode_);
       return;
     }
     if (event->key() == Qt::Key_Space) {
@@ -5471,6 +5504,10 @@ int CaptureEditor::selectTabAt(const QPointF &position) const {
 }
 
 void CaptureEditor::activateSelectTab(SelectTab tab) {
+  // Stitching a scrolling page is a screenshot idea; there is nothing for a
+  // recorder to do with it, so the tab is inert while picking a target.
+  if (recordTargetMode_ && tab == SelectTab::Scroll)
+    return;
   // A frame drawn for a scrolling capture is the same rectangle a region
   // capture wants, so it comes along to Region rather than being drawn a
   // second time. Window and Fullscreen pick an area of their own, so there it

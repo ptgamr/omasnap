@@ -24,9 +24,10 @@ configure:
 build: configure
 	$(CMAKE) --build $(BUILD_DIR) --parallel
 
+# Through ctest rather than by name: it runs exactly the tests this build
+# configured, so turning the Studio off cannot leave a stale binary running.
 smoke: build
-	QT_QPA_PLATFORM=offscreen $(BUILD_DIR)/omasnap-smoke \
-		$(BUILD_DIR)/omasnap-smoke-output
+	ctest --test-dir $(BUILD_DIR) --output-on-failure
 
 lint: build
 	@set -eu; \

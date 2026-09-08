@@ -6,6 +6,15 @@ set(CMAKE_AUTOMOC ON)
 
 find_package(PkgConfig REQUIRED)
 find_package(Qt6 6.8 REQUIRED COMPONENTS Concurrent Core Gui Test Widgets)
+# The Studio is the optional half. Recording itself needs nothing here --
+# gpu-screen-recorder and ffmpeg are subprocesses -- so a screenshot-only
+# build stays buildable on a machine with no media stack installed.
+option(OMASNAP_STUDIO "Build omasnap-studio (requires Qt Multimedia)" ON)
+if(OMASNAP_STUDIO)
+  # Kept out of omasnap-core on purpose: the screenshot binary must not gain
+  # a media stack, and omasnap-studio must not gain layer-shell.
+  find_package(Qt6 6.8 REQUIRED COMPONENTS Multimedia MultimediaWidgets OpenGLWidgets)
+endif()
 find_package(LayerShellQt REQUIRED)
 pkg_check_modules(WaylandClient REQUIRED IMPORTED_TARGET wayland-client)
 find_program(WAYLAND_SCANNER wayland-scanner REQUIRED)
@@ -72,6 +81,14 @@ add_library(omasnap-core STATIC
   src/scroll-inject.hpp
   src/startup-timing.cpp
   src/startup-timing.hpp
+  src/record-target.cpp
+  src/record-target.hpp
+  src/record-session.cpp
+  src/record-session.hpp
+  src/record-indicator.cpp
+  src/record-indicator.hpp
+  src/quit-signals.cpp
+  src/quit-signals.hpp
   ${PROTOCOL_SOURCES}
   src/editor.cpp
   src/editor.hpp
@@ -128,7 +145,7 @@ target_link_libraries(omasnap-core PUBLIC
   PkgConfig::WaylandClient
 )
 
-qt_add_executable(omasnap src/main.cpp src/pin.cpp src/pin.hpp)
+qt_add_executable(omasnap src/main.cpp src/pin.cpp src/pin.hpp src/record.cpp src/record.hpp)
 target_compile_options(omasnap PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_definitions(omasnap PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
 target_link_libraries(omasnap PRIVATE omasnap-core)
@@ -149,6 +166,16 @@ qt_add_executable(omasnap-smoke
   tests/cut-mapping-smoke.hpp
   tests/palette-config-smoke.cpp
   tests/palette-config-smoke.hpp
+  tests/record-target-smoke.cpp
+  tests/record-target-smoke.hpp
+  tests/record-session-smoke.cpp
+  tests/record-session-smoke.hpp
+  tests/record-indicator-smoke.cpp
+  tests/record-indicator-smoke.hpp
+  tests/record-select-smoke.cpp
+  tests/record-select-smoke.hpp
+  src/record-target.cpp
+  src/record-target.hpp
   src/cli-path.cpp
   src/recent-snaps.cpp
   src/recent-snaps.hpp
@@ -177,7 +204,100 @@ target_compile_options(omasnap-smoke PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(omasnap-smoke PRIVATE omasnap-core Qt6::Test)
 target_precompile_headers(omasnap-smoke REUSE_FROM omasnap-core)
 add_test(NAME omasnap-smoke COMMAND omasnap-smoke "${CMAKE_CURRENT_BINARY_DIR}/omasnap-smoke-output")
-set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_tests_properties(omasnap-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic")
+
+if(OMASNAP_STUDIO)
+# Its own binary for the same reason the Studio is its own binary: the
+# screenshot smoke suite must not link a media stack to test a video window.
+qt_add_executable(omasnap-studio-smoke
+  src/studio-project.cpp src/studio-project.hpp
+  src/studio-composition.cpp src/studio-composition.hpp
+  src/studio-playback.cpp src/studio-playback.hpp
+  tests/studio-project-smoke.cpp tests/studio-project-smoke.hpp
+  tests/studio-background-ui-smoke.cpp tests/studio-background-ui-smoke.hpp
+  tests/studio-music-ui-smoke.cpp tests/studio-music-ui-smoke.hpp
+  tests/studio-audio-ui-smoke.cpp tests/studio-audio-ui-smoke.hpp
+  tests/studio-composition-smoke.cpp tests/studio-composition-smoke.hpp
+  tests/studio-playback-smoke.cpp tests/studio-playback-smoke.hpp
+  tests/studio-cuts-ui-smoke.cpp tests/studio-cuts-ui-smoke.hpp
+  tests/studio-scenes-ui-smoke.cpp tests/studio-scenes-ui-smoke.hpp
+  tests/studio-transitions-ui-smoke.cpp tests/studio-transitions-ui-smoke.hpp
+  tests/studio-theme-smoke.cpp
+  tests/studio-theme-smoke.hpp
+  src/studio-theme.cpp
+  src/studio-theme.hpp
+  src/studio-video.cpp
+  src/studio-video.hpp
+  tests/studio-smoke.cpp
+  tests/zoom-track-smoke.cpp
+  tests/zoom-track-smoke.hpp
+  src/studio.cpp
+  src/studio-scenes.cpp
+  src/studio-transitions.cpp
+  src/studio-export.cpp src/studio-export.hpp
+  src/studio.hpp
+  src/studio-preview.cpp
+  src/studio-preview.hpp
+  src/zoom-track.cpp
+  src/zoom-track.hpp
+  src/overlay-chrome.cpp
+  src/overlay-chrome.hpp
+)
+target_include_directories(omasnap-studio-smoke PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_features(omasnap-studio-smoke PRIVATE cxx_std_23)
+target_compile_options(omasnap-studio-smoke PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(omasnap-studio-smoke PRIVATE
+  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test
+  Qt6::Multimedia Qt6::MultimediaWidgets Qt6::OpenGLWidgets Qt6::Concurrent
+)
+add_test(NAME omasnap-studio-smoke COMMAND omasnap-studio-smoke)
+set_tests_properties(omasnap-studio-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QPA_PLATFORMTHEME=generic")
+endif()
+endif()
+
+if(OMASNAP_STUDIO)
+# A normal xdg_toplevel application, built from its own small set of sources
+# rather than linking omasnap-core: that library carries capture, the editor,
+# Wayland protocols, and the process-wide layer-shell assumption, none of
+# which belong in a video window.
+qt_add_executable(omasnap-studio
+  src/studio-project.cpp src/studio-project.hpp
+  src/studio-composition.cpp src/studio-composition.hpp
+  src/studio-playback.cpp src/studio-playback.hpp
+  src/studio-theme.cpp
+  src/studio-theme.hpp
+  src/studio-video.cpp
+  src/studio-video.hpp
+  src/studio-main.cpp
+  src/studio.cpp
+  src/studio-scenes.cpp
+  src/studio-transitions.cpp
+  src/studio-export.cpp src/studio-export.hpp
+  src/studio.hpp
+  src/studio-preview.cpp
+  src/studio-preview.hpp
+  src/zoom-track.cpp
+  src/zoom-track.hpp
+  src/overlay-chrome.cpp
+  src/overlay-chrome.hpp
+)
+target_include_directories(omasnap-studio PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_compile_features(omasnap-studio PRIVATE cxx_std_23)
+target_compile_options(omasnap-studio PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(omasnap-studio PRIVATE OMASNAP_VERSION="${PROJECT_VERSION}")
+target_link_libraries(omasnap-studio PRIVATE
+  Qt6::Core
+  Qt6::Gui
+  Qt6::Widgets
+  Qt6::Multimedia
+  Qt6::MultimediaWidgets
+  Qt6::OpenGLWidgets
+  Qt6::Concurrent
+)
 endif()
 
 qt_add_executable(stitch-replay
@@ -195,6 +315,14 @@ target_link_libraries(stitch-replay PRIVATE Qt6::Core Qt6::Gui)
 install(TARGETS omasnap
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+if(OMASNAP_STUDIO)
+  install(TARGETS omasnap-studio
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  )
+  install(FILES omasnap-studio.desktop
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/applications"
+  )
+endif()
 install(FILES assets/OFL.txt
   DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/omasnap"
   RENAME Neucha-OFL.txt

@@ -9,12 +9,18 @@ class QLockFile;
 inline constexpr int kInstanceCancelledExitCode = 0;
 /** Exit code for a lock that could neither be taken nor handed over. */
 inline constexpr int kInstanceLockErrorExitCode = 1;
+/** Exit code for a recording selector that found an overlay already open. */
+inline constexpr int kInstanceBusyExitCode = 3;
 
 /** What the starting process wants to do, which decides how it treats a
  * running instance. */
 enum class InstanceMode {
   Capture,  // Screen-capture overlay: a second launch dismisses the first.
   EditFile, // Editor for an existing image: it must always appear.
+  /// Picking a recording target. Unlike a capture it never dismisses a
+  /// running overlay: an in-progress annotation is work, and starting a
+  /// recording is not a reason to throw it away.
+  RecordTarget,
 };
 
 /** Result of a single non-blocking attempt to take the lock. */
@@ -38,6 +44,7 @@ enum class InstanceAction {
   ClearStaleLock, // Remove the abandoned lock file, then start normally.
   CancelRunning,  // Terminate the running instance and exit without starting.
   ReplaceRunning, // Terminate the running instance, wait, then start.
+  ReportBusy,     // Leave the running instance alone and say so.
   Fail,           // Report the lock error and exit non-zero.
 };
 

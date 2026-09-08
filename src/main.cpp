@@ -4,6 +4,9 @@
 #include "instance-lock.hpp"
 #include "overlay-chrome.hpp"
 #include "pin.hpp"
+#include "quit-signals.hpp"
+#include "record.hpp"
+#include "record-target.hpp"
 #include "recent-snaps.hpp"
 #include "startup-timing.hpp"
 
@@ -23,76 +26,27 @@
 #include <QUrl>
 #include <QWindow>
 
-#include <csignal>
 #include <optional>
-#include <cerrno>
-#include <sys/socket.h>
-#include <unistd.h>
+
 
 namespace {
-class PosixSignalNotifier final : public QObject {
-public:
-  explicit PosixSignalNotifier(QObject *parent = nullptr) : QObject(parent) {
-    if (::socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
-                     fds_) != 0)
-      return; // Default signal disposition stays in effect.
-    signalFd_ = fds_[0];
-
-    struct sigaction sa{};
-    sa.sa_handler = [](int) {
-      const int savedErrno = errno;
-      const char byte = 1;
-      const int fd = signalFd_;
-      if (fd >= 0)
-        static_cast<void>(::write(fd, &byte, sizeof(byte)));
-      errno = savedErrno;
-    };
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    sigintInstalled_ = ::sigaction(SIGINT, &sa, &previousSigint_) == 0;
-    sigtermInstalled_ = ::sigaction(SIGTERM, &sa, &previousSigterm_) == 0;
-    if (!sigintInstalled_ && !sigtermInstalled_) {
-      closeSockets();
-      return;
-    }
-
-    notifier_ = new QSocketNotifier(fds_[1], QSocketNotifier::Read, this);
-    connect(notifier_, &QSocketNotifier::activated, this, [this] {
-      notifier_->setEnabled(false);
-      char bytes[32];
-      while (::read(fds_[1], bytes, sizeof(bytes)) > 0) {
-      }
-      QCoreApplication::quit();
-    });
+/// Exactly `omasnap --record --stop`, in either order and nothing else.
+/// Anything with more arguments falls through to the normal path, which
+/// reports the usage error rather than quietly ignoring them.
+bool isBareStopRequest(int argc, char **argv) {
+  bool record = false;
+  bool stop = false;
+  for (int index = 1; index < argc; ++index) {
+    const QLatin1StringView argument(argv[index]);
+    if (argument == QLatin1StringView("--record"))
+      record = true;
+    else if (argument == QLatin1StringView("--stop"))
+      stop = true;
+    else
+      return false;
   }
-
-  ~PosixSignalNotifier() override {
-    if (sigintInstalled_)
-      ::sigaction(SIGINT, &previousSigint_, nullptr);
-    if (sigtermInstalled_)
-      ::sigaction(SIGTERM, &previousSigterm_, nullptr);
-    closeSockets();
-  }
-
-private:
-  void closeSockets() {
-    signalFd_ = -1;
-    for (int &fd : fds_) {
-      if (fd >= 0) {
-        ::close(fd);
-        fd = -1;
-      }
-    }
-  }
-
-  static inline int fds_[2]{-1, -1};
-  static inline volatile sig_atomic_t signalFd_ = -1;
-  struct sigaction previousSigint_{};
-  struct sigaction previousSigterm_{};
-  bool sigintInstalled_ = false;
-  bool sigtermInstalled_ = false;
-  QSocketNotifier *notifier_ = nullptr;
-};
+  return record && stop;
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -100,6 +54,19 @@ int main(int argc, char **argv) {
   QCoreApplication::setApplicationName(QStringLiteral("omasnap"));
   QCoreApplication::setApplicationVersion(QString::fromLatin1(OMASNAP_VERSION));
   QCoreApplication::setOrganizationName(QStringLiteral("Omarchy"));
+
+  // Stopping a recording is a signal to another process and needs no
+  // display, so it is answered before any GUI toolkit is brought up: it has
+  // to work from a script, over SSH, and while the session is going away.
+  if (isBareStopRequest(argc, argv)) {
+    QCoreApplication stopper(argc, argv);
+    QString stopError;
+    if (!stopActiveRecording(stopError)) {
+      qCritical().noquote() << stopError;
+      return 1;
+    }
+    return 0;
+  }
   qputenv("QT_WAYLAND_SHELL_INTEGRATION", "layer-shell");
   // Omarchy exports QT_QPA_PLATFORMTHEME=gtk3 session-wide. Honouring it
   // loads the qgtk3 plugin, which initialises GTK inside this process
@@ -138,8 +105,14 @@ int main(int argc, char **argv) {
       "an image path) or --clipboard, the running\ninstance is stopped and "
       "the editor opens on that image instead.\n"
       "\n"
+      "Recording: add --record to a capture mode (region, windows, "
+      "fullscreen) to\nrecord that target instead of screenshotting it. The "
+      "selector hands off to a\nrecorder process, so screenshots keep working "
+      "while a recording runs.\n"
+      "\n"
       "Exit codes: 0 success, including dismissing a running overlay; 1 "
-      "capture,\nimage, or single-instance lock failure; 2 usage error."));
+      "capture,\nimage, or single-instance lock failure; 2 usage error; 3 an "
+      "overlay was\nalready open when a recording was requested."));
   parser.addHelpOption();
   parser.addVersionOption();
   const QCommandLineOption fullscreenOption(
@@ -183,6 +156,36 @@ int main(int argc, char **argv) {
       QStringLiteral("Capture a scrolling region and stitch it into one tall "
                      "image, then open it in the editor."));
   parser.addOption(scrollOption);
+  const QCommandLineOption recordOption(
+      QStringLiteral("record"),
+      QStringLiteral("Record the selected target as video instead of taking a "
+                     "screenshot."));
+  parser.addOption(recordOption);
+  const QCommandLineOption stopOption(
+      QStringLiteral("stop"),
+      QStringLiteral("Stop and save the running recording (--record only)."));
+  parser.addOption(stopOption);
+  const QCommandLineOption audioOption(
+      QStringLiteral("audio"),
+      QStringLiteral("Record desktop sound as well (--record only)."));
+  parser.addOption(audioOption);
+  const QCommandLineOption micOption(
+      QStringLiteral("mic"),
+      QStringLiteral("Record the microphone as well (--record only)."));
+  parser.addOption(micOption);
+  const QCommandLineOption fpsOption(
+      QStringLiteral("fps"),
+      QStringLiteral("Recording frame rate (default 60)."),
+      QStringLiteral("frames"), QStringLiteral("60"));
+  parser.addOption(fpsOption);
+  // The recorder half of --record: a second process, started by the first,
+  // that owns the encoder and shows the indicator. Not something to type.
+  QCommandLineOption recordRunOption(
+      QStringLiteral("record-run"),
+      QStringLiteral("Internal: run the recorder on a written target file."),
+      QStringLiteral("path"));
+  recordRunOption.setFlags(QCommandLineOption::HiddenFromHelp);
+  parser.addOption(recordRunOption);
   parser.addPositionalArgument(
       QStringLiteral("target"),
       QStringLiteral("Capture mode (smart, region, windows, fullscreen) or the "
@@ -190,6 +193,36 @@ int main(int argc, char **argv) {
       QStringLiteral("[target]"));
   parser.process(application);
   startupTimingMark("command line parsed");
+
+  bool fpsValid = false;
+  const int fps = parser.value(fpsOption).toInt(&fpsValid);
+  if (!fpsValid || fps < 1 || fps > 500) {
+    qCritical() << "--fps takes a frame rate between 1 and 500";
+    return 2;
+  }
+  RecordOptions recordOptions;
+  recordOptions.systemAudio = parser.isSet(audioOption);
+  recordOptions.microphone = parser.isSet(micOption);
+  recordOptions.fps = fps;
+
+  // The recorder never touches the screenshot instance lock, the capture
+  // fonts, or a monitor grab: it has a target already and only needs a layer
+  // surface for the indicator.
+  if (parser.isSet(recordRunOption)) {
+    // It is written by handOffToRecorder, so anything else alongside it is a
+    // mistake rather than a request; say so instead of ignoring it.
+    if (parser.isSet(recordOption) || parser.isSet(stopOption) ||
+        parser.isSet(pinOption) || parser.isSet(fileOption) ||
+        parser.isSet(clipboardOption) || parser.isSet(copyOption) ||
+        parser.isSet(saveOption) || parser.isSet(scrollOption) ||
+        parser.isSet(fullscreenOption) || parser.isSet(windowOption) ||
+        parser.isSet(regionOption) || !parser.positionalArguments().isEmpty()) {
+      qCritical() << "--record-run takes no other options";
+      return 2;
+    }
+    return runRecorder(parser.value(recordRunOption), recordOptions,
+                       &signalNotifier);
+  }
 
   QString filePath = parser.value(fileOption);
   const bool clipboardInput = parser.isSet(clipboardOption);
@@ -213,10 +246,18 @@ int main(int argc, char **argv) {
   else if (parser.isSet(scrollOption))
     captureMode = CaptureEditor::CaptureMode::Scroll;
 
+  const bool recording = parser.isSet(recordOption);
+  if (!recording && (parser.isSet(audioOption) || parser.isSet(micOption) ||
+                     parser.isSet(stopOption) || parser.isSet(fpsOption))) {
+    qCritical() << "--audio, --mic, --fps and --stop only apply to --record";
+    return 2;
+  }
+
   const QStringList positional = parser.positionalArguments();
   if (parser.isSet(pinOption)) {
     if (!filePath.isEmpty() || clipboardInput || requestedModes > 0 ||
-        !positional.isEmpty() || quickOutputMode != QuickOutputMode::None) {
+        !positional.isEmpty() || quickOutputMode != QuickOutputMode::None ||
+        parser.isSet(recordOption)) {
       qCritical()
           << "Pinned mode cannot be combined with capture or edit targets";
       return 2;
@@ -272,6 +313,55 @@ int main(int argc, char **argv) {
         << "Quick output options cannot be combined with an image input";
     return 2;
   }
+
+  if (recording && parser.isSet(stopOption)) {
+    if (requestedModes > 0 || editingImage ||
+        quickOutputMode != QuickOutputMode::None) {
+      qCritical() << "--record --stop takes no capture target";
+      return 2;
+    }
+    if (parser.isSet(audioOption) || parser.isSet(micOption) ||
+        parser.isSet(fpsOption)) {
+      qCritical() << "--record --stop takes no recording options";
+      return 2;
+    }
+    QString stopError;
+    if (!stopActiveRecording(stopError)) {
+      qCritical().noquote() << stopError;
+      return 1;
+    }
+    return 0;
+  }
+  if (recording) {
+    if (editingImage || quickOutputMode != QuickOutputMode::None) {
+      qCritical() << "--record cannot be combined with an image input or "
+                     "quick output";
+      return 2;
+    }
+    if (captureMode == CaptureEditor::CaptureMode::Scroll) {
+      qCritical() << "--record cannot be combined with scrolling capture";
+      return 2;
+    }
+    // A whole display needs no selector, so it needs no overlay, no monitor
+    // grab, and no instance lock: an open annotation session is left alone
+    // and recording starts immediately.
+    if (captureMode == CaptureEditor::CaptureMode::Fullscreen) {
+      MonitorInfo monitor;
+      QString probeError;
+      if (!probeFocusedMonitor(monitor, probeError)) {
+        qCritical().noquote() << probeError;
+        return 1;
+      }
+      QString handoffError;
+      if (!handOffToRecorder(makeRecordTarget(monitor,
+                                              RecordTargetKind::Fullscreen, {}),
+                             recordOptions, handoffError)) {
+        qCritical().noquote() << handoffError;
+        return 1;
+      }
+      return 0;
+    }
+  }
   startupTimingMark("options resolved");
   if (!loadCaptureFonts())
     return 1;
@@ -290,8 +380,9 @@ int main(int argc, char **argv) {
   // of starting a second one: a late capture would otherwise photograph that overlay.
   // Editing an image always takes over so the requested editor can open.
   const InstanceLockResult lockResult = acquireInstanceLock(
-      instanceLock, editingImage ? InstanceMode::EditFile
-                                 : InstanceMode::Capture);
+      instanceLock, editingImage  ? InstanceMode::EditFile
+                    : recording   ? InstanceMode::RecordTarget
+                                  : InstanceMode::Capture);
   startupTimingMark("instance lock acquired");
   if (lockResult.signalledPid != 0)
     qInfo().noquote() << QStringLiteral("Asked the running omasnap (pid %1) to "
@@ -404,6 +495,23 @@ int main(int argc, char **argv) {
   CaptureEditor editor(std::move(capture), captureMode, quickOutputMode,
                        restoredLog);
   startupTimingMark("CaptureEditor constructed");
+  RecordTarget chosenTarget;
+  if (recording) {
+    editor.setRecordTargetMode(true);
+    QObject::connect(
+        &editor, &CaptureEditor::recordTargetSelected, &editor,
+        [&](const QRectF &selection, CaptureKind kind) {
+          const CaptureData &data = editor.captureData();
+          const RecordTargetKind targetKind =
+              kind == CaptureKind::Fullscreen ? RecordTargetKind::Fullscreen
+              : kind == CaptureKind::Window   ? RecordTargetKind::Window
+                                              : RecordTargetKind::Region;
+          chosenTarget = makeRecordTarget(data.monitor, targetKind, selection);
+          if (targetKind == RecordTargetKind::Window)
+            chosenTarget.windowClass =
+                dominantAppClass(data.windows, selection);
+        });
+  }
   editor.setScreen(targetScreen);
   editor.setGeometry(targetScreen->geometry());
   editor.winId();
@@ -432,5 +540,22 @@ int main(int argc, char **argv) {
   editor.setFocus(Qt::ActiveWindowFocusReason);
   startupTimingMark("show requested; entering event loop");
 
-  return application.exec();
+  const int exitCode = application.exec();
+  if (!recording || exitCode != 0)
+    return exitCode;
+  // Cancelled without picking anything: the same nothing-happened exit a
+  // dismissed overlay gives.
+  if (chosenTarget.globalLogical.isEmpty())
+    return 0;
+  // Released before the handoff, not after: handOffToRecorder waits for the
+  // recorder to take its own lock, and holding this one meanwhile would make
+  // a screenshot started in that window cancel an overlay that has already
+  // closed, or time out waiting to take over.
+  instanceLock.unlock();
+  QString handoffError;
+  if (!handOffToRecorder(chosenTarget, recordOptions, handoffError)) {
+    qCritical().noquote() << handoffError;
+    return 1;
+  }
+  return 0;
 }

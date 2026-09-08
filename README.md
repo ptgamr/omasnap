@@ -69,6 +69,8 @@ Runtime commands used by the application:
 - `tesseract`
 - `omarchy-notification-send` when available; saved captures include a thumbnail and
   reopen in Omasnap when clicked. Notification failure does not invalidate output.
+- `gpu-screen-recorder` and `ffmpeg`, for `--record` only. Neither is needed to take a
+  screenshot, and neither is linked into the `omasnap` binary.
 
 ## Install on Omarchy
 
@@ -103,9 +105,27 @@ hl.layer_rule({
   animation = "none",
   no_screen_share = true,
 })
+
+-- The recording indicator is a separate namespace. Note that
+-- no_screen_share only hides it from compositor-mediated capture
+-- (screenshots, screen sharing) -- NOT from gpu-screen-recorder's default
+-- KMS capture, which reads the scanout directly. See "Known gaps".
+hl.layer_rule({
+  match = { namespace = "^omasnap-record$" },
+  no_anim = true,
+  animation = "none",
+  no_screen_share = true,
+})
 ```
 
 Each of these keys toggles: the first press opens the overlay, the next press dismisses it.
+
+Bind recording the same way if you want it on a key:
+
+```lua
+o.bind("SUPER + SHIFT + R", "Record region", "omasnap region --record")
+o.bind("SUPER + SHIFT + S", "Stop recording", "omasnap --record --stop")
+```
 
 Apply and verify:
 
@@ -122,6 +142,13 @@ extensions; they do not install native executables or system packages.
 Set `OMASNAP_PREFIX` before running `install-omarchy` to use a prefix other than
 `~/.local`.
 
+### Studio only on Ubuntu
+
+For the video editor without the screenshot/recorder dependencies, use the
+independent [Studio build and Ubuntu 24.04 instructions](studio/README.md).
+It configures with `cmake -S studio -B build-studio`, using Qt 6.8+ installed
+alongside Ubuntu's system Qt. The existing root build is unchanged.
+
 ### Manual Arch Linux build
 
 Install the complete build/runtime dependency set:
@@ -130,8 +157,13 @@ Install the complete build/runtime dependency set:
 sudo pacman -S --needed \
   base-devel cmake ninja pkgconf qt6-base layer-shell-qt \
   wayland wayland-protocols hyprland wl-clipboard \
-  tesseract tesseract-data-eng
+  tesseract tesseract-data-eng \
+  qt6-multimedia gpu-screen-recorder ffmpeg
 ```
+
+The last line is the recording half: `qt6-multimedia` builds `omasnap-studio`, and
+`gpu-screen-recorder` and `ffmpeg` are run as subprocesses when you record. Leave it
+out and screenshots build and work exactly as before.
 
 Build and install:
 
@@ -146,7 +178,9 @@ cmake --install build
 The install step places:
 
 - `~/.local/bin/omasnap`
+- `~/.local/bin/omasnap-studio`
 - `~/.local/share/applications/omasnap.desktop`
+- `~/.local/share/applications/omasnap-studio.desktop`
 - `~/.local/share/licenses/omasnap/Neucha-OFL.txt`
 - `~/.local/share/licenses/omasnap/JetBrainsMono-OFL.txt`
 - `~/.local/share/licenses/omasnap/Inter-OFL.txt`
@@ -202,6 +236,275 @@ Quick output skips the annotation editor. Add `--copy` to copy only, `--save` to
 only, or both flags to copy and save. Region and window captures output after selection;
 fullscreen captures output immediately. Quick output cannot be combined with `--file`,
 `--clipboard`, or `--pin`.
+
+## Recording
+
+Add `--record` to any capture mode to record that target as video instead of
+screenshotting it:
+
+```bash
+omasnap region --record       # drag the area to record
+omasnap windows --record      # pick a window; records the screen rectangle it occupies
+omasnap fullscreen --record   # the focused display, no selector at all
+```
+
+Sound is off unless you ask for it. `--audio` adds desktop sound, `--mic` adds the
+microphone, and `--fps` sets the frame rate (default 60):
+
+```bash
+omasnap region --record --audio --mic --fps 30
+```
+
+While recording, a small pill sits under the top bar on the recorded display showing
+the elapsed time, with pause and stop buttons. That indicator is the point: nothing
+records without something on screen saying so. Stop it from the pill, or from a key:
+
+```bash
+omasnap --record --stop
+```
+
+Logging out finishes the recording rather than abandoning it, and a recording
+interrupted harder than that is promoted to a playable file the next time you record.
+
+Recordings land in `~/Videos/Recordings` as
+`recording-<date>_<time>-<what>.mp4`, owner-readable only. The notification that
+follows opens the recording in **OmaSnap Studio**.
+
+## Studio
+
+```bash
+omasnap-studio ~/Videos/Recordings/recording-2026-09-04_13-30-58-hdmi-a-1.mp4
+omasnap-studio ~/Downloads/from-my-ipad.mov     # any file, not just ours
+```
+
+**Zoom.** Click the picture where you want the camera to go. Inside an existing
+cue that re-aims it; anywhere else it starts a new one at the playhead. Cues are
+the blocks on the lane under the trim bar — drag a body to move it, an edge to
+change how long it runs — and the slider sets how far in the selected one goes.
+The right-hand inspector adjusts magnification and ease-in/out duration.
+Viewport size and position ease together, with zero velocity and acceleration
+at the ends. Touching cues move directly between targets; leave a gap to return
+to the full frame. Panning stays within the source.
+
+**Workspace.** The preview sits above a thumbnail timeline and transport bar,
+with Canvas, Zoom, and Clip inspector tabs. The inspector collapses in narrow
+tiled windows and can be toggled with `Ctrl+\`. The header has undo/redo, export,
+and a keyboard shortcut reference.
+
+Studio chrome follows **Omarchy Quattro**: square controls, monospace labels,
+and the active Omarchy palette. Palette changes are picked up automatically
+within about a second without interrupting playback or edits. Without a usable
+Omarchy palette, Studio uses built-in Quattro-style colors. Theme changes affect
+only the editor UI—not the saved canvas colors, video corners, or export.
+See [Studio design](docs/studio-design.md) for the palette contract.
+
+**Background.** Choose a background color, padding, and rounded corners in the
+Background section. These are exported along with the zoom and trim. Reset background
+returns to the original edge-to-edge framing.
+
+**Music.** The header **Music** button puts one song under the whole
+composition, trimmed to fit, with its own level. It previews with the mute
+switch, exports mixed under the scenes, and every change is undoable. A
+missing file fails the export with guidance instead of silent audio.
+
+**Audio lane.** **Add media** (`Ctrl+O`) and file drops take audio as well
+as video: songs land as blocks on the audio lane under the zoom lane, with
+waveforms, while scenes import exactly as before. Drag a block by its body
+to reorder, by its edges to trim, select and press `S` to split or `Delete`
+to remove, `Ctrl+D` to duplicate; the Clip inspector tunes gain and speed.
+The lane mixes under scenes and music on export, previews in sync, and
+every edit is undoable. Missing audio relinks like any other source.
+
+**Projects.** Studio stores source assets, ordered clip instances, source ranges,
+speed, project-time zoom cues, and canvas settings in one non-destructive document.
+Open a video or its `.omasnap.json` project directly. Missing sources expose
+**Relink media**; empty projects remain valid. The first source defines the output
+canvas (rounded down to even dimensions) and FPS; other sources fit that canvas.
+Use **Add media** (`Ctrl+O`) to import more recordings and songs.
+Drop local video files onto a marked timeline boundary to insert, or elsewhere
+to append; audio files always append as sounds. An invalid import batch leaves the project unchanged.
+
+**Arrange scenes.** Click and drag the video lane or ruler
+to scrub continuously. Use `Ctrl+drag` on scene bodies to reorder them.
+The clip follows your pointer while dragging, with a placeholder at its old
+position and an insertion marker at the destination. Release to commit one
+undoable move; Escape cancels. There are no Select/Range modes or buttons;
+Split at playhead and Delete are actions on the right.
+Drag a selected scene's edges to trim it, or use the
+Clip inspector's source in/out fields. `Ctrl+D` duplicates the selected scene;
+Earlier/Later offer precise reorder buttons. Each operation is undoable.
+Playback reuses prepared frames at hard cuts and keeps an unchanged preview
+visible when adding or duplicating scenes. Seeking back to a cached clip checks
+its actual frame timestamp; background thumbnail decoding uses bounded threads.
+Each clip has fixed-shape thumbnail tiles, shared through a source-time cache.
+Resizing retains reusable thumbnails; zooming requests finer visible samples
+without stretching the existing images or clearing the strip.
+Zooms follow scene content, and duplicates have independent edits. Structural
+scene edits remain non-destructive. Studio exports the entire edited composition;
+there are no separate export handles or I/O/R trim shortcuts.
+
+**Timeline magnification.** **Scroll**
+over the timeline to zoom around the pointer (up to 16×). **Right-click + drag**
+to pan, or drag the horizontal scrollbar, which appears only when needed.
+Scroll out fully to fit the entire timeline. A right-click without dragging opens
+the context menu. This changes only the editing view, not
+the video's camera zoom, playback position, or saved project.
+
+**Transitions.** Click a timeline boundary badge (`+`, `F`, `B`, `W`, or `S`), or
+select a scene and press `T`. Choose Hard cut, Crossfade, Fade through black,
+or a Wipe/Slide in any of four directions in the Clip inspector, then edit the
+overlap duration. Left means the incoming scene enters from the right; Up means
+it enters from below. Wipes reveal a stationary scene; slides move both scenes.
+Both preview and export combine the kept source frames and linearly fade their
+primary audio. Short clips clamp
+the frame-snapped overlap; no discarded footage is used as hidden handles.
+Undo restores transition pairs and timing. Scene arrangement reports any
+transitions it removes or shortens. Remove a transition before range-cutting
+or splitting inside its overlap. Projects now use schema 2; older project files
+are not migrated, and original recordings remain untouched.
+
+**Cut passages.** **Shift+drag** over the video lane or ruler in either direction
+to select a range. Release to place the paused
+playhead at its start. Drag the range edges to adjust it; normal clicking and
+dragging now scrub only inside the selection. **Play/Space** plays and pauses
+within it, stopping at its end; press Play again there to replay from the start.
+**Home/End** jump to its first/last instant, and frame/five-second steps stay
+inside it too. **Escape** clears the selection and restores unrestricted seeking.
+Selecting alone never changes the export. The **scissors** button (Keep only selection) removes
+everything outside the range in one undoable edit. Delete/Backspace removes it and
+closes the gap in video and audio. Ctrl+Z restores the cut.
+The **split marker** button or `S` splits at the playhead; Ctrl+click a scene to select it, then
+Delete removes that scene. Undo restores the ranges, selection, and playhead,
+even after deleting the final scene. Buttons and a timeline context menu expose
+the same actions. Delete prioritizes a selected range, then the selected zoom
+or clip; it never removes video merely because the playhead is over it.
+
+**Playback.** A bounded pair of decoders reads the shared composition time map;
+video planes are prepared on a worker and rendered with OpenGL;
+only the newest pending frame is retained. Scrub requests are coalesced.
+Source probing, thumbnail generation, and saving edits also run off the UI thread.
+
+Export (`Ctrl+E`) opens a modal with encoding progress and a Cancel button
+(also `Esc`). On completion it shows the full saved path, with **Open video**
+and **Open folder** actions through `xdg-open`. The result stays visible until
+you close it; errors stay visible too. Exports are saved beside the source
+as `-omasnap-exported.mp4` (numbered when needed, e.g. `-omasnap-exported-2.mp4`).
+Partial exports are cleaned up on cancel or failure, and existing videos are
+never overwritten.
+
+What you see is what you get: the preview and the export are driven by the same
+model, and a golden test renders the same frames both ways across seven
+scenarios — one cue, adjacent cues, overlapping cues, a cue shorter than its own
+ramps, a 30000/1001 source, a trimmed export, and a portrait file with a display
+matrix. A recording zoomed past roughly 3× will look soft, because the export
+scales up from the cropped region.
+
+Portrait phone recordings work: the container's rotation is read and applied to
+the preview the same way ffmpeg applies it before the export's zoom, so a cue
+lands on the same thing in both.
+
+Limits worth knowing, all of them measured rather than guessed:
+
+- **40 zooms per project.** The cap bounds ffmpeg expression complexity. The
+  golden test verifies a complete track at the cap with ffmpeg itself.
+- **Project FPS is fixed.** Rational rates like 30000/1001 are preserved.
+  Source timestamps (including VFR) are mapped into project time; export
+  normalizes the assembled composition to the project FPS before camera effects.
+- **Primary audio track only.** Composition preview/export use the first audio
+  stream, converted to stereo on export; silent sources contribute silence.
+  Separate mic/system-track mixing is not implemented yet. Additional tracks
+  remain untouched in the source file but are not included in composition export.
+- **64 clip occurrences per export.** Larger documents can be saved, but export
+  reports this limit rather than opening an unbounded number of FFmpeg inputs.
+- **Right-angle rotations only.** Anything else is refused with a reason rather
+  than framed differently in the two places, because ffmpeg takes a general
+  rotation path that a transpose cannot match.
+- **Zooming past roughly 3× looks soft**, because the export scales up from the
+  cropped region.
+
+**Keyboard.** Transport shortcuts work with buttons, sliders, and inspector
+controls focused. Holding Space does not repeatedly toggle playback. Text
+fields retain their editing shortcuts; Space still transports from numeric fields.
+
+| Shortcut | Action |
+|---|---|
+| `Space` | Play / pause |
+| `Shift+drag` | Select a range and place the playhead at its start |
+| `Ctrl+O` | Add scene files (also available in the Clip inspector) |
+| `Ctrl+D` | Duplicate the selected scene |
+| `T` | Edit the selected scene's transition to its next neighbor |
+| `Left` / `Right` | Previous / next frame |
+| `Shift+Left` / `Shift+Right` | Seek backward / forward five seconds |
+| `Home` / `End` | Go to selection start / last instant, or timeline start / end |
+| Scroll over timeline | Zoom timeline around pointer |
+| Right-click + drag | Pan timeline |
+| `Ctrl` + click a clip | Select clip without seeking |
+| `Z` | Add zoom at playhead |
+| `S` | Split scene at playhead |
+| `Delete` / `Backspace` | Delete selected range, clip, or zoom |
+| `Ctrl+Z` | Undo |
+| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
+| `M` | Mute / unmute preview |
+| `Ctrl+S` / `Ctrl+E` | Save edits / export MP4 |
+| `Ctrl+\` | Toggle inspector |
+| `Escape` / `Ctrl+W` | Clear selection / close Studio |
+| `?` / `F1` | Show keyboard shortcuts |
+
+Projects are saved next to the recording as `<recording>.omasnap.json`.
+The old `.omasnap-zoom.json` format is not migrated or modified.
+The original video stays untouched. Edits are
+undoable within a session, and a slider or timeline drag is one undo step.
+Closing waits asynchronously for any pending save.
+
+Recording and screenshots are independent: they use separate locks, so taking a
+screenshot during a recording does not stop it, and starting a recording while an
+annotation overlay is open reports that it is busy (exit 3) rather than throwing that
+overlay away.
+
+Requires `gpu-screen-recorder`. `ffmpeg` is optional: with it, the Matroska master is
+remuxed to MP4 by stream copy; without it, the `.mkv` is kept as-is. Only one
+recording runs at a time, and Omasnap refuses to start one while another screen
+recorder is already running — it never signals a recorder it did not start.
+
+### Known gaps
+
+- **The indicator appears in the recording, and the layer rule does not stop it.**
+  Measured on this machine at 4K60: with `no_screen_share` applied to the
+  `omasnap-record` namespace, a `grim` screenshot has the pill blacked out — the
+  compositor honours the rule — while the recorded video shows it in full. That is
+  not a bug in the rule. `gpu-screen-recorder`'s default path captures the KMS
+  scanout directly, so the compositor never sees the request and cannot exclude
+  anything from it. Any layer rule is powerless there, and so is a canary test:
+  the fix has to be a capture path that goes through the compositor (GSR's
+  `-w portal`) or an indicator placed outside the recorded rectangle. Until then,
+  assume the pill is in your recording and trim it in the Studio.
+- **`~/Videos/Recordings` is not configurable**, and the frame rate is the only
+  recording setting.
+- **Coordinates are proven on 1× and 1.5× outputs only.** See
+  [docs/recording-targets.md](docs/recording-targets.md) for what was measured and
+  what is still open (1.25×, 2×, a rotated output's *region*, negative origins).
+- **Studio parity remains incomplete**: multi-source import and arrangement,
+  range cuts/splits, fades, directional wipes/slides, playback, trim,
+  manual zoom, canvas styling, undo/redo, and MP4 export exist. Automatic
+  pointer zoom, camera
+  overlays, captions, and masks are not implemented; see
+  [docs/recording-studio-plan.md](docs/recording-studio-plan.md) for where those sit.
+- **4K preview cadence still needs work.** Real-time timeline progression does
+  not guarantee every decoded frame is presented; 4K60 recordings can still
+  skip preview frames, including across transitions. See [PLAN.md](PLAN.md).
+- **`omasnap-studio` is optional at build time.** Configure with
+  `-DOMASNAP_STUDIO=OFF` for a screenshot-only build that needs no Qt Multimedia.
+- **A few narrow races remain, all with the same shape: a same-user process
+  impersonating one of ours.** Stopping proves the lock holder is an
+  `omasnap --record-run` owned by this user and signals it through a pidfd, but
+  that is not proof it is *the* recorder that took the lock; recovery proves a
+  master is a single-linked 0600 regular file we own, but not that this program
+  wrote it; and a second recorder started in the moment after the conflict scan
+  still gets through. Closing these properly needs the plan's per-session
+  journal.
+- **The parent-death guarantee is unchecked.** If `prctl(PR_SET_PDEATHSIG)` is
+  denied — a restrictive seccomp profile, say — nothing notices, and an encoder
+  could outlive a hard-killed recorder.
 
 ### One instance, toggled by the same hotkey
 
@@ -443,7 +746,9 @@ replay, vector movement and scaling, text editing, OCR, native-DPI output,
 endpoint-only line selection, annotation-driven canvas growth and clipping policies,
 external crop handles,
 and the native-pixel
-measurement readout on a scaled monitor.
+measurement readout on a scaled monitor. A second offscreen binary,
+`omasnap-studio-smoke`, covers the Studio's export command and trim timeline without
+linking a media stack into the screenshot suite.
 
 For live launch profiling, the binary has an opt-in millisecond trace from `main()`
 through the first completed overlay paint:

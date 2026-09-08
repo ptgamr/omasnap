@@ -12,6 +12,10 @@
 #include "instance-lock-smoke.hpp"
 #include "palette-config-smoke.hpp"
 #include "pin-layout-smoke.hpp"
+#include "record-indicator-smoke.hpp"
+#include "record-select-smoke.hpp"
+#include "record-session-smoke.hpp"
+#include "record-target-smoke.hpp"
 #include "stitch-smoke.hpp"
 #include "stitch.hpp"
 #include "pin-lifecycle-smoke.hpp"
@@ -7476,7 +7480,25 @@ int main(int argc, char **argv) {
       qEnvironmentVariable(kInstanceLockHolderVariable);
   if (!heldLockPath.isEmpty())
     return runInstanceLockHolder(heldLockPath);
+  // Re-executed by the recorder checks as the encoder the session owns.
+  if (qEnvironmentVariableIsSet(kFakeRecorderVariable))
+    return runFakeRecorder(argc, argv);
 
+  // As main() does, and for the same reason: honouring the session's gtk3
+  // platform theme loads a plugin that wants a display, which an offscreen
+  // run does not have.
+  qputenv("QT_QPA_PLATFORMTHEME", "generic");
+
+  // The suite writes into the runtime directory -- the single-instance lock,
+  // the remembered last region, pinned snapshots -- so two runs at once, or
+  // a run alongside a real omasnap, overwrite each other's state and fail
+  // for reasons that have nothing to do with the code. Give it one of its
+  // own. Skipped for the live-capture check below, which needs the real
+  // directory to find the compositor's socket.
+  QTemporaryDir smokeRuntime;
+  if (!qEnvironmentVariableIsSet("OMASNAP_SMOKE_OUTPUT") &&
+      smokeRuntime.isValid())
+    qputenv("XDG_RUNTIME_DIR", smokeRuntime.path().toUtf8());
   QApplication application(argc, argv);
   QApplication::setFont(chromeDefaultFont()); // as main() does
   if (!loadCaptureFonts())
@@ -8988,6 +9010,38 @@ int main(int argc, char **argv) {
   QString paletteError;
   if (!runPaletteConfigSmoke(paletteError)) {
     qWarning().noquote() << "palette config smoke failed:" << paletteError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordTargetError;
+  if (!runRecordTargetSmoke(recordTargetError)) {
+    qWarning().noquote() << "record target smoke failed:" << recordTargetError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordSelectError;
+  if (!runRecordSelectSmoke(application, recordSelectError)) {
+    qWarning().noquote() << "record select smoke failed:" << recordSelectError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordSessionError;
+  if (!runRecordSessionSmoke(recordSessionError)) {
+    qWarning().noquote() << "record session smoke failed:" << recordSessionError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordIndicatorError;
+  if (!runRecordIndicatorSmoke(recordIndicatorError)) {
+    qWarning().noquote() << "record indicator smoke failed:"
+                         << recordIndicatorError;
+    return EXIT_FAILURE;
+  }
+
+  QString recordLifecycleError;
+  if (!runRecordSessionLifecycleSmoke(recordLifecycleError)) {
+    qWarning().noquote() << "record session lifecycle smoke failed:"
+                         << recordLifecycleError;
     return EXIT_FAILURE;
   }
 

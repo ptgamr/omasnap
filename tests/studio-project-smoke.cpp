@@ -1,0 +1,1360 @@
+#include "studio-project-smoke.hpp"
+#include "studio-project.hpp"
+#include "studio.hpp"
+#include <QFile>
+#include <QFileInfo>
+#include <QElapsedTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSet>
+#include <QTemporaryDir>
+#include <limits>
+
+namespace {
+bool cutChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject original;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 10000;
+  original.assets = {{1, QStringLiteral("untouched-source.mp4"), source}};
+  original.clips = {{11, 1, 0, 10000, 1}};
+  original.zoom.cues = {{1, 100, 600, 100, 100, {0.2, 0.3}, 2},
+                        {2, 1500, 2500, 200, 200, {0.4, 0.5}, 3},
+                        {3, 3500, 5000, 300, 300, {0.6, 0.7}, 2}};
+  original.trimInMs = 500;
+  original.trimOutMs = 9000;
+  auto edited = original;
+  const auto cut = studioDeleteRange(edited, 3000, 1000, 99);
+  if (!check(cut.changed && cut.fromMs == 1000 && cut.toMs == 3000 &&
+                 cut.removedMs == 2000 && studioDuration(edited) == 8000 &&
+                 edited.clips.size() == 2 &&
+                 edited.clips[0] == StudioClip{11, 1, 0, 1000, 1} &&
+                 edited.clips[1] == StudioClip{99, 1, 3000, 10000, 1} &&
+                 edited.assets == original.assets,
+             QStringLiteral("Interior reverse range cut did not preserve "
+                            "source/ranges/identity")))
+    return false;
+  if (!check(edited.zoom.cues.size() == 2 &&
+                 edited.zoom.cues[0] == original.zoom.cues[0] &&
+                 edited.zoom.cues[1].id == 3 &&
+                 edited.zoom.cues[1].startMs == 1500 &&
+                 edited.zoom.cues[1].endMs == 3000 &&
+                 edited.zoom.cues[1].target == original.zoom.cues[2].target &&
+                 edited.trimInMs == 500 && edited.trimOutMs == 7000,
+             QStringLiteral(
+                 "Ripple cut lost or mistimed attached zoom/review range")))
+    return false;
+  for (qint64 time = 0; time < studioDuration(edited); time += 17) {
+    const auto expected =
+        studioFrameAt(original, time < 1000 ? time : time + 2000);
+    const auto actual = studioFrameAt(edited, time);
+    if (!check(expected && actual && expected->sourceMs == actual->sourceMs,
+               QStringLiteral("Ripple cut retained removed source time")))
+      return false;
+  }
+  const auto unchanged = edited;
+  if (!check(!studioDeleteRange(edited, 500, 500, 100).changed &&
+                 edited == unchanged &&
+                 !studioDeleteRange(edited, 200, 400, 99).changed &&
+                 edited == unchanged && !studioSplitClip(edited, 0, 100) &&
+                 !studioSplitClip(edited, 1000, 100) && edited == unchanged,
+             QStringLiteral("No-op/duplicate identity changed the project")))
+    return false;
+  const auto second = studioDeleteRange(edited, 1500, 2000, 100);
+  if (!check(second.changed && studioDuration(edited) == 7500 &&
+                 edited.clips.size() == 3,
+             QStringLiteral("Repeated interior cut failed")))
+    return false;
+  StudioProject decoded;
+  if (!check(
+          decodeStudioProject(encodeStudioProject(edited), decoded).isEmpty() &&
+              decoded == edited,
+          QStringLiteral("Cut project did not round-trip")))
+    return false;
+
+  auto cross = original;
+  cross.zoom.cues.clear();
+  cross.clips = {
+      {11, 1, 0, 3000, 1}, {12, 1, 0, 4000, 1}, {13, 1, 6000, 9000, 1}};
+  const auto crossCut = studioDeleteRange(cross, 2500, 7500, 0);
+  if (!check(
+          crossCut.changed && crossCut.removedMs == 5000 &&
+              cross.clips.size() == 2 &&
+              cross.clips[0] == StudioClip{11, 1, 0, 2500, 1} &&
+              cross.clips[1] == StudioClip{13, 1, 6500, 9000, 1},
+          QStringLiteral(
+              "Cross-scene range cut lost surviving identities/source bounds")))
+    return false;
+  if (!check(studioDeleteClip(cross, 11).changed && cross.clips.size() == 1 &&
+                 cross.clips[0].id == 13 &&
+                 !studioDeleteClip(cross, 999).changed,
+             QStringLiteral("Explicit scene deletion removed wrong scene")))
+    return false;
+  auto bridge = original;
+  bridge.zoom.cues = {{55, 500, 4000, 400, 400, {0.3, 0.4}, 2}};
+  bridge.trimInMs = 1200;
+  bridge.trimOutMs = 1800;
+  if (!check(studioDeleteRange(bridge, 1000, 3000, 99).changed &&
+                 bridge.zoom.cues.size() == 1 && bridge.zoom.cues[0].id == 55 &&
+                 bridge.zoom.cues[0].startMs == 500 &&
+                 bridge.zoom.cues[0].endMs == 2000 && bridge.trimInMs == 0 &&
+                 bridge.trimOutMs == -1,
+             QStringLiteral(
+                 "Cut-spanning zoom or collapsed review range mapping failed")))
+    return false;
+  auto edges = original;
+  edges.zoom.cues.clear();
+  if (!check(studioDeleteRange(edges, -100, 1000, 0).changed &&
+                 edges.clips[0].inMs == 1000 &&
+                 studioDeleteRange(edges, 8000, 20000, 0).changed &&
+                 edges.clips[0].outMs == 9000,
+             QStringLiteral("Clamped edge cuts failed")))
+    return false;
+
+  StudioHistory history;
+  StudioEditState before;
+  before.project = original;
+  before.selectedClip = 11;
+  before.selectedCue = 2;
+  before.rangeIn = 0;
+  before.rangeOut = 10000;
+  before.positionMs = 1500;
+  history.reset(before);
+  auto after = before;
+  const auto all = studioDeleteClip(after.project, 11);
+  after.positionMs =
+      studioTimeAfterDelete(after.positionMs, all.fromMs, all.toMs);
+  after.rangeIn = after.rangeOut = -1;
+  after.selectedClip = after.selectedCue = 0;
+  history.push(after);
+  if (!check(all.changed && after.project.clips.isEmpty() &&
+                 after.project.zoom.cues.isEmpty() &&
+                 validateStudioProject(after.project).isEmpty() &&
+                 history.undo() && history.current() == before &&
+                 history.redo() && history.current() == after,
+             QStringLiteral("Final scene deletion is not exactly undoable")))
+    return false;
+
+  for (const double speed : {0.125, 0.5, 1.0, 2.0, 3.0, 8.0}) {
+    auto sped = original;
+    sped.zoom.cues.clear();
+    sped.trimInMs = 0;
+    sped.trimOutMs = -1;
+    sped.clips[0].speed = speed;
+    const qint64 duration = studioDuration(sped);
+    auto split = sped;
+    if (!check(studioSplitClip(split, duration / 3, 99) &&
+                   studioDuration(split) == duration &&
+                   split.clips[0].outMs == split.clips[1].inMs &&
+                   split.clips[1].id == 99 && split.assets == sped.assets,
+               QStringLiteral("Speed %1 split changed duration/source")
+                   .arg(speed)))
+      return false;
+    const auto fastCut =
+        studioDeleteRange(sped, duration / 3, duration * 2 / 3, 99);
+    if (!check(fastCut.changed &&
+                   duration - studioDuration(sped) == fastCut.removedMs &&
+                   fastCut.toMs - fastCut.fromMs == fastCut.removedMs &&
+                   qAbs(fastCut.fromMs - duration / 3) <= 34 &&
+                   qAbs(fastCut.toMs - duration * 2 / 3) <= 34 &&
+                   validateStudioProject(sped).isEmpty(),
+               QStringLiteral("Speed %1 cut drift or invalid effective bounds")
+                   .arg(speed)))
+      return false;
+  }
+  return true;
+}
+bool sceneChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject p;
+  p.canvas = {1280, 720};
+  p.fpsNumerator = 30000;
+  p.fpsDenominator = 1001;
+  StudioSource first;
+  first.size = {1280, 720};
+  first.fpsNumerator = 24;
+  first.durationMs = 10000;
+  first.audioStreams = 1;
+  auto portrait = first;
+  portrait.size = {720, 1280};
+  portrait.fpsNumerator = 60;
+  portrait.audioStreams = 0;
+  QString operationError;
+  if (!check(
+          studioInsertScenes(p,
+                             {{1, QStringLiteral("first.mp4"), first},
+                              {2, QStringLiteral("portrait.mp4"), portrait}},
+                             {{11, 1, 0, 1000, 1}, {12, 2, 1000, 3000, 1}}, 0,
+                             operationError) &&
+              p.clips.size() == 2 && p.assets.size() == 2 &&
+              studioDuration(p) == 3000 && p.canvas == QSize(1280, 720) &&
+              p.fpsNumerator == 30000 && p.fpsDenominator == 1001,
+          QStringLiteral(
+              "Mixed-scene import changed canonical canvas/rate or failed: %1")
+              .arg(operationError)))
+    return false;
+  p.zoom.cues = {{1, 100, 500, 100, 100, {0.2, 0.3}, 2},
+                 {2, 1300, 1800, 150, 150, {0.6, 0.7}, 3}};
+  p.trimInMs = 200;
+  p.trimOutMs = 2500;
+  const auto original = p;
+  if (!check(!studioMoveClip(p, 11, 12, operationError) &&
+                 operationError.isEmpty() && p == original &&
+                 !studioTrimClip(p, 11, 0, 1000, operationError) &&
+                 operationError.isEmpty() && p == original,
+             QStringLiteral(
+                 "No-op scene edit fragmented zooms or reset review range")))
+    return false;
+  if (!check(studioMoveClip(p, 12, 11, operationError) && p.clips[0].id == 12 &&
+                 p.zoom.cues[0].id == 2 && p.zoom.cues[0].startMs == 300 &&
+                 p.zoom.cues[1].id == 1 && p.zoom.cues[1].startMs == 2100 &&
+                 p.trimInMs == 0 && p.trimOutMs == -1,
+             QStringLiteral(
+                 "Scene reorder did not carry zooms/reset review range")))
+    return false;
+  if (!check(
+          studioMoveClip(p, 12, 0, operationError) &&
+              p.clips == original.clips && p.zoom == original.zoom,
+          QStringLiteral(
+              "Scene reorder return changed attached zoom identities/timing")))
+    return false;
+  if (!check(studioDuplicateClip(p, 11, 77, operationError) &&
+                 p.clips[1].id == 77 && p.clips[1].assetId == 1 &&
+                 p.assets == original.assets && p.zoom.cues.size() == 3 &&
+                 p.zoom.cues[0].id == 1 && p.zoom.cues[1].id != 1 &&
+                 p.zoom.cues[1].id != 2 && p.zoom.cues[1].startMs == 1100 &&
+                 p.zoom.cues[2].id == 2 && p.zoom.cues[2].startMs == 2300,
+             QStringLiteral(
+                 "Duplicate did not create independent zooms/source instance")))
+    return false;
+  const quint64 duplicateCue = p.zoom.cues[1].id;
+  if (!check(
+          studioTrimClip(p, 77, 200, 900, operationError) &&
+              p.clips[0].inMs == 0 && p.clips[0].outMs == 1000 &&
+              p.clips[1].inMs == 200 && p.clips[1].outMs == 900 &&
+              p.zoom.cues[1].id == duplicateCue &&
+              p.zoom.cues[1].startMs == 1000 && p.zoom.cues[1].endMs == 1300 &&
+              p.zoom.cues[2].startMs == 2000 && studioDuration(p) == 3700,
+          QStringLiteral(
+              "Trimming duplicate changed original or misplaced scene zooms")))
+    return false;
+  const auto beforeInvalid = p;
+  if (!check(!studioTrimClip(p, 77, 900, 200, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioMoveClip(p, 77, 999, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioDuplicateClip(p, 77, 11, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid &&
+                 !studioInsertScenes(
+                     p, {{1, QStringLiteral("collision.mp4"), first}},
+                     {{99, 1, 0, 500, 1}}, 0, operationError) &&
+                 !operationError.isEmpty() && p == beforeInvalid,
+             QStringLiteral("Invalid scene change partially mutated project")))
+    return false;
+  if (!check(
+          studioInsertScenes(p, {}, {{99, 2, 0, 500, 1}}, 1, operationError) &&
+              p.clips[1].id == 99 && p.zoom.cues[1].startMs == 1500 &&
+              p.assets == original.assets,
+          QStringLiteral(
+              "Insertion before a scene lost original zoom/source timing")))
+    return false;
+  StudioHistory history;
+  StudioEditState before;
+  before.project = original;
+  before.selectedClip = 12;
+  before.positionMs = 1500;
+  history.reset(before);
+  auto after = before;
+  after.project = p;
+  after.selectedClip = 77;
+  history.push(after);
+  if (!check(history.undo() && history.current() == before && history.redo() &&
+                 history.current() == after,
+             QStringLiteral("Scene edits are not exactly undoable")))
+    return false;
+  StudioProject decoded;
+  if (!check(decodeStudioProject(encodeStudioProject(p), decoded).isEmpty() &&
+                 decoded == p,
+             QStringLiteral("Combined scenes failed save/reopen")))
+    return false;
+
+  auto crossing = original;
+  crossing.zoom.cues = {{55, 500, 1500, 200, 200, {0.3, 0.4}, 2}};
+  if (!check(studioInsertScenes(crossing, {}, {{99, 1, 5000, 5500, 1}}, 2,
+                                operationError) &&
+                 crossing.zoom ==
+                     ZoomTrack{{{55, 500, 1500, 200, 200, {0.3, 0.4}, 2}}},
+             QStringLiteral("Append fragmented an unchanged cross-scene zoom")))
+    return false;
+  if (!check(studioMoveClip(crossing, 12, 11, operationError) &&
+                 crossing.zoom.cues.size() == 2 &&
+                 crossing.zoom.cues[0].id != 55 &&
+                 crossing.zoom.cues[0].startMs == 0 &&
+                 crossing.zoom.cues[0].endMs == 500 &&
+                 crossing.zoom.cues[1].id == 55 &&
+                 crossing.zoom.cues[1].startMs == 2500 &&
+                 crossing.zoom.cues[1].endMs == 3000,
+             QStringLiteral("Reordered cross-scene zoom did not preserve first "
+                            "original fragment identity")))
+    return false;
+  auto capped = original;
+  capped.clips = {{11, 1, 0, 10000, 1}};
+  capped.zoom.cues.clear();
+  capped.trimInMs = 0;
+  capped.trimOutMs = -1;
+  for (int i = 0; i < kMaxZoomCues; ++i)
+    capped.zoom.cues.push_back({static_cast<quint64>(i + 1),
+                                i * 250,
+                                i * 250 + 200,
+                                60,
+                                60,
+                                {0.5, 0.5},
+                                2});
+  const auto exactCap = capped;
+  if (!check(!studioDuplicateClip(capped, 11, 77, operationError) &&
+                 operationError.contains(QStringLiteral("zoom-cue limit")) &&
+                 capped == exactCap,
+             QStringLiteral("Zoom fragment overflow silently discarded edits")))
+    return false;
+  return true;
+}
+bool transitionChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject p;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 10000;
+  source.audioStreams = 1;
+  p.assets = {{1, QStringLiteral("transition-source.mp4"), source}};
+  p.clips = {{11, 1, 0, 2000, 1}, {12, 1, 0, 2000, 1}, {13, 1, 0, 2000, 1}};
+  QString operationError;
+  if (!check(
+          studioSetTransition(p, 11, 12, StudioTransitionKind::Crossfade, 400,
+                              operationError) &&
+              studioSetTransition(p, 12, 13, StudioTransitionKind::Crossfade,
+                                  400, operationError) &&
+              studioDuration(p) == 5200 && p.transitions.size() == 2,
+          QStringLiteral("Transition duration did not shorten composition: %1")
+              .arg(operationError)))
+    return false;
+  const auto spans = studioComposition(p);
+  if (!check(
+          spans[0].startMs == 0 && spans[0].endMs == 2000 &&
+              spans[1].startMs == 1600 && spans[1].endMs == 3600 &&
+              spans[2].startMs == 3200 && spans[2].endMs == 5200 &&
+              !studioBlendAt(p, 1599) && !studioBlendAt(p, 2000),
+          QStringLiteral("Transition half-open composition boundaries differ")))
+    return false;
+  const auto half = studioBlendAt(p, 1800);
+  if (!check(half && half->outgoing.span.clipId == 11 &&
+                 half->incoming.span.clipId == 12 &&
+                 half->outgoing.sourceMs == 1800 &&
+                 half->incoming.sourceMs == 200 && half->progress == 0.5 &&
+                 half->outgoingOpacity == 0.5 && half->incomingOpacity == 0.5 &&
+                 half->outgoingAudioGain == 0.5 &&
+                 half->incomingAudioGain == 0.5 &&
+                 studioFrameAt(p, 1800)->span.clipId == 11 &&
+                 studioTimelineTime(p, 12, 200) == 1800,
+             QStringLiteral(
+                 "Shared blend source phases or video/audio gains differ")))
+    return false;
+  if (!check(studioSetTransition(p, 11, 12, StudioTransitionKind::FadeBlack,
+                                 400, operationError),
+             QStringLiteral("Could not restyle transition")))
+    return false;
+  const auto black = studioBlendAt(p, 1800), quarter = studioBlendAt(p, 1700);
+  if (!check(
+          black && black->outgoingOpacity == 0 && black->incomingOpacity == 0 &&
+              black->incomingAudioGain == 0.5 && quarter &&
+              quarter->outgoingOpacity == 0.5 && quarter->incomingOpacity == 0,
+          QStringLiteral("Fade-through-black does not cross black or retains "
+                         "wrong audio")))
+    return false;
+  const auto original = p;
+  if (!check(!studioSplitClip(p, 1800, 99, &operationError) &&
+                 operationError.contains(QStringLiteral("transition")) &&
+                 p == original,
+             QStringLiteral("Split through blend was not atomically refused")))
+    return false;
+  const auto blockedCut = studioDeleteRange(p, 1700, 1900, 99);
+  if (!check(
+          !blockedCut.changed &&
+              blockedCut.error.contains(QStringLiteral("transition")) &&
+              p == original,
+          QStringLiteral("Range cut through blend was not atomically refused")))
+    return false;
+  if (!check(studioSplitClip(p, 500, 99, &operationError) &&
+                 studioDuration(p) == 5200 && studioTransition(p, 99, 12) &&
+                 !studioTransition(p, 11, 12) && studioTransition(p, 12, 13),
+             QStringLiteral(
+                 "Split outside blend lost or misattached outer transition")))
+    return false;
+  auto cutProject = original;
+  const auto cut = studioDeleteRange(cutProject, 100, 200, 99);
+  if (!check(cut.changed && cut.removedMs == 100 &&
+                 studioDuration(cutProject) == 5100 &&
+                 studioTransition(cutProject, 99, 12) &&
+                 studioTransition(cutProject, 12, 13),
+             QStringLiteral(
+                 "Cut outside blend did not preserve timeline/outer pairs: %1")
+                 .arg(cut.error)))
+    return false;
+  auto afterBlend = original;
+  const auto tailCut = studioDeleteRange(afterBlend, 4300, 4500, 99);
+  if (!check(
+          tailCut.changed && tailCut.fromMs == 4300 && tailCut.toMs == 4500 &&
+              studioDuration(afterBlend) == 5000 &&
+              studioTransition(afterBlend, 12, 13),
+          QStringLiteral(
+              "Cut after overlaps mixed serial/source and project clocks: %1")
+              .arg(tailCut.error)))
+    return false;
+  auto deletion = original;
+  deletion.zoom.cues = {{71, 3800, 4300, 150, 150, {0.5, 0.5}, 2}};
+  const auto beforeDelete = deletion;
+  const auto removed = studioDeleteClip(deletion, 12);
+  if (!check(removed.changed && removed.removedMs == 1200 &&
+                 studioDuration(deletion) == 4000 &&
+                 deletion.transitions.isEmpty() &&
+                 deletion.zoom.cues.size() == 1 &&
+                 deletion.zoom.cues[0].id == 71 &&
+                 deletion.zoom.cues[0].startMs == 2600,
+             QStringLiteral(
+                 "Whole-scene delete failed source-aware zoom/pair removal: %1")
+                 .arg(removed.error)))
+    return false;
+  StudioHistory history;
+  StudioEditState before, after;
+  before.project = beforeDelete;
+  before.selectedClip = 12;
+  before.positionMs = 3000;
+  after.project = deletion;
+  history.reset(before);
+  history.push(after);
+  if (!check(history.undo() && history.current() == before && history.redo() &&
+                 history.current() == after,
+             QStringLiteral("Transition scene deletion did not undo exactly")))
+    return false;
+  auto reordered = original;
+  if (!check(studioMoveClip(reordered, 13, 11, operationError) &&
+                 reordered.transitions.size() == 1 &&
+                 studioTransition(reordered, 11, 12) &&
+                 !studioTransition(reordered, 12, 13),
+             QStringLiteral("Reorder attached transition to a different pair")))
+    return false;
+  auto duplicated = original;
+  if (!check(studioDuplicateClip(duplicated, 12, 99, operationError) &&
+                 studioTransition(duplicated, 11, 12) &&
+                 !studioTransition(duplicated, 12, 13) &&
+                 !studioTransition(duplicated, 99, 13),
+             QStringLiteral(
+                 "Duplicate inherited a transition belonging to another pair")))
+    return false;
+  auto shortClip = original;
+  if (!check(
+          studioTrimClip(shortClip, 12, 0, 1000, operationError) &&
+              studioTransition(shortClip, 11, 12)->durationMs == 367 &&
+              studioTransition(shortClip, 12, 13)->durationMs == 367,
+          QStringLiteral("Short scene did not frame-clamp incident overlaps")))
+    return false;
+  const auto shortSpans = studioComposition(shortClip);
+  if (!check(shortSpans[2].startMs - shortSpans[0].endMs >= 250,
+             QStringLiteral(
+                 "Adjacent transitions consumed decoder preload headroom")))
+    return false;
+  if (!check(studioTrimClip(shortClip, 12, 0, 200, operationError) &&
+                 shortClip.transitions.isEmpty(),
+             QStringLiteral("Very short scene retained impossible overlap")))
+    return false;
+  StudioProject cross = original;
+  cross.transitions.clear();
+  cross.zoom.cues = {{80, 1500, 2500, 200, 200, {0.5, 0.5}, 2}};
+  if (!check(studioSetTransition(cross, 11, 12, StudioTransitionKind::Crossfade,
+                                 400, operationError) &&
+                 cross.zoom.cues.size() == 1 && cross.zoom.cues[0].id == 80 &&
+                 cross.zoom.cues[0].startMs == 1500 &&
+                 cross.zoom.cues[0].endMs == 2100 &&
+                 studioRemoveTransition(cross, 11, 12, operationError) &&
+                 cross.zoom.cues.size() == 1 &&
+                 cross.zoom.cues[0].endMs == 2500,
+             QStringLiteral("Continuous cross-scene camera did not merge "
+                            "across overlap add/remove: %1")
+                 .arg(operationError)))
+    return false;
+  auto collision = cross;
+  collision.zoom.cues = {{81, 1500, 1900, 100, 100, {0.3, 0.5}, 2},
+                         {82, 2000, 2500, 100, 100, {0.7, 0.5}, 3}};
+  const auto collisionBefore = collision;
+  if (!check(!studioSetTransition(collision, 11, 12,
+                                  StudioTransitionKind::Crossfade, 400,
+                                  operationError) &&
+                 operationError.contains(QStringLiteral("Move zoom cues")) &&
+                 collision == collisionBefore,
+             QStringLiteral(
+                 "Transition silently truncated colliding camera cues")))
+    return false;
+  StudioProject decoded;
+  if (!check(decodeStudioProject(encodeStudioProject(original), decoded)
+                     .isEmpty() &&
+                 decoded == original,
+             QStringLiteral("Transitions did not persist exactly")))
+    return false;
+  auto json = QJsonDocument::fromJson(encodeStudioProject(original)).object();
+  json["schema"] = 1;
+  if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                     .isEmpty() &&
+                 decoded == original,
+             QStringLiteral("Old schema was silently migrated")))
+    return false;
+  auto invalid = original;
+  invalid.transitions[0].incomingClipId = 11;
+  if (!check(!validateStudioProject(invalid).isEmpty(),
+             QStringLiteral("Non-adjacent transition pair accepted")))
+    return false;
+  return true;
+}
+bool directionalChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  struct Direction {
+    StudioTransitionKind kind;
+    const char *name;
+    QPointF outgoingOffset;
+    QPointF incomingOffset;
+    QRectF outgoingClip;
+    QRectF incomingClip;
+  };
+  const QVector<Direction> directions{{StudioTransitionKind::WipeLeft,
+                                       "wipe-left",
+                                       {},
+                                       {},
+                                       {0, 0, 0.75, 1},
+                                       {0.75, 0, 0.25, 1}},
+                                      {StudioTransitionKind::WipeRight,
+                                       "wipe-right",
+                                       {},
+                                       {},
+                                       {0.25, 0, 0.75, 1},
+                                       {0, 0, 0.25, 1}},
+                                      {StudioTransitionKind::WipeUp,
+                                       "wipe-up",
+                                       {},
+                                       {},
+                                       {0, 0, 1, 0.75},
+                                       {0, 0.75, 1, 0.25}},
+                                      {StudioTransitionKind::WipeDown,
+                                       "wipe-down",
+                                       {},
+                                       {},
+                                       {0, 0.25, 1, 0.75},
+                                       {0, 0, 1, 0.25}},
+                                      {StudioTransitionKind::SlideLeft,
+                                       "slide-left",
+                                       {-0.25, 0},
+                                       {0.75, 0},
+                                       {0, 0, 0.75, 1},
+                                       {0.75, 0, 0.25, 1}},
+                                      {StudioTransitionKind::SlideRight,
+                                       "slide-right",
+                                       {0.25, 0},
+                                       {-0.75, 0},
+                                       {0.25, 0, 0.75, 1},
+                                       {0, 0, 0.25, 1}},
+                                      {StudioTransitionKind::SlideUp,
+                                       "slide-up",
+                                       {0, -0.25},
+                                       {0, 0.75},
+                                       {0, 0, 1, 0.75},
+                                       {0, 0.75, 1, 0.25}},
+                                      {StudioTransitionKind::SlideDown,
+                                       "slide-down",
+                                       {0, 0.25},
+                                       {0, -0.75},
+                                       {0, 0.25, 1, 0.75},
+                                       {0, 0, 1, 0.25}}};
+  const auto contains = [](const QRectF &clip, const QPointF &point) {
+    return point.x() >= clip.x() && point.x() < clip.x() + clip.width() &&
+           point.y() >= clip.y() && point.y() < clip.y() + clip.height();
+  };
+  StudioProject project;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30;
+  source.durationMs = 6000;
+  project.assets = {{1, QStringLiteral("directional-source.mp4"), source}};
+  project.clips = {{11, 1, 0, 3000, 1}, {12, 1, 3000, 6000, 1}};
+  for (const auto &direction : directions) {
+    const auto outgoing = studioTransitionLayer(direction.kind, 0.25, false);
+    const auto incoming = studioTransitionLayer(direction.kind, 0.25, true);
+    if (!check(studioTransitionName(direction.kind) ==
+                       QLatin1StringView(direction.name) &&
+                   outgoing.opacity == 1 && incoming.opacity == 1 &&
+                   outgoing.offset == direction.outgoingOffset &&
+                   incoming.offset == direction.incomingOffset &&
+                   outgoing.clip == direction.outgoingClip &&
+                   incoming.clip == direction.incomingClip,
+               QStringLiteral(
+                   "Directional quarter-progress geometry differs for %1")
+                   .arg(QLatin1StringView(direction.name))))
+      return false;
+    for (const double progress : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+      const auto first = studioTransitionLayer(direction.kind, progress, false);
+      const auto second = studioTransitionLayer(direction.kind, progress, true);
+      if (!check(first.clip.width() * first.clip.height() == 1 - progress &&
+                     second.clip.width() * second.clip.height() == progress,
+                 QStringLiteral(
+                     "Directional clipping area does not conserve the canvas")))
+        return false;
+      for (int row = 0; row < 8; ++row)
+        for (int column = 0; column < 8; ++column) {
+          const QPointF point((column + 0.5) / 8, (row + 0.5) / 8);
+          const bool a = contains(first.clip, point),
+                     b = contains(second.clip, point);
+          if (!check(a != b, QStringLiteral("Directional layers leave a gap or "
+                                            "paint over one another")))
+            return false;
+          const auto sample = point - (a ? first.offset : second.offset);
+          if (!check(contains(QRectF(0, 0, 1, 1), sample),
+                     QStringLiteral("Slide samples outside its source canvas")))
+            return false;
+        }
+      // The seam belongs to exactly one side, including exact midpoint pixels.
+      if (!check(contains(first.clip, {0.5, 0.5}) !=
+                     contains(second.clip, {0.5, 0.5}),
+                 QStringLiteral("Directional seam is not half-open")))
+        return false;
+    }
+    QString operationError;
+    if (!check(studioSetTransition(project, 11, 12, direction.kind, 600,
+                                   operationError) &&
+                   validateStudioProject(project).isEmpty() &&
+                   studioDuration(project) == 5400,
+               QStringLiteral("Directional transition was rejected: %1")
+                   .arg(operationError)))
+      return false;
+    const auto blend = studioBlendAt(project, 2550);
+    if (!check(
+            blend && blend->progress == 0.25 && blend->outgoingOpacity == 1 &&
+                blend->incomingOpacity == 1 &&
+                blend->outgoingAudioGain == 0.75 &&
+                blend->incomingAudioGain == 0.25 &&
+                blend->outgoing.sourceMs == 2550 &&
+                blend->incoming.sourceMs == 3150,
+            QStringLiteral(
+                "Directional transition changed shared source/audio timing")))
+      return false;
+    StudioProject decoded;
+    const auto bytes = encodeStudioProject(project);
+    if (!check(bytes.contains(direction.name) &&
+                   decodeStudioProject(bytes, decoded).isEmpty() &&
+                   decoded == project,
+               QStringLiteral(
+                   "Directional transition name or state did not round-trip")))
+      return false;
+  }
+  const auto cross =
+      studioTransitionLayer(StudioTransitionKind::Crossfade, 0.25, true);
+  const auto black =
+      studioTransitionLayer(StudioTransitionKind::FadeBlack, 0.5, false);
+  if (!check(cross.opacity == 0.25 && black.opacity == 0 &&
+                 cross.offset.isNull() && black.offset.isNull() &&
+                 cross.clip == QRectF(0, 0, 1, 1) &&
+                 black.clip == QRectF(0, 0, 1, 1),
+             QStringLiteral("Shared layer helper changed the existing fades")))
+    return false;
+  const auto invalidKind = static_cast<StudioTransitionKind>(999);
+  const auto invalidLayer = studioTransitionLayer(invalidKind, 0.5, true);
+  if (!check(
+          studioTransitionName(invalidKind).isEmpty() &&
+              invalidLayer.opacity == 0 && invalidLayer.clip.isEmpty(),
+          QStringLiteral("Invalid transition kind produced a visible layer")))
+    return false;
+  const auto nanLayer =
+      studioTransitionLayer(StudioTransitionKind::SlideLeft,
+                            std::numeric_limits<double>::quiet_NaN(), false);
+  if (!check(nanLayer.offset.isNull() && nanLayer.clip == QRectF(0, 0, 1, 1),
+             QStringLiteral(
+                 "Non-finite transition progress leaked into layer geometry")))
+    return false;
+  auto json = QJsonDocument::fromJson(encodeStudioProject(project)).object();
+  auto transitions = json["transitions"].toArray();
+  auto entry = transitions[0].toObject();
+  entry["kind"] = QStringLiteral("wipe-diagonal");
+  transitions[0] = entry;
+  json["transitions"] = transitions;
+  const auto before = project;
+  if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), project)
+                     .isEmpty() &&
+                 project == before,
+             QStringLiteral("Unknown directional kind was silently accepted")))
+    return false;
+  return true;
+}
+} // namespace
+
+bool runStudioProjectChecks(QString &error) {
+  const auto check = [&](bool ok, const QString &message) {
+    if (!ok)
+      error = message;
+    return ok;
+  };
+  StudioProject p;
+  StudioSource source;
+  source.size = {1280, 720};
+  source.fpsNumerator = 30000;
+  source.fpsDenominator = 1001;
+  source.durationMs = 10000;
+  source.audioStreams = 2;
+  p.assets = {{1, QStringLiteral("missing-recording.mp4"), source}};
+  p.clips = {{11, 1, 1000, 5000, 1}, {12, 1, 2000, 6000, 2}};
+  if (!check(validateStudioProject(p).isEmpty(),
+             QStringLiteral("Valid project rejected")) ||
+      !check(studioDuration(p) == 6000,
+             QStringLiteral("Composition duration drift")))
+    return false;
+  const auto before = studioFrameAt(p, 3999), boundary = studioFrameAt(p, 4000),
+             fast = studioFrameAt(p, 4500);
+  if (!check(before && before->span.clipId == 11 && before->sourceMs == 4999 &&
+                 boundary && boundary->span.clipId == 12 &&
+                 boundary->sourceMs == 2000 && fast && fast->sourceMs == 3000,
+             QStringLiteral("Source-time mapping differs at cut/speed")) ||
+      !check(!studioFrameAt(p, -1) && !studioFrameAt(p, 6000),
+             QStringLiteral("Out-of-project time resolves")) ||
+      !check(studioTimelineTime(p, 11, 3000) == 2000 &&
+                 studioTimelineTime(p, 12, 3000) == 4500 &&
+                 !studioTimelineTime(p, 12, 6000),
+             QStringLiteral("Repeated-source inverse mapping ambiguous")))
+    return false;
+  StudioProject split = p;
+  split.clips = {
+      {11, 1, 1000, 3000, 1}, {13, 1, 3000, 5000, 1}, p.clips.back()};
+  for (qint64 time = 0; time < 6000; time += 17) {
+    if (!check(studioFrameAt(p, time)->sourceMs ==
+                   studioFrameAt(split, time)->sourceMs,
+               QStringLiteral("Splitting changes content time")))
+      return false;
+  }
+  StudioHistory history;
+  StudioEditState initial;
+  initial.project = p;
+  history.reset(initial);
+  history.setCursor(11, 0, 0, 0, 1200, 1700, 1350);
+  const auto beforeEdit = history.current();
+  auto afterEdit = beforeEdit;
+  afterEdit.project = split;
+  afterEdit.rangeIn = afterEdit.rangeOut = -1;
+  afterEdit.selectedClip = 13;
+  history.push(afterEdit);
+  if (!check(history.undo() && history.current() == beforeEdit &&
+                 history.redo() && history.current() == afterEdit,
+             QStringLiteral(
+                 "Undo/redo did not restore project and cursor exactly")))
+    return false;
+  history.undo();
+  auto branch = beforeEdit;
+  branch.project.style.padding = 10;
+  history.push(branch);
+  if (!check(!history.canRedo(),
+             QStringLiteral("New edit retains obsolete redo branch")))
+    return false;
+  history.push(branch);
+  if (!check(history.undo() && !history.canUndo(),
+             QStringLiteral("No-op edit adds history")))
+    return false;
+
+  p.zoom.cues = {{7, 1000, 2000, 200, 200, {0.3, 0.7}, 2}};
+  p.style = {2, 10, 20};
+  p.trimInMs = 500;
+  p.trimOutMs = 5500;
+  StudioProject decoded;
+  if (!check(decodeStudioProject(encodeStudioProject(p), decoded).isEmpty() &&
+                 decoded == p,
+             QStringLiteral("Project serialization not lossless")))
+    return false;
+  QSet<QString> backgroundColors;
+  for (int background = 0; background < StudioStyle::backgroundCount;
+       ++background) {
+    if (!check(!StudioStyle::backgroundName(background).isEmpty() &&
+                   StudioStyle{background, 10, 20}.color().isValid(),
+               QStringLiteral("Background preset %1 has no name or color")
+                   .arg(background)))
+      return false;
+    backgroundColors.insert(
+        StudioStyle{background, 10, 20}.color().name());
+    auto styled = p;
+    styled.style.background = background;
+    if (!check(validateStudioProject(styled).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(styled), decoded)
+                       .isEmpty() &&
+                   decoded.style.background == background,
+               QStringLiteral("Background preset %1 does not persist")
+                   .arg(background)))
+      return false;
+  }
+  if (!check(backgroundColors.size() == StudioStyle::backgroundCount,
+             QStringLiteral("Background presets are not distinct")))
+    return false;
+  {
+    auto invalidStyle = p;
+    invalidStyle.style.background = StudioStyle::backgroundCount;
+    if (!check(!validateStudioProject(invalidStyle).isEmpty(),
+               QStringLiteral("Out-of-range background accepted")))
+      return false;
+  }
+  if (!check(!StudioStyle::isGradient(StudioStyle::solidCount - 1) &&
+                 StudioStyle::isGradient(StudioStyle::solidCount) &&
+                 StudioStyle::isGradient(StudioStyle::backgroundCount - 1) &&
+                 !StudioStyle::isGradient(StudioStyle::backgroundCount) &&
+                 StudioStyle::backgroundName(StudioStyle::backgroundCount)
+                     .isEmpty(),
+             QStringLiteral("Background solid/gradient boundary is wrong")))
+    return false;
+  {
+    const StudioGradient dawn =
+        StudioStyle::gradient(StudioStyle::solidCount);
+    if (!check(QString::fromUtf8(dawn.name) == QStringLiteral("Dawn Fire") &&
+                   dawn.startX == 0 && dawn.startY == 0 && dawn.endX == 1 &&
+                   dawn.endY == 1 && dawn.stops[0].red == 0.98 &&
+                   dawn.stops[2].blue == 0.80,
+               QStringLiteral("First gradient preset is not Dawn Fire")))
+      return false;
+  }
+  {
+    auto wallpapers = p;
+    wallpapers.style.wallpaperPath = QStringLiteral("/tmp/wallpaper.png");
+    if (!check(validateStudioProject(wallpapers).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(wallpapers), decoded)
+                           .isEmpty() &&
+                   decoded.style.wallpaperPath ==
+                       QStringLiteral("/tmp/wallpaper.png"),
+               QStringLiteral("Wallpaper background does not persist")))
+      return false;
+    wallpapers.style.wallpaperPath.fill(QChar::Null);
+    if (!check(!validateStudioProject(wallpapers).isEmpty(),
+               QStringLiteral("NUL wallpaper path accepted")))
+      return false;
+  }
+  {
+    StudioProject aspected;
+    aspected.canvas = {1920, 1080};
+    aspected.style.aspect = 1;
+    const bool sixteenNine =
+        studioEffectiveCanvas(aspected) == QSize(1920, 1080);
+    aspected.style.aspect = 2;
+    const bool nineSixteen =
+        studioEffectiveCanvas(aspected) == QSize(1920, 3414);
+    aspected.style.aspect = 3;
+    const bool square = studioEffectiveCanvas(aspected) == QSize(1920, 1920);
+    aspected.style.aspect = 4;
+    const bool fourFive =
+        studioEffectiveCanvas(aspected) == QSize(1920, 2400);
+    aspected.style.aspect = 0;
+    const bool original =
+        studioEffectiveCanvas(aspected) == QSize(1920, 1080);
+    if (!check(sixteenNine && nineSixteen && square && fourFive && original,
+               QStringLiteral("Aspect canvas expansion is wrong")))
+      return false;
+    aspected.canvas = {100, 100};
+    aspected.style.aspect = 1;
+    const QSize grown = studioEffectiveCanvas(aspected);
+    if (!check(grown == QSize(178, 100),
+               QStringLiteral("Aspect growth is not even")))
+      return false;
+    aspected.style.aspect = 9;
+    if (!check(studioEffectiveCanvas(aspected) == QSize(100, 100) &&
+                   !validateStudioProject(aspected).isEmpty(),
+               QStringLiteral("Out-of-range aspect accepted")))
+      return false;
+    auto styled = p;
+    styled.style.aspect = 2;
+    if (!check(decodeStudioProject(encodeStudioProject(styled), decoded)
+                       .isEmpty() &&
+                   decoded.style.aspect == 2,
+               QStringLiteral("Aspect does not persist")))
+      return false;
+    styled.style.shadow = 30;
+    if (!check(validateStudioProject(styled).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(styled), decoded)
+                           .isEmpty() &&
+                   decoded.style.shadow == 30,
+               QStringLiteral("Shadow does not persist")))
+      return false;
+    styled.style.shadow = 101;
+    if (!check(!validateStudioProject(styled).isEmpty(),
+               QStringLiteral("Out-of-range shadow accepted")))
+      return false;
+    styled.style.shadow = 0;
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(styled)).object();
+    auto styleObject = json["style"].toObject();
+    styleObject.remove(QStringLiteral("aspect"));
+    json["style"] = styleObject;
+    if (!check(decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.style.aspect == 0,
+               QStringLiteral("Missing aspect does not default to Original")))
+      return false;
+  }
+  {
+    // Retiming one scene halves its duration at 2x and persists.
+    auto retimed = p;
+    const qint64 before = studioDuration(retimed);
+    QString speedError;
+    if (!check(studioSetClipSpeed(retimed, retimed.clips[0].id, 2.0,
+                                  speedError) &&
+                   speedError.isEmpty() &&
+                   retimed.clips[0].speed == 2.0 &&
+                   studioDuration(retimed) < before &&
+                   decodeStudioProject(encodeStudioProject(retimed), decoded)
+                           .isEmpty() &&
+                   decoded.clips[0].speed == 2.0,
+               QStringLiteral("Scene speed change did not persist")))
+      return false;
+    if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id, 2.0,
+                                   speedError) &&
+                   speedError.isEmpty(),
+               QStringLiteral("Unchanged speed is not a no-op")))
+      return false;
+    for (const double bad : {0.0, -1.0, 100.0}) {
+      if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id, bad,
+                                     speedError) &&
+                     !speedError.isEmpty(),
+                 QStringLiteral("Out-of-range speed %1 accepted").arg(bad)))
+        return false;
+    }
+    if (!check(!studioSetClipSpeed(retimed, retimed.clips[0].id,
+                                   std::numeric_limits<double>::quiet_NaN(),
+                                   speedError) &&
+                   !speedError.isEmpty(),
+               QStringLiteral("Non-finite speed accepted")))
+      return false;
+    if (!check(!studioSetClipSpeed(retimed, 999999, 2.0, speedError) &&
+                   !speedError.isEmpty(),
+               QStringLiteral("Speed change on a missing scene accepted")))
+      return false;
+  }
+  {
+    // Music persists, validates, and defaults to silence.
+    if (!check(p.music.path.isEmpty() && p.music.durationMs == 0 &&
+                   validateStudioProject(p).isEmpty(),
+               QStringLiteral("A music-less project is not silent")))
+      return false;
+    auto scored = p;
+    scored.music = {QStringLiteral("/tmp/song.mp3"), 20, 180000};
+    if (!check(validateStudioProject(scored).isEmpty() &&
+                   decodeStudioProject(encodeStudioProject(scored), decoded)
+                           .isEmpty() &&
+                   decoded.music == scored.music,
+               QStringLiteral("Background music does not persist")))
+      return false;
+    for (const auto bad :
+         {StudioMusic{QStringLiteral("/tmp/song.mp3"), 101, 180000},
+          StudioMusic{QStringLiteral("/tmp/song.mp3"), -1, 180000},
+          StudioMusic{QStringLiteral("/tmp/song.mp3"), 20, 0},
+          StudioMusic{{}, 20, 180000}}) {
+      auto invalidMusic = p;
+      invalidMusic.music = bad;
+      if (!check(!validateStudioProject(invalidMusic).isEmpty(),
+                 QStringLiteral("Invalid background music accepted")))
+        return false;
+    }
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    auto musicObject = json["music"].toObject();
+    musicObject.remove(QStringLiteral("volume"));
+    json["music"] = musicObject;
+    if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty(),
+               QStringLiteral("Mistyped music accepted")))
+      return false;
+    json = QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    auto noMusic = json;
+    noMusic.remove(QStringLiteral("music"));
+    if (!check(decodeStudioProject(QJsonDocument(noMusic).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.music == StudioMusic{},
+               QStringLiteral("Missing music does not default to silence")))
+      return false;
+  }
+  {
+    // Audio structural edits: move, duplicate, trim, split, delete, and
+    // scalar retunes, each undoable through the project value.
+    StudioProject scored;
+    StudioSource song;
+    song.durationMs = 10000;
+    song.audioStreams = 1;
+    scored.assets = {{1, QStringLiteral("song.mp3"), song}};
+    scored.audioClips = {{11, 1, 0, 4000, 1.0, 100},
+                         {12, 1, 4000, 8000, 1.0, 100},
+                         {13, 1, 8000, 10000, 1.0, 100}};
+    QString audioError;
+    if (!check(studioMoveAudioClip(scored, 13, 11, audioError) &&
+                   audioError.isEmpty() &&
+                   scored.audioClips[0].id == 13 &&
+                   scored.audioClips[1].id == 11,
+               QStringLiteral("Audio move did not reorder")))
+      return false;
+    if (!check(!studioMoveAudioClip(scored, 13, 13, audioError) &&
+                   !studioMoveAudioClip(scored, 13, 11, audioError) &&
+                   scored.audioClips[0].id == 13 &&
+                   !studioMoveAudioClip(scored, 99, 11, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio move no-op or missing scene is wrong")))
+      return false;
+    if (!check(studioDuplicateAudioClip(scored, 11, 21, audioError) &&
+                   audioError.isEmpty() && scored.audioClips[2].id == 21 &&
+                   scored.audioClips[2].inMs == 0,
+               QStringLiteral("Audio duplicate did not copy after")))
+      return false;
+    if (!check(!studioDuplicateAudioClip(scored, 11, 21, audioError) &&
+                   !audioError.isEmpty() &&
+                   !studioDuplicateAudioClip(scored, 99, 22, audioError),
+               QStringLiteral("Audio duplicate identity is wrong")))
+      return false;
+    if (!check(studioTrimAudioClip(scored, 21, 500, 3000, audioError) &&
+                   audioError.isEmpty(),
+               QStringLiteral("Audio trim refused")))
+      return false;
+    if (!check(!studioTrimAudioClip(scored, 21, 500, 3000, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioTrimAudioClip(scored, 99, 0, 100, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio trim no-op or missing scene is wrong")))
+      return false;
+    if (!check(studioSplitAudioClip(scored, 1000, 31, audioError) &&
+                   audioError.isEmpty(),
+               QStringLiteral("Audio split refused")))
+      return false;
+    bool anchored = false;
+    for (const auto &clip : scored.audioClips)
+      if (clip.id == 31 && clip.inMs == 9000 && clip.outMs == 10000)
+        anchored = true;
+    const StudioAudioClip *left = nullptr;
+    for (const auto &clip : scored.audioClips)
+      if (clip.id == 13 && clip.outMs == 9000)
+        left = &clip;
+    if (!check(anchored && left,
+               QStringLiteral("Audio split boundary is not source-anchored")))
+      return false;
+    if (!check(!studioSplitAudioClip(scored, 1000, 32, audioError) &&
+                   !studioSplitAudioClip(scored, 20000, 32, audioError) &&
+                   !studioSplitAudioClip(scored, 1500, 31, audioError),
+               QStringLiteral("Audio split inside, outside, or reuse is wrong")))
+      return false;
+    if (!check(studioDeleteAudioClip(scored, 31, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioDeleteAudioClip(scored, 99, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio delete is wrong")))
+      return false;
+    if (!check(studioSetAudioClipGain(scored, 11, 50, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 11, 50, audioError) &&
+                   audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 11, 101, audioError) &&
+                   !audioError.isEmpty() &&
+                   !studioSetAudioClipGain(scored, 99, 50, audioError),
+               QStringLiteral("Audio gain is wrong")))
+      return false;
+    if (!check(studioSetAudioClipSpeed(scored, 11, 2.0, audioError) &&
+                   audioError.isEmpty() &&
+                   studioAudioComposition(scored)[1].endMs == 3000 &&
+                   !studioSetAudioClipSpeed(scored, 11, 2.0, audioError) &&
+                   !studioSetAudioClipSpeed(scored, 11, 0.0, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio speed is wrong")))
+      return false;
+    // Splitting conserves rounded duration: 1000 ms at 0.75x stays 1333.
+    StudioProject paced;
+    paced.assets = {{1, QStringLiteral("song.mp3"), song}};
+    paced.audioClips = {{11, 1, 0, 1000, 0.75, 100}};
+    if (!check(studioSplitAudioClip(paced, 2, 21, audioError) &&
+                   audioError.isEmpty() &&
+                   studioAudioComposition(paced).back().endMs == 1333,
+               QStringLiteral("Audio split shifted downstream sounds")))
+      return false;
+    // Appending sounds lands them at the lane end, atomically or not at
+    // all; an empty batch is an exact no-op.
+    StudioProject appended = paced;
+    StudioSource secondSong = song;
+    if (!check(studioAppendAudioClips(
+                   appended,
+                   {{2, QStringLiteral("second.mp3"), secondSong}},
+                   {{31, 2, 0, 2000, 1.0, 80}}, audioError) &&
+                   audioError.isEmpty() && appended.assets.size() == 2 &&
+                   appended.audioClips.size() == 3 &&
+                   studioAudioComposition(appended).back().endMs == 3333,
+               QStringLiteral("Audio append did not land at the lane end")))
+      return false;
+    StudioProject untouched = paced;
+    if (!check(!studioAppendAudioClips(untouched, {}, {}, audioError) &&
+                   audioError.isEmpty() && untouched == paced &&
+                   !studioAppendAudioClips(untouched,
+                                           {{2, QStringLiteral("x.mp3"),
+                                             secondSong}},
+                                           {}, audioError) &&
+                   !audioError.isEmpty(),
+               QStringLiteral("Audio append emptiness is wrong")))
+      return false;
+    // The lane caps with everything else at a thousand clips.
+    for (int i = 0; i < 1000; ++i)
+      paced.audioClips.push_back({1000 + i, 1, 0, 10, 1.0, 100});
+    if (!check(!validateStudioProject(paced).isEmpty(),
+               QStringLiteral("Overfull audio lane accepted")))
+      return false;
+  }
+  {
+    // Audio lane: audio-only assets validate, clips lay end to end with
+    // speed and gain, and everything persists.
+    StudioProject scored;
+    StudioSource song;
+    song.durationMs = 10000;
+    song.audioStreams = 1;
+    scored.assets = {{1, QStringLiteral("song.mp3"), song}};
+    scored.audioClips = {{11, 1, 1000, 6000, 1.0, 100},
+                         {12, 1, 0, 2000, 2.0, 50}};
+    if (!check(validateStudioProject(scored).isEmpty(),
+               QStringLiteral("Valid audio lane rejected")))
+      return false;
+    const auto spans = studioAudioComposition(scored);
+    if (!check(spans.size() == 2 && spans[0].startMs == 0 &&
+                   spans[0].endMs == 5000 && spans[0].gain == 100 &&
+                   spans[1].startMs == 5000 && spans[1].endMs == 6000 &&
+                   spans[1].gain == 50 && spans[1].inMs == 0,
+               QStringLiteral("Audio composition layout is wrong")))
+      return false;
+    if (!check(decodeStudioProject(encodeStudioProject(scored), decoded)
+                       .isEmpty() &&
+                   decoded == scored,
+               QStringLiteral("Audio lane does not persist")))
+      return false;
+    auto videoOnly = scored;
+    videoOnly.audioClips.clear();
+    videoOnly.clips = {{7, 1, 0, 1000, 1.0}};
+    if (!check(!validateStudioProject(videoOnly).isEmpty(),
+               QStringLiteral("Scene on an audio-only asset accepted")))
+      return false;
+    for (const auto bad :
+         {StudioAudioClip{13, 1, 0, 1000, 1.0, 101},
+          StudioAudioClip{13, 1, 0, 1000, 1.0, -1},
+          StudioAudioClip{13, 1, 0, 1000, 0.0, 100},
+          StudioAudioClip{13, 1, 5000, 4000, 1.0, 100},
+          StudioAudioClip{13, 1, 0, 11000, 1.0, 100},
+          StudioAudioClip{13, 99, 0, 1000, 1.0, 100},
+          StudioAudioClip{11, 1, 0, 1000, 1.0, 100}}) {
+      auto invalidAudio = scored;
+      invalidAudio.audioClips.push_back(bad);
+      if (!check(!validateStudioProject(invalidAudio).isEmpty(),
+                 QStringLiteral("Invalid audio clip accepted")))
+        return false;
+    }
+    auto silent = scored;
+    silent.assets[0].source.audioStreams = 0;
+    if (!check(!validateStudioProject(silent).isEmpty(),
+               QStringLiteral("Audio clip on a streamless asset accepted")))
+      return false;
+    // Rounded retimed durations hold at validation: 1 ms at 8x is zero.
+    auto subframe = scored;
+    subframe.audioClips.push_back({13, 1, 0, 1, 8.0, 100});
+    if (!check(!validateStudioProject(subframe).isEmpty(),
+               QStringLiteral("Zero-length retimed audio accepted")))
+      return false;
+    // So does the cumulative lane bound: two full-length songs exceed it.
+    StudioProject longLane;
+    StudioSource album;
+    album.durationMs = 604800000;
+    album.audioStreams = 1;
+    longLane.assets = {{1, QStringLiteral("album.mp3"), album}};
+    longLane.audioClips = {{11, 1, 0, 604800000, 1.0, 100},
+                           {12, 1, 0, 1000, 1.0, 100}};
+    if (!check(!validateStudioProject(longLane).isEmpty(),
+               QStringLiteral("Overlong audio lane accepted")))
+      return false;
+    auto json =
+        QJsonDocument::fromJson(encodeStudioProject(scored)).object();
+    json.remove(QStringLiteral("audioClips"));
+    if (!check(decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                       .isEmpty() &&
+                   decoded.audioClips.isEmpty(),
+               QStringLiteral("Missing audio lane does not default to empty")))
+      return false;
+  }
+  {
+    // Waveform bucketing is pure little-endian min/max over even slices.
+    const qint16 samples[] = {0, 1000, -2000, 3000, -3000, 2000, -1000, 0};
+    QByteArray pcm(reinterpret_cast<const char *>(samples), sizeof(samples));
+    const auto peaks = studioBucketAudioPeaks(pcm, 2);
+    if (!check(peaks.size() == 2 && peaks[0].first == -2000 &&
+                   peaks[0].second == 3000 && peaks[1].first == -3000 &&
+                   peaks[1].second == 2000,
+               QStringLiteral("Waveform buckets hold the wrong extremes")))
+      return false;
+    if (!check(studioBucketAudioPeaks({}, 16).isEmpty() &&
+                   studioBucketAudioPeaks(pcm, 0).size() == 1,
+               QStringLiteral("Waveform bucketing mishandles edges")))
+      return false;
+  }
+  {
+    // Peak scheduling terminates past old cache pressure: the cache covers
+    // a whole project, so decoded assets never become missing again.
+    StudioProject scored;
+    for (int i = 0; i < 70; ++i) {
+      StudioSource song;
+      song.durationMs = 60000;
+      song.audioStreams = 1;
+      scored.assets.push_back({static_cast<quint64>(i + 1),
+                               QStringLiteral("song-%1.mp3").arg(i), song});
+      scored.audioClips.push_back({static_cast<quint64>(100 + i),
+                                   static_cast<quint64>(i + 1), 0, 60000, 1.0,
+                                   100});
+    }
+    StudioTimeline lane;
+    lane.setProject(&scored);
+    int rounds = 0;
+    while (rounds++ < 200) {
+      const auto missing = lane.missingAudioPeaks();
+      if (missing.isEmpty())
+        break;
+      lane.cacheAudioPeaks(missing.first(),
+                           QVector<QPair<qint16, qint16>>(1024));
+    }
+    if (!check(rounds < 200 && lane.missingAudioPeaks().isEmpty(),
+               QStringLiteral("Waveform scheduling loops past capacity")))
+      return false;
+  }
+  {
+    // An unlaunchable decoder fails fast instead of spinning on the
+    // watchdog: an executable non-script cannot start at all (ENOEXEC).
+    QTemporaryDir binDir;
+    if (!check(binDir.isValid(), QStringLiteral("No launch-failure folder")))
+      return false;
+    QFile fake(binDir.filePath(QStringLiteral("ffmpeg")));
+    if (!check(
+            fake.open(QIODevice::WriteOnly) &&
+                fake.write("not an executable format") > 0 &&
+                fake.setPermissions(QFileDevice::ReadOwner |
+                                    QFileDevice::WriteOwner |
+                                    QFileDevice::ExeOwner),
+            QStringLiteral("Could not stage fake decoder")))
+      return false;
+    fake.close();
+    const QByteArray savedPath = qgetenv("PATH");
+    qputenv("PATH", binDir.path().toUtf8());
+    QElapsedTimer launchClock;
+    launchClock.start();
+    const auto launched =
+        studioDecodeAudioPeaks(QStringLiteral("/tmp/anything.wav"));
+    const qint64 launchMs = launchClock.elapsed();
+    qputenv("PATH", savedPath);
+    if (!check(launched.isEmpty() && launchMs < 20000,
+               QStringLiteral("Decoder launch failure did not fail fast")))
+      return false;
+  }
+  StudioProject empty;
+  if (!check(
+          decodeStudioProject(encodeStudioProject(empty), decoded).isEmpty() &&
+              decoded == empty,
+          QStringLiteral("Empty project does not persist")))
+    return false;
+  const auto preserved = decoded;
+  auto json = QJsonDocument::fromJson(encodeStudioProject(p)).object();
+  json["schema"] = 999;
+  if (!check(!decodeStudioProject(QJsonDocument(json).toJson(), decoded)
+                     .isEmpty() &&
+                 decoded == preserved,
+             QStringLiteral("Invalid schema mutates project")))
+    return false;
+  json = QJsonDocument::fromJson(encodeStudioProject(p)).object();
+  auto clips = json["clips"].toArray();
+  auto invalidClip = clips[0].toObject();
+  invalidClip["inMs"] = QStringLiteral("1000");
+  clips[0] = invalidClip;
+  json["clips"] = clips;
+  if (!check(
+          !decodeStudioProject(QJsonDocument(json).toJson(), decoded).isEmpty(),
+          QStringLiteral("Mistyped range accepted")))
+    return false;
+  auto invalid = p;
+  invalid.clips[1].id = invalid.clips[0].id;
+  if (!check(!validateStudioProject(invalid).isEmpty(),
+             QStringLiteral("Duplicate scene IDs accepted")))
+    return false;
+  invalid = p;
+  invalid.clips[0].speed = std::numeric_limits<double>::quiet_NaN();
+  if (!check(!validateStudioProject(invalid).isEmpty() &&
+                 studioComposition(invalid).isEmpty(),
+             QStringLiteral("Non-finite speed accepted")))
+    return false;
+  invalid = p;
+  invalid.clips[0].assetId = 999;
+  if (!check(!validateStudioProject(invalid).isEmpty(),
+             QStringLiteral("Unknown asset reference accepted")))
+    return false;
+  if (!check(!decodeStudioProject(QByteArray(4 * 1024 * 1024 + 1, ' '), decoded)
+                  .isEmpty(),
+             QStringLiteral("Unbounded project accepted")))
+    return false;
+
+  QTemporaryDir dir;
+  if (!check(dir.isValid(), QStringLiteral("No temporary project folder")))
+    return false;
+  const QString file = dir.filePath(QStringLiteral("edit.omasnap-project"));
+  p.assets[0].path = dir.filePath(QStringLiteral("unavailable.mp4"));
+  if (!check(saveStudioProject(file, p).isEmpty(),
+             QStringLiteral("Atomic project save failed")))
+    return false;
+  const auto loaded = loadStudioProject(file);
+  const auto permissions = QFileInfo(file).permissions();
+  if (!check(
+          (permissions & (QFileDevice::ReadOwner | QFileDevice::WriteOwner)) ==
+                  (QFileDevice::ReadOwner | QFileDevice::WriteOwner) &&
+              !(permissions &
+                (QFileDevice::ReadGroup | QFileDevice::WriteGroup |
+                 QFileDevice::ReadOther | QFileDevice::WriteOther |
+                 QFileDevice::ExeOwner | QFileDevice::ExeGroup |
+                 QFileDevice::ExeOther)),
+          QStringLiteral("Project permissions expose private source paths")))
+    return false;
+  const QString symlink =
+      dir.filePath(QStringLiteral("linked.omasnap-project"));
+  if (!check(QFile::link(file, symlink) && QFileInfo(symlink).isSymLink() &&
+                 !saveStudioProject(symlink, empty).isEmpty() &&
+                 QFileInfo(symlink).isSymLink() &&
+                 loadStudioProject(file).project == p,
+             QStringLiteral("Project save followed or replaced a symlink")))
+    return false;
+  if (!check(
+          loaded.error.isEmpty() && loaded.project == p &&
+              loaded.missingAssets == QVector<quint64>{1},
+          QStringLiteral("Missing media erased project or was not reported")))
+    return false;
+  if (!check(!saveStudioProject(file, invalid).isEmpty() &&
+                 loadStudioProject(file).project == p,
+             QStringLiteral("Invalid save replaced good project")))
+    return false;
+  if (!check(saveStudioProject(file, empty).isEmpty() &&
+                 loadStudioProject(file).project == empty,
+             QStringLiteral("Saving empty project failed")))
+    return false;
+  return cutChecks(error) && sceneChecks(error) && transitionChecks(error) &&
+         directionalChecks(error);
+}
